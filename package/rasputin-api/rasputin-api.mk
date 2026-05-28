@@ -20,6 +20,10 @@ endif
 
 RASPUTIN_API_SOURCE = rasputin-api-$(RASPUTIN_API_VERSION)-linux-$(RASPUTIN_API_GOARCH).tar.gz
 
+# Flat tarball (binary at root); disable Buildroot's default
+# tar --strip-components=1 so the binary actually extracts.
+RASPUTIN_API_STRIP_COMPONENTS = 0
+
 # The api also bundles the built Next.js UI as static assets. The release
 # tarball is expected to contain `rasputin-api` + a `ui/` dir of static
 # export output. TODO(scaffold): confirm the tarball layout when the

@@ -25,6 +25,11 @@ endif
 
 RASPUTIN_AGENT_SOURCE = rasputin-agent-$(RASPUTIN_AGENT_VERSION)-linux-$(RASPUTIN_AGENT_GOARCH).tar.gz
 
+# Our release tarballs are FLAT (just the binary at the root, no top-level
+# dir). Buildroot's generic-package defaults to tar --strip-components=1,
+# which would strip the binary itself and extract nothing. Disable it.
+RASPUTIN_AGENT_STRIP_COMPONENTS = 0
+
 # TODO(scaffold): add the real hash once a release exists. Until then,
 # leave the hash file absent so Buildroot warns rather than silently
 # trusting an unverified download.
