@@ -1,0 +1,11 @@
+#
+# Rasputin OS external tree — Kconfig entry points.
+# These appear under "External options" in `make menuconfig`.
+#
+
+menu "Rasputin"
+
+source "$BR2_EXTERNAL_RASPUTIN_PATH/package/rasputin-agent/Config.in"
+source "$BR2_EXTERNAL_RASPUTIN_PATH/package/rasputin-api/Config.in"
+
+endmenu

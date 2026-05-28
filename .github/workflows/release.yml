@@ -1,0 +1,117 @@
+name: release
+
+# Cross-compile + ship (locked CI v1 posture — no QEMU/hardware boot-test
+# yet). See os-images/release-pipeline.md.
+#
+# Triggers:
+#   - push of a CalVer tag (e.g. 2026.06.0)  → stable release
+#   - nightly schedule                       → dev prerelease
+#   - manual dispatch
+
+on:
+  push:
+    tags:
+      - "[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9]*"
+  schedule:
+    - cron: "0 7 * * *"   # nightly dev build
+  workflow_dispatch:
+
+permissions:
+  contents: write   # create releases + upload assets
+
+jobs:
+  build:
+    runs-on: ubuntu-latest   # amd64; Buildroot cross-compiles arm64 fine
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - sku: cm5
+            defconfig: rasputin_cm5_defconfig
+            arch: arm64
+            compatible: rasputin-pi5-cm5
+          - sku: n100
+            defconfig: rasputin_n100_defconfig
+            arch: amd64
+            compatible: rasputin-n100
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false   # we add Buildroot via the init script (pinned)
+
+      - name: Compute version (CalVer)
+        id: ver
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            echo "channel=stable" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=$(date -u +%Y.%m.0)-dev.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+            echo "channel=dev" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Init Buildroot (pinned LTS)
+        run: ./scripts/init-buildroot.sh
+
+      # Cache the Buildroot download dir + ccache. Key includes the Buildroot
+      # tag so an LTS bump invalidates cleanly. Warm cache: ~10-20 min vs
+      # ~60-90 min cold. (os-images/release-pipeline.md §6)
+      - name: Cache Buildroot dl + ccache
+        uses: actions/cache@v4
+        with:
+          path: |
+            dl
+            .buildroot-ccache
+          key: br-${{ matrix.sku }}-${{ hashFiles('buildroot/.git/HEAD', format('configs/{0}', matrix.defconfig)) }}
+          restore-keys: br-${{ matrix.sku }}-
+
+      - name: Inject trust root
+        run: |
+          # CI injects the PUBLIC root CA cert (not a secret) into the rootfs
+          # overlay before the build. The signing LEAF key is applied later,
+          # in a discrete step, never in the build job.
+          echo "${{ vars.RASPUTIN_ROOT_CA_PEM }}" \
+            > board/rasputin/common/rootfs-overlay/etc/rasputin/trust/root-ca.pem
+
+      - name: Build
+        env:
+          RASPUTIN_VERSION: ${{ steps.ver.outputs.version }}
+          BR2_DL_DIR: ${{ github.workspace }}/dl
+        run: |
+          make -C buildroot BR2_EXTERNAL=${{ github.workspace }} \
+            O=${{ github.workspace }}/output/${{ matrix.sku }} \
+            ${{ matrix.defconfig }}
+          make -C buildroot BR2_EXTERNAL=${{ github.workspace }} \
+            O=${{ github.workspace }}/output/${{ matrix.sku }}
+
+      - name: Upload unsigned artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.sku }}-${{ steps.ver.outputs.version }}
+          path: |
+            output/${{ matrix.sku }}/images/*.img
+            output/${{ matrix.sku }}/images/*.raucb
+
+  # Discrete signing job: the leaf key (encrypted secret) is scoped to here,
+  # never exposed to the build job. (os-images/release-pipeline.md §3)
+  sign-and-release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: artifacts }
+      - name: Sign .raucb bundles
+        env:
+          RAUC_LEAF_KEY: ${{ secrets.RASPUTIN_LEAF_KEY }}
+          RAUC_LEAF_CERT: ${{ secrets.RASPUTIN_LEAF_CERT }}
+        run: |
+          echo "TODO(scaffold): install rauc, write leaf key/cert to tmpfs,"
+          echo "  rauc resign each .raucb with the chain, compute sha256,"
+          echo "  emit manifest.json (version, per-artifact arch/compatible/"
+          echo "  sha256/signedBy) per os-images/release-pipeline.md §4."
+      - name: Publish GitHub Release
+        run: |
+          echo "TODO(scaffold): gh release create with the signed bundles,"
+          echo "  .img.xz, and manifest.json. Mark prerelease for dev channel."

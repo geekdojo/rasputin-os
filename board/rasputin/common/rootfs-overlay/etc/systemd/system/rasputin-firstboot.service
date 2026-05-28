@@ -1,0 +1,13 @@
+[Unit]
+Description=Rasputin first-boot provisioning (read seed, set role/identity)
+After=local-fs.target
+Before=rasputin-agent.service rasputin-api.service
+ConditionPathExists=!/var/lib/rasputin/.provisioned
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/rasputin/firstboot/rasputin-firstboot.sh
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,22 @@
+[Unit]
+Description=Rasputin control-plane API
+After=network-online.target rasputin-firstboot.service
+Wants=network-online.target
+Requires=rasputin-firstboot.service
+# Role gate: this unit only starts on the controlplane node. On compute
+# nodes the ConditionEnvironment fails and systemd skips it cleanly.
+# rasputin-firstboot ALSO `systemctl enable`s this unit only when
+# role==controlplane — belt and suspenders. See os-images/provisioning.md §2.
+ConditionEnvironment=RASPUTIN_NODE_ROLE=controlplane
+
+[Service]
+EnvironmentFile=-/etc/rasputin/node.env
+Environment=RASPUTIN_DATA_DIR=/var/lib/rasputin
+ExecStart=/usr/bin/rasputin-api
+Restart=always
+RestartSec=2
+WatchdogSec=30
+NotifyAccess=main
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,15 @@
+config BR2_PACKAGE_RASPUTIN_AGENT
+	bool "rasputin-agent"
+	default y
+	help
+	  The Rasputin node agent. Runs on every Rasputin node; dials the
+	  control-plane NATS broker outbound (never listens), reports
+	  inventory + heartbeat, and executes commands (reboot, metrics,
+	  docker, bmc, mesh enroll).
+
+	  Installed from a pre-built, statically-linked release binary
+	  published by the rasputin-control-plane repo's CI — see
+	  package/rasputin-agent/rasputin-agent.mk and the design doc
+	  os-images/buildroot-os.md §5.
+
+	  https://github.com/geekdojo/rasputin-control-plane

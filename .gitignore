@@ -1,0 +1,22 @@
+# Build output
+/output/
+/dl/
+*.img
+*.img.xz
+*.raucb
+*.squashfs
+
+# Buildroot submodule contents are tracked via the gitlink, not the tree
+# (added by scripts/init-buildroot.sh)
+
+# Dev signing material — never commit keys (PKI: control-plane/updates.md §6)
+*.key
+*.pem
+dev-ca/
+# (the build-time root-ca.pem is injected by CI, not committed)
+
+# Per-deployment seed
+rasputin-seed.env
+
+# OS noise
+.DS_Store

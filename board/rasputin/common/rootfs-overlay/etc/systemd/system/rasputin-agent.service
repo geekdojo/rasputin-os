@@ -1,0 +1,22 @@
+[Unit]
+Description=Rasputin node agent
+After=network-online.target rasputin-firstboot.service
+Wants=network-online.target
+Requires=rasputin-firstboot.service
+
+[Service]
+# node.env is written by rasputin-firstboot from the seed partition.
+EnvironmentFile=-/etc/rasputin/node.env
+ExecStart=/usr/bin/rasputin-agent
+Restart=always
+RestartSec=2
+# systemd watchdog — part of the update defense-in-depth (the CM5
+# bootloader can't count boot attempts, so userspace must catch a wedge).
+# The agent calls sd_notify(WATCHDOG=1); if it stops pinging, systemd
+# kills + restarts it, and after enough failures the bootloader retries
+# the other slot. See os-images/buildroot-os.md §3.
+WatchdogSec=30
+NotifyAccess=main
+
+[Install]
+WantedBy=multi-user.target

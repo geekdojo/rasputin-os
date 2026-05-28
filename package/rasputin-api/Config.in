@@ -1,0 +1,14 @@
+config BR2_PACKAGE_RASPUTIN_API
+	bool "rasputin-api"
+	default y
+	help
+	  The Rasputin control-plane backend. Embeds NATS+JetStream, hosts
+	  the SQLite job/inventory/auth stores, serves the web UI + REST/WS
+	  API, and orchestrates the saga job runner.
+
+	  Ships on EVERY Rasputin OS image but its systemd unit only starts
+	  on the controlplane role (ConditionEnvironment=RASPUTIN_NODE_ROLE=
+	  controlplane). See os-images/provisioning.md §2.
+
+	  Installed from a pre-built release binary — see
+	  package/rasputin-api/rasputin-api.mk.

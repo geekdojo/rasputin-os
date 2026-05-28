@@ -1,0 +1,10 @@
+# Raspberry Pi CM5 firmware config (os-images/buildroot-os.md §3).
+# Minimal starter — refine when the RPi firmware package set is pinned.
+
+arm_64bit=1
+kernel=Image
+# A/B is driven by autoboot.txt's [all]/[tryboot] sections + the one-shot
+# tryboot flag, not by config.txt directly. RAUC's custom backend rewrites
+# autoboot.txt on mark-good / set-primary.
+auto_initramfs=1
+disable_overscan=1
