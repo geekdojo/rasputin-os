@@ -3,24 +3,67 @@ name: release
 # Cross-compile + ship (locked CI v1 posture — no QEMU/hardware boot-test
 # yet). See os-images/release-pipeline.md.
 #
+# SCAFFOLD GATE: this repo is a scaffold. The full Buildroot image build
+# cannot succeed yet — the defconfigs carry starter kernel/BSP options and
+# the package .mk files need a matching control-plane release to download
+# (see README "Status"). So the heavy `build` job runs ONLY on a release
+# tag or an explicit opt-in dispatch; every push gets the cheap `validate`
+# job instead, so the repo isn't perpetually red while it's a scaffold.
+#
 # Triggers:
-#   - push of a CalVer tag (e.g. 2026.06.0)  → stable release
-#   - nightly schedule                       → dev prerelease
-#   - manual dispatch
+#   - push of a CalVer tag (e.g. 2026.06.0)  → validate + build + release
+#   - manual dispatch (full_build=false)     → validate only
+#   - manual dispatch (full_build=true)      → validate + build (no release)
 
 on:
   push:
     tags:
       - "[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9]*"
-  schedule:
-    - cron: "0 7 * * *"   # nightly dev build
   workflow_dispatch:
+    inputs:
+      full_build:
+        description: "Attempt the full Buildroot build (needs real BSP defconfigs + a published control-plane release; will fail until then)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write   # create releases + upload assets
 
 jobs:
+  # Always-on, fast, deterministic. Confirms the external tree is structurally
+  # sane without a multi-hour Buildroot run. Green at the scaffold stage.
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Shell script syntax
+        run: |
+          set -e
+          for f in scripts/*.sh \
+                   board/rasputin/common/*.sh \
+                   board/rasputin/common/rootfs-overlay/usr/lib/rasputin/firstboot/*.sh; do
+            echo "bash -n $f"; bash -n "$f"
+          done
+      - name: External tree structure
+        run: |
+          set -e
+          req="external.desc external.mk Config.in
+               configs/rasputin_cm5_defconfig configs/rasputin_n100_defconfig
+               package/rasputin-agent/rasputin-agent.mk
+               package/rasputin-api/rasputin-api.mk
+               board/rasputin/cm5/genimage.cfg
+               board/rasputin/n100/genimage.cfg
+               board/rasputin/common/post-image.sh"
+          for f in $req; do
+            test -f "$f" && echo "ok  $f" || { echo "MISSING $f" >&2; exit 1; }
+          done
+          grep -q '^name: RASPUTIN' external.desc
+          echo "external tree structure OK"
+
   build:
+    needs: validate
+    # Scaffold gate — see the header comment.
+    if: ${{ startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full_build) }}
     runs-on: ubuntu-latest   # amd64; Buildroot cross-compiles arm64 fine
     strategy:
       fail-fast: false
@@ -37,7 +80,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: false   # we add Buildroot via the init script (pinned)
+          submodules: false   # Buildroot is added by the init script (pinned)
 
       - name: Compute version (CalVer)
         id: ver
@@ -53,8 +96,7 @@ jobs:
       - name: Init Buildroot (pinned LTS)
         run: ./scripts/init-buildroot.sh
 
-      # Cache the Buildroot download dir + ccache. Key includes the Buildroot
-      # tag so an LTS bump invalidates cleanly. Warm cache: ~10-20 min vs
+      # Cache the Buildroot download dir + ccache. Warm cache: ~10-20 min vs
       # ~60-90 min cold. (os-images/release-pipeline.md §6)
       - name: Cache Buildroot dl + ccache
         uses: actions/cache@v4
@@ -62,7 +104,11 @@ jobs:
           path: |
             dl
             .buildroot-ccache
-          key: br-${{ matrix.sku }}-${{ hashFiles('buildroot/.git/HEAD', format('configs/{0}', matrix.defconfig)) }}
+          # Key on real, checked-in files: the defconfig + the init script
+          # (which pins the Buildroot tag). Both exist at checkout time.
+          # NOT buildroot/.git/HEAD — that's a submodule gitlink file, not a
+          # hashable path, and breaks hashFiles ("template is not valid").
+          key: br-${{ matrix.sku }}-${{ hashFiles(format('configs/{0}', matrix.defconfig), 'scripts/init-buildroot.sh') }}
           restore-keys: br-${{ matrix.sku }}-
 
       - name: Inject trust root
@@ -94,10 +140,11 @@ jobs:
 
   # Discrete signing job: the leaf key (encrypted secret) is scoped to here,
   # never exposed to the build job. (os-images/release-pipeline.md §3)
+  # Only on a real release tag.
   sign-and-release:
     needs: build
+    if: ${{ startsWith(github.ref, 'refs/tags/') }}
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
