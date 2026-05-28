@@ -12,7 +12,7 @@
 # placeholders that will NOT download until pointed at a real release.
 ################################################################################
 
-RASPUTIN_AGENT_VERSION = 0.1.0-dev
+RASPUTIN_AGENT_VERSION = 0.1.0
 RASPUTIN_AGENT_SITE = https://github.com/geekdojo/rasputin-control-plane/releases/download/v$(RASPUTIN_AGENT_VERSION)
 
 # Buildroot maps the target arch; the control-plane CI publishes one
