@@ -9,7 +9,7 @@
 # control-plane repo publishes release binaries.
 ################################################################################
 
-RASPUTIN_API_VERSION = 0.0.0-dev
+RASPUTIN_API_VERSION = 0.1.0-dev
 RASPUTIN_API_SITE = https://github.com/geekdojo/rasputin-control-plane/releases/download/v$(RASPUTIN_API_VERSION)
 
 ifeq ($(BR2_aarch64),y)
