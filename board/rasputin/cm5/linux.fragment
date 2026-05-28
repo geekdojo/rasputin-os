@@ -1,0 +1,36 @@
+# Rasputin kernel config fragment — CM5 (arm64, BCM2712), merged on top of
+# the bcm2712 defconfig. Only the Rasputin-critical options; the bcm2712
+# config carries the Pi peripherals (NIC, USB, SD/eMMC, RP1, etc.).
+
+# --- read-only squashfs rootfs + dm-verity (RAUC verity bundles) ---
+CONFIG_SQUASHFS=y
+CONFIG_SQUASHFS_XZ=y
+CONFIG_BLK_DEV_DM=y
+CONFIG_DM_VERITY=y
+CONFIG_OVERLAY_FS=y
+
+# --- serial console (Pi PL011 UART) ---
+CONFIG_SERIAL_AMBA_PL011=y
+CONFIG_SERIAL_AMBA_PL011_CONSOLE=y
+
+# --- watchdog (systemd-watchdog leg; the Pi has a hardware watchdog) ---
+CONFIG_WATCHDOG=y
+CONFIG_BCM2835_WDT=y
+
+# --- Docker / container essentials (same load-bearing subset as amd64) ---
+CONFIG_NAMESPACES=y
+CONFIG_NET_NS=y
+CONFIG_PID_NS=y
+CONFIG_USER_NS=y
+CONFIG_CGROUPS=y
+CONFIG_MEMCG=y
+CONFIG_BLK_CGROUP=y
+CONFIG_CGROUP_PIDS=y
+CONFIG_BRIDGE=y
+CONFIG_VETH=y
+CONFIG_BRIDGE_NETFILTER=y
+CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y
+CONFIG_NETFILTER_XT_MATCH_CONNTRACK=y
+CONFIG_NF_NAT=y
+CONFIG_IP_NF_NAT=y
+CONFIG_IP_NF_TARGET_MASQUERADE=y

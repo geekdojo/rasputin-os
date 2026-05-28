@@ -1,9 +1,14 @@
 # Rasputin OS — LattePanda Mu / Intel N100 (amd64).
 #
-# STARTER defconfig — same evolve loop as the CM5 config:
+# Derived from Buildroot's pc_x86_64_efi reference config (generic x86_64
+# UEFI — boots in QEMU and on the N100 alike), plus systemd, squashfs+verity
+# rootfs, Docker, RAUC A/B, and the Rasputin packages.
+#
+# Reference-grounded STARTER, not a finished BSP. The first `make` + QEMU
+# boot will surface gaps (Buildroot prints a kernel-config checklist for
+# Docker; board-specific drivers get tuned on real hardware). Evolve loop:
 #   make BR2_EXTERNAL=$PWD O=output/n100 rasputin_n100_defconfig
-#   make BR2_EXTERNAL=$PWD O=output/n100 menuconfig
-#   make BR2_EXTERNAL=$PWD O=output/n100 savedefconfig
+#   make BR2_EXTERNAL=$PWD O=output/n100 linux-menuconfig   # then savedefconfig
 
 # --- target arch ---
 BR2_x86_64=y
@@ -11,17 +16,28 @@ BR2_x86_corei7=y
 
 # --- toolchain / init / libc ---
 BR2_TOOLCHAIN_BUILDROOT_GLIBC=y
+BR2_TOOLCHAIN_BUILDROOT_CXX=y
 BR2_INIT_SYSTEMD=y
 BR2_SYSTEM_DHCP="eth0"
 BR2_TARGET_GENERIC_HOSTNAME="rasputin"
-BR2_TARGET_GENERIC_ISSUE="Rasputin OS"
+BR2_TARGET_GENERIC_ISSUE="Welcome to Rasputin OS"
+# systemd logs + a getty on the serial console so QEMU (and a real serial
+# cable) can watch boot. The QEMU smoke job greps this output.
+BR2_TARGET_GENERIC_GETTY_PORT="ttyS0"
 
-# --- kernel (mainline) ---
+# --- kernel: arch default config + Rasputin fragment ---
+# LATEST_VERSION tracks Buildroot's tested default for this release; pin a
+# specific LTS (e.g. 6.12.x) for a real release. The arch default carries
+# the common x86 drivers (AHCI/NVMe/e1000e/igc/xhci/EFI); the fragment adds
+# what our rootfs model needs (squashfs, dm-verity, overlay, virtio for
+# QEMU, Intel TCO watchdog, Docker essentials).
 BR2_LINUX_KERNEL=y
-# TODO(scaffold): pin a 6.x mainline kernel + a config with the N100 +
-# i915/xe + virtio (for QEMU dev) drivers.
+BR2_LINUX_KERNEL_LATEST_VERSION=y
+BR2_LINUX_KERNEL_USE_ARCH_DEFAULT_CONFIG=y
+BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_RASPUTIN_PATH)/board/rasputin/n100/linux.fragment"
+BR2_LINUX_KERNEL_NEEDS_HOST_OPENSSL=y
 
-# --- bootloader: GRUB (UEFI) — gives a real boot-attempts counter ---
+# --- bootloader: GRUB2 (UEFI) — real boot-attempts counter via grubenv ---
 BR2_TARGET_GRUB2=y
 BR2_TARGET_GRUB2_X86_64_EFI=y
 
@@ -29,21 +45,26 @@ BR2_TARGET_GRUB2_X86_64_EFI=y
 BR2_PACKAGE_RAUC=y
 BR2_PACKAGE_HOST_RAUC=y
 BR2_PACKAGE_SQUASHFS=y
-BR2_PACKAGE_CRYPTSETUP=y
+BR2_PACKAGE_CRYPTSETUP=y          # veritysetup for dm-verity at runtime
+
+# --- host tools for image assembly (post-image.sh) ---
+BR2_PACKAGE_HOST_GENIMAGE=y
+BR2_PACKAGE_HOST_DOSFSTOOLS=y
+BR2_PACKAGE_HOST_MTOOLS=y
 
 # --- app primitive ---
 BR2_PACKAGE_DOCKER_ENGINE=y
 BR2_PACKAGE_DOCKER_CLI=y
 
-# --- Rasputin packages ---
+# --- Rasputin packages (this external tree) ---
 BR2_PACKAGE_RASPUTIN_AGENT=y
 BR2_PACKAGE_RASPUTIN_API=y
 
-# --- rootfs ---
+# --- rootfs: squashfs (read-only, verity-friendly) ---
 BR2_TARGET_ROOTFS_SQUASHFS=y
 BR2_TARGET_ROOTFS_SQUASHFS4_XZ=y
 
-# --- overlay + hooks ---
+# --- overlay + hooks (shared across both arches) ---
 BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_RASPUTIN_PATH)/board/rasputin/common/rootfs-overlay"
 BR2_ROOTFS_POST_BUILD_SCRIPT="$(BR2_EXTERNAL_RASPUTIN_PATH)/board/rasputin/common/post-build.sh"
 BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL_RASPUTIN_PATH)/board/rasputin/common/post-image.sh"

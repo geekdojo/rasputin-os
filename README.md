@@ -20,19 +20,26 @@ This repo implements the design in the geekdojo wiki:
 
 ## Status
 
-**Scaffold (2026-05-28).** Structure, documented stubs, and CI are in
-place; this does **not** yet produce a verified-booting image. Every spot
-needing real values before a first build is marked `TODO(scaffold)`. The
-known gaps:
+**Bring-up (2026-05-28).** Structure + CI are in place and the defconfigs
+are now reference-grounded (N100 from Buildroot's `pc_x86_64_efi`; CM5 from
+the Pi 5 reference), each with a kernel-config fragment for the
+squashfs/dm-verity/overlay/virtio/Docker bits our rootfs model needs. CI
+has an always-green `validate` job and an **amd64 QEMU boot-smoke** job
+(needs no hardware). This does **not** yet produce a verified-booting image
+— the first `make` + QEMU run is the bring-up loop. Remaining work, in
+order:
 
-- Buildroot kernel/BSP options in both defconfigs are starters — refine via
-  `menuconfig` + `savedefconfig`.
-- The CM5 RPi-firmware `tryboot` RAUC backend hook scripts aren't written
-  (`board/rasputin/cm5/rauc-hooks/`).
-- The package `.mk` files point at control-plane release binaries that
-  don't exist yet (no `.hash` ⇒ they won't download until pointed at a real
-  release).
-- The CI signing + release-publish steps are stubbed.
+- **amd64:** run `make` + the QEMU smoke job; fix whatever the first boot
+  surfaces (Buildroot prints a Docker kernel-config checklist; tune the
+  GRUB `console=ttyS0` cmdline so serial output is captured). No hardware
+  needed for this.
+- **CM5:** needs the real Pi 5 / CM5 for final validation — confirm the Pi 5
+  firmware variant + blob set, swap the DTS to the CM5 carrier
+  (`bcm2712-rpi-cm5-*`), and write the `tryboot` RAUC backend hook scripts
+  (`board/rasputin/cm5/rauc-hooks/`). Flagged `BRING-UP:` in the defconfig.
+- **Release:** the CI signing + publish steps are stubbed (`TODO(scaffold)`).
+- **Binaries:** the package `.mk` files point at a control-plane release;
+  bump the versions to a published tag and drop in its `.hash` files.
 
 ## Layout
 

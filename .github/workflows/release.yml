@@ -29,6 +29,12 @@ on:
 permissions:
   contents: write   # create releases + upload assets
 
+env:
+  # Node 20 is EOL on GitHub runners (forced off by June 2026). Opt the JS
+  # actions (checkout, cache, upload/download-artifact) into Node 24 now —
+  # clears the deprecation warning.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   # Always-on, fast, deterministic. Confirms the external tree is structurally
   # sane without a multi-hour Buildroot run. Green at the scaffold stage.
@@ -138,11 +144,64 @@ jobs:
             output/${{ matrix.sku }}/images/*.img
             output/${{ matrix.sku }}/images/*.raucb
 
+  # Boot-smoke the amd64 image in QEMU — the relaxation of "no boot test in
+  # CI" that needs NO hardware (the N100 is generic x86_64; a generic UEFI
+  # image boots in QEMU and on the real board alike). Catches boot/rootfs/
+  # RAUC regressions automatically. The arm64/CM5 image can't be fully
+  # smoke-tested here (Pi firmware + tryboot need a real Pi) — that stays
+  # manual on hardware.
+  #
+  # TODO(bring-up): tune two things on the first green build —
+  #   (a) the kernel cmdline needs `console=ttyS0,115200` so systemd logs to
+  #       the serial QEMU captures (wire it in the GRUB cfg / genimage);
+  #   (b) confirm the success marker string below matches the boot output.
+  smoke-amd64:
+    needs: build
+    if: ${{ startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full_build) }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install QEMU + OVMF (UEFI firmware)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 ovmf
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: n100-*
+          merge-multiple: true
+          path: img
+      - name: Boot headless, wait for multi-user.target
+        run: |
+          set -x
+          IMG=$(ls img/*.img | head -1)
+          test -n "$IMG" || { echo "no n100 .img artifact"; exit 1; }
+          cp /usr/share/OVMF/OVMF_VARS.fd /tmp/vars.fd
+          ( timeout 300 qemu-system-x86_64 \
+              -machine q35 -m 2048 -smp 2 -nographic \
+              -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE.fd \
+              -drive if=pflash,format=raw,file=/tmp/vars.fd \
+              -drive file="$IMG",format=raw,if=virtio \
+              -serial mon:stdio > /tmp/console.log 2>&1 ) &
+          QPID=$!
+          ok=0
+          for _ in $(seq 1 120); do
+            if grep -qE "Reached target .*Multi-User|Welcome to Rasputin" /tmp/console.log; then ok=1; break; fi
+            sleep 2
+          done
+          kill "$QPID" 2>/dev/null || true
+          echo "----- last 60 lines of console -----"; tail -60 /tmp/console.log || true
+          [ "$ok" = 1 ] || { echo "::error::image did not reach multi-user in QEMU"; exit 1; }
+          echo "amd64 image booted to multi-user in QEMU"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: smoke-amd64-console
+          path: /tmp/console.log
+
   # Discrete signing job: the leaf key (encrypted secret) is scoped to here,
   # never exposed to the build job. (os-images/release-pipeline.md §3)
   # Only on a real release tag.
   sign-and-release:
-    needs: build
+    needs: [build, smoke-amd64]
     if: ${{ startsWith(github.ref, 'refs/tags/') }}
     runs-on: ubuntu-latest
     steps:
