@@ -69,7 +69,10 @@ jobs:
   build:
     needs: validate
     # Scaffold gate — see the header comment.
-    if: ${{ startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full_build) }}
+    # full_build arrives as a real boolean from the UI checkbox but as the
+    # STRING "true" via the API / `gh -f`. Accept both. (Defaults to false
+    # if the input wasn't set at all.)
+    if: ${{ startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && (inputs.full_build == true || inputs.full_build == 'true')) }}
     runs-on: ubuntu-latest   # amd64; Buildroot cross-compiles arm64 fine
     strategy:
       fail-fast: false
@@ -157,7 +160,10 @@ jobs:
   #   (b) confirm the success marker string below matches the boot output.
   smoke-amd64:
     needs: build
-    if: ${{ startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full_build) }}
+    # full_build arrives as a real boolean from the UI checkbox but as the
+    # STRING "true" via the API / `gh -f`. Accept both. (Defaults to false
+    # if the input wasn't set at all.)
+    if: ${{ startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && (inputs.full_build == true || inputs.full_build == 'true')) }}
     runs-on: ubuntu-latest
     steps:
       - name: Install QEMU + OVMF (UEFI firmware)
