@@ -140,6 +140,37 @@ jobs:
           sudo docker image prune --all --force 2>/dev/null || true
           df -h /
 
+      # The agent/api binaries live in a PRIVATE control-plane release, so
+      # Buildroot's anonymous downloader gets a 404. Pre-place the tarballs
+      # into Buildroot's dl/ cache here, authenticated with a fine-grained
+      # PAT (Contents:read on geekdojo/rasputin-control-plane). With no .hash
+      # file present, Buildroot's dl-wrapper finds the cached file and skips
+      # the network fetch entirely. See os-images/release-pipeline.md §5.
+      - name: Fetch vendored binaries (private control-plane release)
+        env:
+          GH_TOKEN: ${{ secrets.CONTROL_PLANE_RELEASE_TOKEN }}
+        run: |
+          set -euo pipefail
+          arch='${{ matrix.arch }}'        # amd64 (n100) | arm64 (cm5)
+          dl='${{ github.workspace }}/dl'
+          fetch() {
+            pkg=$1
+            var=$(printf '%s' "$pkg" | tr 'a-z-' 'A-Z_')   # rasputin-agent → RASPUTIN_AGENT
+            ver=$(sed -n "s/^${var}_VERSION = //p" "package/$pkg/$pkg.mk" | tr -d '[:space:]')
+            test -n "$ver" || { echo "::error::could not parse ${var}_VERSION from package/$pkg/$pkg.mk"; exit 1; }
+            src="$pkg-$ver-linux-$arch.tar.gz"
+            mkdir -p "$dl/$pkg"
+            echo "→ fetching $src into dl/$pkg/"
+            gh release download "v$ver" \
+              --repo geekdojo/rasputin-control-plane \
+              --pattern "$src" \
+              --dir "$dl/$pkg" \
+              --clobber
+          }
+          fetch rasputin-agent
+          fetch rasputin-api
+          echo "----- dl/ tarballs -----"; find "$dl" -name '*.tar.gz' -print
+
       - name: Build
         env:
           RASPUTIN_VERSION: ${{ steps.ver.outputs.version }}

@@ -36,6 +36,10 @@ BR2_LINUX_KERNEL_LATEST_VERSION=y
 BR2_LINUX_KERNEL_USE_ARCH_DEFAULT_CONFIG=y
 BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_RASPUTIN_PATH)/board/rasputin/n100/linux.fragment"
 BR2_LINUX_KERNEL_NEEDS_HOST_OPENSSL=y
+# x86_64 enables the ORC unwinder, so the kernel builds objtool as a host
+# tool — and objtool #includes <gelf.h>. Pull host-elfutils/libelf in (the
+# arm64/CM5 kernel doesn't build objtool, so its defconfig omits this).
+BR2_LINUX_KERNEL_NEEDS_HOST_LIBELF=y
 
 # --- bootloader: GRUB2 (UEFI) — real boot-attempts counter via grubenv ---
 BR2_TARGET_GRUB2=y
