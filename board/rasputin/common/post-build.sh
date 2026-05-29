@@ -11,7 +11,10 @@
 set -eu
 TARGET_DIR="$1"
 
-# Enable agent + firstboot on every image.
+# Enable agent + firstboot on every image. systemd's "enabled" state is just
+# a symlink in <target>.wants/; create that dir first — `ln` won't make
+# parents, and a freshly-assembled target has no multi-user.target.wants yet.
+mkdir -p "$TARGET_DIR/etc/systemd/system/multi-user.target.wants"
 ln -sf /etc/systemd/system/rasputin-firstboot.service \
 	"$TARGET_DIR/etc/systemd/system/multi-user.target.wants/rasputin-firstboot.service"
 ln -sf /etc/systemd/system/rasputin-agent.service \
