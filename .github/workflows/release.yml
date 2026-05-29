@@ -145,7 +145,8 @@ jobs:
       # into Buildroot's dl/ cache here, authenticated with a fine-grained
       # PAT (Contents:read on geekdojo/rasputin-control-plane). With no .hash
       # file present, Buildroot's dl-wrapper finds the cached file and skips
-      # the network fetch entirely. See os-images/release-pipeline.md §5.
+      # the network fetch entirely. See os-images/release-pipeline.md §1
+      # ("Fetching the vendored agent/api binaries").
       - name: Fetch vendored binaries (private control-plane release)
         env:
           GH_TOKEN: ${{ secrets.CONTROL_PLANE_RELEASE_TOKEN }}
