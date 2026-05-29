@@ -105,14 +105,23 @@ jobs:
       - name: Init Buildroot (pinned LTS)
         run: ./scripts/init-buildroot.sh
 
-      # Cache the Buildroot download dir + ccache. Warm cache: ~10-20 min vs
-      # ~60-90 min cold. (os-images/release-pipeline.md §6)
-      - name: Cache Buildroot dl + ccache
-        uses: actions/cache@v4
+      # Restore the Buildroot download dir + ccache. Warm ccache: kernel +
+      # packages recompile in minutes vs ~2-3 h cold. (release-pipeline.md §6)
+      #
+      # SPLIT restore/save (not the one-shot actions/cache): the unified action
+      # only saves on job SUCCESS, so a build that fails mid-bring-up would
+      # never warm the cache and every retry stays cold. The discrete save
+      # step below runs with `if: always()`.
+      #
+      # ccache lives at the default $HOME/.buildroot-ccache (BR2_CCACHE=y, no
+      # dir override needed). dl is workspace-relative (BR2_DL_DIR).
+      - name: Restore Buildroot dl + ccache
+        id: brcache
+        uses: actions/cache/restore@v4
         with:
           path: |
             dl
-            .buildroot-ccache
+            ~/.buildroot-ccache
           # Key on real, checked-in files: the defconfig + the init script
           # (which pins the Buildroot tag). Both exist at checkout time.
           # NOT buildroot/.git/HEAD — that's a submodule gitlink file, not a
@@ -182,6 +191,18 @@ jobs:
             ${{ matrix.defconfig }}
           make -C buildroot BR2_EXTERNAL=${{ github.workspace }} \
             O=${{ github.workspace }}/output/${{ matrix.sku }}
+
+      # Save even when Build fails (if: always) so the next bring-up iteration
+      # gets a warm ccache. Skip when restore was an exact key hit (nothing
+      # new to store under that key). See the Restore step's rationale.
+      - name: Save Buildroot dl + ccache
+        if: always() && steps.brcache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            dl
+            ~/.buildroot-ccache
+          key: br-${{ matrix.sku }}-${{ hashFiles(format('configs/{0}', matrix.defconfig), 'scripts/init-buildroot.sh') }}
 
       - name: Upload unsigned artifacts
         uses: actions/upload-artifact@v4

@@ -15,6 +15,10 @@
 BR2_aarch64=y
 BR2_cortex_a76=y
 
+# --- build: ccache (CI caches ~/.buildroot-ccache across runs; warm rebuilds
+# of the kernel + packages drop from hours to minutes — release-pipeline.md §6) ---
+BR2_CCACHE=y
+
 # --- toolchain / init / libc ---
 BR2_TOOLCHAIN_BUILDROOT_GLIBC=y
 BR2_TOOLCHAIN_BUILDROOT_CXX=y
