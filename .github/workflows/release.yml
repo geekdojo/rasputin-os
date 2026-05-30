@@ -252,10 +252,21 @@ jobs:
           set -x
           IMG=$(ls img/*.img | head -1)
           test -n "$IMG" || { echo "no n100 .img artifact"; exit 1; }
-          cp /usr/share/OVMF/OVMF_VARS.fd /tmp/vars.fd
+          # Ubuntu's ovmf package renamed the firmware files (the un-suffixed
+          # OVMF_CODE.fd / OVMF_VARS.fd are gone on 24.04+; the 4M variants
+          # are the modern names, and the secboot ones require signed
+          # bootloaders which our GRUB isn't). Pick whichever non-secboot
+          # variant is installed.
+          OVMF_CODE=$(ls /usr/share/OVMF/OVMF_CODE*.fd 2>/dev/null | grep -v secboot | head -1)
+          OVMF_VARS=$(ls /usr/share/OVMF/OVMF_VARS*.fd 2>/dev/null | grep -v secboot | head -1)
+          if [ -z "$OVMF_CODE" ] || [ -z "$OVMF_VARS" ]; then
+            echo "::error::OVMF firmware not found"; ls -la /usr/share/OVMF/ || true; exit 1
+          fi
+          echo "using OVMF code=$OVMF_CODE vars=$OVMF_VARS"
+          cp "$OVMF_VARS" /tmp/vars.fd
           ( timeout 300 qemu-system-x86_64 \
               -machine q35 -m 2048 -smp 2 -nographic \
-              -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE.fd \
+              -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
               -drive if=pflash,format=raw,file=/tmp/vars.fd \
               -drive file="$IMG",format=raw,if=virtio \
               -serial mon:stdio > /tmp/console.log 2>&1 ) &
