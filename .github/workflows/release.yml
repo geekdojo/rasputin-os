@@ -225,10 +225,17 @@ jobs:
   #   (b) confirm the success marker string below matches the boot output.
   smoke-amd64:
     needs: build
+    # Run as long as the workflow wasn't cancelled — !cancelled() decouples
+    # smoke from cm5: with `fail-fast: false`, needs.build.result is 'failure'
+    # if ANY matrix entry failed, which would otherwise skip smoke when n100
+    # built fine but cm5 didn't (cm5 is hardware bring-up; it shouldn't block
+    # amd64 QEMU validation). If n100 also failed, the artifact-download step
+    # below surfaces that cleanly.
+    #
     # full_build arrives as a real boolean from the UI checkbox but as the
     # STRING "true" via the API / `gh -f`. Accept both. (Defaults to false
     # if the input wasn't set at all.)
-    if: ${{ startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && (inputs.full_build == true || inputs.full_build == 'true')) }}
+    if: ${{ !cancelled() && (startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && (inputs.full_build == true || inputs.full_build == 'true'))) }}
     runs-on: ubuntu-latest
     steps:
       - name: Install QEMU + OVMF (UEFI firmware)
