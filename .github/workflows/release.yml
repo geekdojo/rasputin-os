@@ -96,7 +96,12 @@ jobs:
         run: |
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
             echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-            echo "channel=stable" >> "$GITHUB_OUTPUT"
+            # `-dev` suffix in the tag → dev channel (e.g. 2026.06.0-dev.1).
+            # Plain CalVer (e.g. 2026.06.0) → stable.
+            case "${GITHUB_REF_NAME}" in
+              *-dev*) echo "channel=dev"    >> "$GITHUB_OUTPUT" ;;
+              *)      echo "channel=stable" >> "$GITHUB_OUTPUT" ;;
+            esac
           else
             echo "version=$(date -u +%Y.%m.0)-dev.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
             echo "channel=dev" >> "$GITHUB_OUTPUT"
@@ -210,7 +215,11 @@ jobs:
           name: ${{ matrix.sku }}-${{ steps.ver.outputs.version }}
           path: |
             output/${{ matrix.sku }}/images/*.img
-            output/${{ matrix.sku }}/images/*.raucb
+            output/${{ matrix.sku }}/images/bundle/rootfs.img
+            output/${{ matrix.sku }}/images/bundle/manifest.raucm
+          # post-image.sh no longer produces a .raucb in the build job —
+          # the leaf signing key never enters the build runner. The bundle/
+          # contents above are what sign-and-release feeds to `rauc bundle`.
 
   # Boot-smoke the amd64 image in QEMU — the relaxation of "no boot test in
   # CI" that needs NO hardware (the N100 is generic x86_64; a generic UEFI
@@ -293,27 +302,152 @@ jobs:
           name: smoke-amd64-console
           path: /tmp/console.log
 
-  # Discrete signing job: the leaf key (encrypted secret) is scoped to here,
-  # never exposed to the build job. (os-images/release-pipeline.md §3)
-  # Only on a real release tag.
+  # Discrete signing + publish job — the leaf key (encrypted secret) is
+  # scoped to HERE and nowhere else. Materialised onto an in-memory tmpfs
+  # for the duration of `rauc bundle`, then wiped. (release-pipeline.md §3)
+  #
+  # Only on a CalVer tag push. To exercise this path before a real release
+  # cut, push a `-dev.N` suffixed tag (e.g. 2026.05.0-dev.1) — same shape,
+  # marked as prerelease.
   sign-and-release:
     needs: [build, smoke-amd64]
     if: ${{ startsWith(github.ref, 'refs/tags/') }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
+
+      - name: Compute version (CalVer, same logic as build)
+        id: ver
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          case "$VERSION" in
+            *-dev*) CHANNEL=dev    ; PRERELEASE=true  ;;
+            *)      CHANNEL=stable ; PRERELEASE=false ;;
+          esac
+          echo "version=$VERSION"       >> "$GITHUB_OUTPUT"
+          echo "channel=$CHANNEL"       >> "$GITHUB_OUTPUT"
+          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
+
+      - name: Install rauc + xz
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends rauc xz-utils
+
       - uses: actions/download-artifact@v4
-        with: { path: artifacts }
-      - name: Sign .raucb bundles
+        with:
+          path: artifacts
+
+      - name: Layout artifacts (one dir per SKU)
+        run: |
+          set -eu
+          ls -R artifacts/ | head -40
+          # The build job named each artifact "<sku>-<version>". We get one
+          # subdir per SKU containing: <sku>-<version>.img + bundle/{rootfs.img,manifest.raucm}.
+          for d in artifacts/*-${{ steps.ver.outputs.version }}; do
+            sku=$(basename "$d" | sed "s/-${{ steps.ver.outputs.version }}\$//")
+            echo "::group::SKU $sku"
+            ls -la "$d" "$d/bundle" 2>/dev/null || true
+            echo "::endgroup::"
+          done
+
+      - name: Materialise signing material to tmpfs
+        id: mat
         env:
-          RAUC_LEAF_KEY: ${{ secrets.RASPUTIN_LEAF_KEY }}
-          RAUC_LEAF_CERT: ${{ secrets.RASPUTIN_LEAF_CERT }}
+          LEAF_KEY:  ${{ secrets.RASPUTIN_LEAF_KEY }}
+          LEAF_CERT: ${{ secrets.RASPUTIN_LEAF_CERT }}
+          ROOT_PEM:  ${{ vars.RASPUTIN_ROOT_CA_PEM }}
         run: |
-          echo "TODO(scaffold): install rauc, write leaf key/cert to tmpfs,"
-          echo "  rauc resign each .raucb with the chain, compute sha256,"
-          echo "  emit manifest.json (version, per-artifact arch/compatible/"
-          echo "  sha256/signedBy) per os-images/release-pipeline.md §4."
+          set -eu
+          if [ -z "${LEAF_KEY:-}" ] || [ -z "${LEAF_CERT:-}" ] || [ -z "${ROOT_PEM:-}" ]; then
+            echo "::error::missing one of RASPUTIN_LEAF_KEY / RASPUTIN_LEAF_CERT (repo secrets) or RASPUTIN_ROOT_CA_PEM (org variable)"; exit 1
+          fi
+          sudo mkdir -p /mnt/rasputin-sign
+          sudo mount -t tmpfs -o size=8M,mode=0700,uid=$(id -u),gid=$(id -g) tmpfs /mnt/rasputin-sign
+          umask 077
+          printf '%s' "$LEAF_KEY"  > /mnt/rasputin-sign/leaf.key
+          printf '%s' "$LEAF_CERT" > /mnt/rasputin-sign/leaf-chain.pem
+          printf '%s' "$ROOT_PEM"  > /mnt/rasputin-sign/root-ca.pem
+          # Sanity-check the chain locally before signing anything with it.
+          openssl verify -CAfile /mnt/rasputin-sign/root-ca.pem \
+            <(awk '/-----BEGIN CERTIFICATE-----/{p=1} p; /-----END CERTIFICATE-----/{p=0; exit}' /mnt/rasputin-sign/leaf-chain.pem) \
+            || { echo "::error::leaf cert chain does not verify against root"; exit 1; }
+          echo "tmpfs=/mnt/rasputin-sign" >> "$GITHUB_OUTPUT"
+
+      - name: Sign .raucb bundles + compress .img + collect metadata
+        id: sign
+        run: |
+          set -eu
+          mkdir -p release-out
+          : > /tmp/manifest-artifacts.jsonl
+          for d in artifacts/*-${{ steps.ver.outputs.version }}; do
+            sku=$(basename "$d" | sed "s/-${{ steps.ver.outputs.version }}\$//")
+            ver="${{ steps.ver.outputs.version }}"
+
+            # Derive arch/compatible from the manifest.raucm the build wrote
+            # (matches what's baked into the bundle — single source of truth).
+            compatible=$(awk -F'=' '/^compatible=/{print $2}' "$d/bundle/manifest.raucm")
+            case "$sku" in n100) arch=amd64 ;; cm5) arch=arm64 ;; esac
+
+            echo "::group::Sign $sku (compatible=$compatible)"
+            rauc bundle \
+              --cert="/mnt/rasputin-sign/leaf-chain.pem" \
+              --key="/mnt/rasputin-sign/leaf.key" \
+              --signing-keyring="/mnt/rasputin-sign/root-ca.pem" \
+              "$d/bundle" \
+              "release-out/rasputin-os-${sku}-${ver}.raucb"
+
+            # Compress the flashable .img (GH release asset limit is 2 GB;
+            # our raw .img is ~3 GB so this is mandatory, not just an
+            # optimization).
+            img_src=$(ls "$d"/*.img | head -1)
+            xz --keep --threads=0 -T0 -c "$img_src" > "release-out/$(basename "$img_src").xz"
+            echo "::endgroup::"
+
+            raucb="release-out/rasputin-os-${sku}-${ver}.raucb"
+            imgxz="release-out/$(basename "$img_src").xz"
+            raucb_sha=$(sha256sum "$raucb"  | awk '{print $1}')
+            imgxz_sha=$(sha256sum "$imgxz"  | awk '{print $1}')
+            raucb_sz=$(stat -c%s "$raucb")
+            imgxz_sz=$(stat -c%s "$imgxz")
+            built=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+            jq -nc \
+              --arg sku "$sku" --arg arch "$arch" --arg compatible "$compatible" \
+              --arg raucb   "$(basename "$raucb")"  --arg raucb_sha "$raucb_sha" \
+              --arg image   "$(basename "$imgxz")"  --arg imgxz_sha "$imgxz_sha" \
+              --argjson raucb_sz "$raucb_sz" --argjson imgxz_sz "$imgxz_sz" \
+              --arg signedBy "Rasputin Release ${ver}" --arg built "$built" \
+              '{sku:$sku, architecture:$arch, compatible:$compatible,
+                raucb:$raucb, sha256:$raucb_sha, sizeBytes:$raucb_sz,
+                image:$image, imageSha256:$imgxz_sha, imageSizeBytes:$imgxz_sz,
+                signedBy:$signedBy, buildDate:$built}' \
+              >> /tmp/manifest-artifacts.jsonl
+          done
+
+          jq -n \
+            --arg version "${{ steps.ver.outputs.version }}" \
+            --arg channel "${{ steps.ver.outputs.channel }}" \
+            --slurpfile artifacts /tmp/manifest-artifacts.jsonl \
+            '{version:$version, channel:$channel, artifacts:$artifacts}' \
+            > release-out/manifest.json
+          echo "----- release-out/ -----" && ls -lh release-out/ && \
+            echo "----- manifest.json -----" && cat release-out/manifest.json
+
+      - name: Wipe signing material
+        if: always()
+        run: sudo umount /mnt/rasputin-sign 2>/dev/null || true
+
       - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "TODO(scaffold): gh release create with the signed bundles,"
-          echo "  .img.xz, and manifest.json. Mark prerelease for dev channel."
+          set -eu
+          PRERELEASE_FLAG=""
+          if [ "${{ steps.ver.outputs.prerelease }}" = "true" ]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+          gh release create "${{ steps.ver.outputs.version }}" \
+            --title "Rasputin OS ${{ steps.ver.outputs.version }}" \
+            --notes "Channel: \`${{ steps.ver.outputs.channel }}\`. Verify the chain with the public root CA (\`vars.RASPUTIN_ROOT_CA_PEM\` on the geekdojo org); per-asset SHA-256 in \`manifest.json\`." \
+            $PRERELEASE_FLAG \
+            release-out/*

@@ -69,9 +69,16 @@ genimage \
 
 mv "$BINARIES_DIR/disk.img" "$BINARIES_DIR/rasputin-os-$SOC-$VERSION.img" 2>/dev/null || true
 
-echo "post-image: building RAUC bundle…"
-# 2. RAUC bundle. Manifest fields match the api verifier's expectations
-#    (control-plane/updates.md §2). host-rauc is built by BR2_PACKAGE_RAUC.
+echo "post-image: staging RAUC bundle directory…"
+# 2. RAUC bundle SOURCES. We deliberately do NOT call `rauc bundle` here —
+#    `rauc bundle` requires the leaf signing key, which never lives in the
+#    build job (locked decision, os-images/release-pipeline.md §3). The
+#    discrete `sign-and-release` CI job downloads this bundle/ dir, runs
+#    `rauc bundle` with the leaf key materialized to tmpfs, and uploads the
+#    signed .raucb to the GitHub Release.
+#
+#    For a local dev .raucb, run `rauc bundle bundle/ output.raucb
+#    --cert=... --key=... --signing-keyring=...` from this dir yourself.
 BUNDLE_DIR="$BINARIES_DIR/bundle"
 rm -rf "$BUNDLE_DIR"; mkdir -p "$BUNDLE_DIR"
 cp "$BINARIES_DIR/rootfs.squashfs" "$BUNDLE_DIR/rootfs.img"
@@ -88,18 +95,6 @@ format=verity
 filename=rootfs.img
 EOF
 
-# NOTE: unsigned here. CI signs with the leaf key in a discrete step
-# (os-images/release-pipeline.md §3). For a local dev bundle, pass
-# --cert/--key to host-rauc directly. The --keyring/--cert below is a
-# placeholder that the CI signing step overrides.
-"$HOST_DIR/bin/rauc" bundle \
-	--signing-keyring="$BOARD_DIR/../common/dev-ca.pem" \
-	--cert="${RAUC_CERT:-$BOARD_DIR/../common/dev-leaf.pem}" \
-	--key="${RAUC_KEY:-$BOARD_DIR/../common/dev-leaf.key}" \
-	"$BUNDLE_DIR" \
-	"$BINARIES_DIR/rasputin-os-$SOC-$VERSION.raucb" || {
-		echo "post-image: rauc bundle failed — for a local build, provide" >&2
-		echo "  RAUC_CERT/RAUC_KEY env or a dev CA. CI signs separately." >&2
-	}
-
 echo "post-image: done — $ARCH artifacts in $BINARIES_DIR"
+echo "  - $BINARIES_DIR/rasputin-os-$SOC-$VERSION.img"
+echo "  - $BUNDLE_DIR/{rootfs.img,manifest.raucm}  (signed into .raucb by CI)"
