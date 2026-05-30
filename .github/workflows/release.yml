@@ -264,8 +264,15 @@ jobs:
           fi
           echo "using OVMF code=$OVMF_CODE vars=$OVMF_VARS"
           cp "$OVMF_VARS" /tmp/vars.fd
+          # -cpu max: advertise every ISA extension QEMU's TCG knows. The
+          # image is built with BR2_x86_corei7 (Nehalem baseline → SSE4.2);
+          # the default qemu64 CPU model lacks SSE4.2 so glibc's dynamic
+          # linker hits "invalid opcode" the moment init runs. Real N100
+          # hardware has SSE4.2+ so the build target is correct — this
+          # only affects emulation. (max works without KVM, which not all
+          # GH runners expose at /dev/kvm.)
           ( timeout 300 qemu-system-x86_64 \
-              -machine q35 -m 2048 -smp 2 -nographic \
+              -machine q35 -m 2048 -smp 2 -cpu max -nographic \
               -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
               -drive if=pflash,format=raw,file=/tmp/vars.fd \
               -drive file="$IMG",format=raw,if=virtio \
