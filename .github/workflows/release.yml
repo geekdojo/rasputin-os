@@ -77,11 +77,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # v1 scope (2026-05-30): N100-only — sourcing/hardware-vendor
+        # priorities favor N100 for first ship; CM5 is deferred post-v1.
+        # The cm5 entry is COMMENTED OUT rather than deleted so it can be
+        # flipped back on (with `make rasputin_cm5_defconfig` locally still
+        # working) when CM5 sourcing aligns. The board/cm5/ tree,
+        # configs/rasputin_cm5_defconfig, and package .mks all stay in
+        # place. See os-images/overview.md §Status.
         include:
-          - sku: cm5
-            defconfig: rasputin_cm5_defconfig
-            arch: arm64
-            compatible: rasputin-pi5-cm5
+          # - sku: cm5
+          #   defconfig: rasputin_cm5_defconfig
+          #   arch: arm64
+          #   compatible: rasputin-pi5-cm5
           - sku: n100
             defconfig: rasputin_n100_defconfig
             arch: amd64

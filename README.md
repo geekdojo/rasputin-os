@@ -30,18 +30,17 @@ PKI (root → intermediate → leaf) and publishes `.raucb` + `.img.xz` +
 Warm-cache iterations are ~50 min per SKU (cold ~2–3 h); ccache + a split
 restore/save-on-failure keeps the loop usable.
 
-CM5 builds the `.img` but final boot validation needs the real Pi 5 / CM5
-(no QEMU substitute for Pi firmware + tryboot).
+**v1 scope (2026-05-30): N100-only.** Sourcing/hardware-vendor priorities
+favor N100 for first ship; CM5 is deferred post-v1. The cm5 entry is
+commented out of `.github/workflows/release.yml`'s build matrix, but
+`board/rasputin/cm5/`, `configs/rasputin_cm5_defconfig`, and the package
+.mks stay in place so a local `make rasputin_cm5_defconfig` still works
+and the CI matrix entry can be uncommented when CM5 sourcing aligns.
 
 The smaller open items are tracked in the
 [wiki backlog](https://github.com/geekdojo/geekdojo-wiki/blob/main/projects/rasputin/backlog.md#designos-imagesbuildroot-osmd-6);
-the big ones, in order:
+the big v1 ones, in order:
 
-- **CM5 hardware bring-up.** Confirm the Pi 5 firmware variant + blob set
-  in `genimage.cfg` (currently a starter list with `BRING-UP:` markers in
-  `configs/rasputin_cm5_defconfig`), swap the DTS to a CM5 carrier
-  (`bcm2712-rpi-cm5-*`), and write the `tryboot` RAUC hook scripts under
-  `board/rasputin/cm5/rauc-hooks/`.
 - **dm-verity + initramfs.** Today the kernel mounts the squashfs root
   directly (`rootfstype=squashfs ro`); verity hashes need to be wired in
   `post-image.sh` and a small initramfs added to run `veritysetup` before
@@ -55,6 +54,12 @@ the big ones, in order:
 - **Populate slot B at flash time.** `genimage.cfg` leaves rootfs-1 empty
   (RAUC fills it on first OTA); if slot A fails before any OTA the kernel
   panics. Cleaner: write the same squashfs into B at flash.
+
+**Post-v1:** CM5 hardware bring-up — confirm Pi 5 firmware variant + blob
+set in `genimage.cfg` (starter list with `BRING-UP:` markers in
+`configs/rasputin_cm5_defconfig`), swap DTS to a CM5 carrier
+(`bcm2712-rpi-cm5-*`), write `tryboot` RAUC hook scripts under
+`board/rasputin/cm5/rauc-hooks/`, re-enable the cm5 matrix entry.
 
 ## Cutting a release
 
