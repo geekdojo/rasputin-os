@@ -367,13 +367,19 @@ jobs:
           printf '%s' "$LEAF_KEY"  > /mnt/rasputin-sign/leaf.key
           printf '%s' "$LEAF_CERT" > /mnt/rasputin-sign/leaf-chain.pem
           printf '%s' "$ROOT_PEM"  > /mnt/rasputin-sign/root-ca.pem
+          # Split leaf-chain.pem into separate leaf.pem + intermediate.pem.
+          # rauc only embeds the FIRST cert from --cert into the CMS signature;
+          # the intermediate must be passed explicitly via `--intermediate` so
+          # the device-side rauc can build leaf → intermediate → root from
+          # the bundle alone (with just root in the device trust store).
+          awk -v leaf=/mnt/rasputin-sign/leaf.pem \
+              -v inter=/mnt/rasputin-sign/intermediate.pem \
+              '/-----BEGIN CERTIFICATE-----/{i++} {if(i==1)print > leaf; else if(i==2)print > inter}' \
+              /mnt/rasputin-sign/leaf-chain.pem
           # Sanity-check the chain locally before signing anything with it.
-          # leaf-chain.pem = leaf + intermediate; extract the leaf and pass
-          # the full chain as `-untrusted` so openssl can build leaf →
-          # intermediate (from -untrusted) → root (from -CAfile).
           openssl verify -CAfile /mnt/rasputin-sign/root-ca.pem \
-            -untrusted /mnt/rasputin-sign/leaf-chain.pem \
-            <(awk '/-----BEGIN CERTIFICATE-----/{p=1} p; /-----END CERTIFICATE-----/{p=0; exit}' /mnt/rasputin-sign/leaf-chain.pem) \
+            -untrusted /mnt/rasputin-sign/intermediate.pem \
+            /mnt/rasputin-sign/leaf.pem \
             || { echo "::error::leaf cert chain does not verify against root"; exit 1; }
           echo "tmpfs=/mnt/rasputin-sign" >> "$GITHUB_OUTPUT"
 
@@ -394,7 +400,8 @@ jobs:
 
             echo "::group::Sign $sku (compatible=$compatible)"
             rauc bundle \
-              --cert="/mnt/rasputin-sign/leaf-chain.pem" \
+              --cert="/mnt/rasputin-sign/leaf.pem" \
+              --intermediate="/mnt/rasputin-sign/intermediate.pem" \
               --key="/mnt/rasputin-sign/leaf.key" \
               --signing-keyring="/mnt/rasputin-sign/root-ca.pem" \
               "$d/bundle" \
