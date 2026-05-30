@@ -20,11 +20,15 @@ This repo implements the design in the geekdojo wiki:
 
 ## Status
 
-**amd64 verified-booting end-to-end (2026-05-30).** Both SKU builds are
-green in CI, and the n100 `.img` boots to a Rasputin login prompt in the
-`smoke-amd64` job — systemd up, journal up, network device renamed,
-containerd loaded. Warm-cache iterations are ~50 min per SKU (cold
-~2–3 h); ccache + a split restore/save-on-failure keeps the loop usable.
+**Signed releases shipping end-to-end (2026-05-30).** Both SKU builds are
+green in CI, the n100 `.img` boots to a Rasputin login prompt in the
+`smoke-amd64` job (systemd + journal + network + containerd all up), and
+the `sign-and-release` job runs `rauc bundle` against the YubiKey-backed
+PKI (root → intermediate → leaf) and publishes `.raucb` + `.img.xz` +
+`manifest.json` to GitHub Releases. First green release:
+[2026.05.0-dev.3](https://github.com/geekdojo/rasputin-os/releases/tag/2026.05.0-dev.3).
+Warm-cache iterations are ~50 min per SKU (cold ~2–3 h); ccache + a split
+restore/save-on-failure keeps the loop usable.
 
 CM5 builds the `.img` but final boot validation needs the real Pi 5 / CM5
 (no QEMU substitute for Pi firmware + tryboot).
@@ -51,14 +55,20 @@ the big ones, in order:
 - **Populate slot B at flash time.** `genimage.cfg` leaves rootfs-1 empty
   (RAUC fills it on first OTA); if slot A fails before any OTA the kernel
   panics. Cleaner: write the same squashfs into B at flash.
-- **Release signing + publish.** The `sign-and-release` job in
-  `.github/workflows/release.yml` is stubbed (`TODO(scaffold)`). Needs the
-  leaf-key secret + RAUC resign step + `gh release create` with the
-  manifest.
-- **`RASPUTIN_ROOT_CA_PEM` CI variable.** The `Inject trust root` step
-  bakes the public root CA into every image's `/etc/rasputin/trust/`; the
-  variable is currently unset, so images ship with an empty `root-ca.pem`
-  (fine for the smoke loop, blocks bundle verification on real fleets).
+
+## Cutting a release
+
+`sign-and-release` triggers on any CalVer tag matching
+`YYYY.MM.MICRO[-suffix]`. Use a `-dev.N` suffix to land a prerelease
+(marked as such on GitHub and tagged `channel=dev` in `manifest.json`);
+bare CalVer is stable.
+
+```sh
+git tag -a 2026.06.0 -m "first stable cut"
+git push origin 2026.06.0
+# → build × 2 → smoke-amd64 → sign-and-release → GitHub Release with
+#   2 × .raucb + 2 × .img.xz + manifest.json
+```
 
 ## Layout
 
