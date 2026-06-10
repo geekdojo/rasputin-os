@@ -58,6 +58,15 @@ CONFIG_ITCO_WDT=y
 CONFIG_SERIAL_8250=y
 CONFIG_SERIAL_8250_CONSOLE=y
 
+# --- early-boot visibility (inert without an earlyprintk= cmdline param).
+#     The Mu bring-up died pre-console with zero output on HDMI or LAN;
+#     earlyprintk=efi,keep paints printk onto the EFI framebuffer from the
+#     first instant, before any console driver binds. EARLY_PRINTK_EFI is
+#     not in the arch default config — adding the param without this was
+#     silently a no-op (2026-06-10). ---
+CONFIG_EARLY_PRINTK=y
+CONFIG_EARLY_PRINTK_EFI=y
+
 # --- Docker / container essentials (Buildroot prints a checklist; this is
 #     the load-bearing subset) ---
 CONFIG_NAMESPACES=y
