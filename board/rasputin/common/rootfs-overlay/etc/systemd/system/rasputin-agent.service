@@ -8,6 +8,11 @@ RequiresMountsFor=/var/lib/rasputin
 [Service]
 # node.env is written by rasputin-firstboot onto the persistent partition.
 EnvironmentFile=-/var/lib/rasputin/node.env
+# The agent creates its state dir ("agent-state") relative to cwd; on a
+# read-only rootfs that must land on the persistent partition. Image-side
+# mitigation — the proper fix (a state-dir env var) is a control-plane
+# backlog item.
+WorkingDirectory=/var/lib/rasputin
 ExecStart=/usr/bin/rasputin-agent
 Restart=always
 RestartSec=2
