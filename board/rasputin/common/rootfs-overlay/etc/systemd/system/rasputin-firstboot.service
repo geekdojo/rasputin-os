@@ -1,6 +1,10 @@
 [Unit]
 Description=Rasputin first-boot provisioning (read seed, set role/identity)
-After=local-fs.target
+# Wants (not Requires) the seed mount: a missing/unmountable seed degrades to
+# the script's documented fallbacks (kernel cmdline, then defaults) instead of
+# blocking provisioning outright. provisioning.md §1.
+Wants=run-rasputin\x2dseed.mount
+After=local-fs.target run-rasputin\x2dseed.mount
 Before=rasputin-agent.service rasputin-api.service
 ConditionPathExists=!/var/lib/rasputin/.provisioned
 

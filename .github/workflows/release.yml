@@ -303,6 +303,12 @@ jobs:
           echo "----- last 60 lines of console -----"; tail -60 /tmp/console.log || true
           [ "$ok" = 1 ] || { echo "::error::image did not reach multi-user in QEMU"; exit 1; }
           echo "amd64 image booted to multi-user in QEMU"
+          # The provisioning seed must be mounted at /run/rasputin-seed before
+          # firstboot runs — a fresh board silently defaults to role=compute
+          # otherwise (bit the first LattePanda Mu bring-up, 2026-06-09).
+          grep -qE "Mounted.*Rasputin provisioning seed" /tmp/console.log \
+            || { echo "::error::seed mount never appeared on console — /run/rasputin-seed wiring regressed"; exit 1; }
+          echo "seed mount confirmed in boot output"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

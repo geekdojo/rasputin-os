@@ -1,0 +1,25 @@
+# Mounts the boot FAT (the provisioning seed lives there) at /run/rasputin-seed
+# so rasputin-firstboot.sh can read rasputin-seed.env. os-images/provisioning.md §1.
+#
+# Mounted by FILESYSTEM LABEL, not PARTLABEL: the GPT partition is named "esp"
+# on n100 and "firmware" on cm5 (see each board's genimage.cfg), but both FATs
+# carry the same volume label RASPUTIN-FW — one unit serves both boards.
+#
+# Read-only: firstboot only reads the seed. If/when token-clearing after
+# enrollment lands, that step remounts rw explicitly rather than widening this.
+#
+# Filename is the systemd-escape of /run/rasputin-seed (the "\x2d" IS the
+# escaped dash, literal in the filename — do not "fix" it).
+
+[Unit]
+Description=Rasputin provisioning seed (boot FAT, read-only)
+DefaultDependencies=no
+Before=umount.target
+Conflicts=umount.target
+
+[Mount]
+What=/dev/disk/by-label/RASPUTIN-FW
+Where=/run/rasputin-seed
+Type=vfat
+Options=ro
+DirectoryMode=0755

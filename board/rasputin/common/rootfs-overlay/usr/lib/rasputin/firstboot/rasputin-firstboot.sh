@@ -24,9 +24,11 @@ mkdir -p "$PERSIST" "$(dirname "$NODE_ENV")"
 log() { echo "rasputin-firstboot: $*"; }
 
 # --- locate + read the seed --------------------------------------------------
-# TODO(scaffold): the seed partition's PARTLABEL is "rasputin-seed"; mount it
-# read-only. On CM5 it lives in the FAT /boot/firmware; on N100 in the ESP.
-# The board-specific mount wiring is filled in per genimage layout.
+# The seed FAT is mounted read-only at $SEED_MNT by run-rasputin\x2dseed.mount
+# (Wants'd by rasputin-firstboot.service), matched by filesystem label
+# RASPUTIN-FW — common to both boards even though the GPT partition name
+# differs (n100 "esp", cm5 "firmware"). If the mount failed we fall through
+# to the cmdline/defaults below.
 ROLE=""
 NODE_ID=""
 NATS_URL=""
