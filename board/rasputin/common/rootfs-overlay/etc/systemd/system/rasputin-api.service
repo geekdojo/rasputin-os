@@ -3,14 +3,17 @@ Description=Rasputin control-plane API
 After=network-online.target rasputin-firstboot.service
 Wants=network-online.target
 Requires=rasputin-firstboot.service
-# Role gate: this unit only starts on the controlplane node. On compute
-# nodes the ConditionEnvironment fails and systemd skips it cleanly.
-# rasputin-firstboot ALSO `systemctl enable`s this unit only when
-# role==controlplane — belt and suspenders. See os-images/provisioning.md §2.
-ConditionEnvironment=RASPUTIN_NODE_ROLE=controlplane
+RequiresMountsFor=/var/lib/rasputin
+# Role gate: this unit ships preset-enabled on every image but only starts
+# on the controlplane — rasputin-firstboot drops this marker on the
+# persistent partition when role==controlplane. (Not ConditionEnvironment:
+# that checks PID 1's environment, which never contains node.env. Not
+# runtime `systemctl enable`: /etc is read-only squashfs.)
+# See os-images/provisioning.md §2.
+ConditionPathExists=/var/lib/rasputin/role.controlplane
 
 [Service]
-EnvironmentFile=-/etc/rasputin/node.env
+EnvironmentFile=-/var/lib/rasputin/node.env
 Environment=RASPUTIN_DATA_DIR=/var/lib/rasputin
 ExecStart=/usr/bin/rasputin-api
 Restart=always

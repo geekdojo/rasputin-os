@@ -23,7 +23,9 @@ BR2_CCACHE=y
 BR2_TOOLCHAIN_BUILDROOT_GLIBC=y
 BR2_TOOLCHAIN_BUILDROOT_CXX=y
 BR2_INIT_SYSTEMD=y
-BR2_SYSTEM_DHCP="eth0"
+# (no BR2_SYSTEM_DHCP — see rasputin_n100_defconfig: the literal "eth0" match
+# never fires under udev predictable naming; the overlay 20-wired.network
+# covers en*/eth* on both arches.)
 BR2_TARGET_GENERIC_HOSTNAME="rasputin"
 BR2_TARGET_GENERIC_ISSUE="Welcome to Rasputin OS"
 # Pi serial console (UART on the 40-pin header / debug connector).

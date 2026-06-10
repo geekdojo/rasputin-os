@@ -5,6 +5,9 @@ Description=Rasputin first-boot provisioning (read seed, set role/identity)
 # blocking provisioning outright. provisioning.md §1.
 Wants=run-rasputin\x2dseed.mount
 After=local-fs.target run-rasputin\x2dseed.mount
+# Everything this script writes lands on the persistent partition; if that
+# mount failed (nofail in fstab), provisioning must not half-run.
+RequiresMountsFor=/var/lib/rasputin
 Before=rasputin-agent.service rasputin-api.service
 ConditionPathExists=!/var/lib/rasputin/.provisioned
 

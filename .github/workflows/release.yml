@@ -303,12 +303,19 @@ jobs:
           echo "----- last 60 lines of console -----"; tail -60 /tmp/console.log || true
           [ "$ok" = 1 ] || { echo "::error::image did not reach multi-user in QEMU"; exit 1; }
           echo "amd64 image booted to multi-user in QEMU"
-          # The provisioning seed must be mounted at /run/rasputin-seed before
-          # firstboot runs — a fresh board silently defaults to role=compute
-          # otherwise (bit the first LattePanda Mu bring-up, 2026-06-09).
-          grep -qE "Mounted.*Rasputin provisioning seed" /tmp/console.log \
-            || { echo "::error::seed mount never appeared on console — /run/rasputin-seed wiring regressed"; exit 1; }
-          echo "seed mount confirmed in boot output"
+          # firstboot logs to /dev/kmsg, so its lines reach the serial console.
+          # (Asserting on systemd's own "Mounted ..." line doesn't work: PID 1
+          # stops mirroring unit status to the console once journald is up,
+          # which is before the seed device is found — learned on dev.1.)
+          grep -q "rasputin-firstboot: reading seed /run/rasputin-seed/rasputin-seed.env" /tmp/console.log \
+            || { echo "::error::firstboot never read the seed — /run/rasputin-seed wiring (or kmsg logging) regressed"; exit 1; }
+          # "provisioning complete" proves the persistent partition mounted
+          # (makefs+growfs path) and node.env was written — a fresh board
+          # otherwise fails provisioning on read-only /etc (Mu bring-up
+          # 2026-06-09).
+          grep -q "rasputin-firstboot: provisioning complete" /tmp/console.log \
+            || { echo "::error::firstboot did not complete — persistent mount or node.env write failed; see console artifact"; exit 1; }
+          echo "seed read + provisioning completion confirmed in boot output"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

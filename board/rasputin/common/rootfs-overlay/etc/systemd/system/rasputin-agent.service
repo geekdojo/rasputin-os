@@ -3,10 +3,11 @@ Description=Rasputin node agent
 After=network-online.target rasputin-firstboot.service
 Wants=network-online.target
 Requires=rasputin-firstboot.service
+RequiresMountsFor=/var/lib/rasputin
 
 [Service]
-# node.env is written by rasputin-firstboot from the seed partition.
-EnvironmentFile=-/etc/rasputin/node.env
+# node.env is written by rasputin-firstboot onto the persistent partition.
+EnvironmentFile=-/var/lib/rasputin/node.env
 ExecStart=/usr/bin/rasputin-agent
 Restart=always
 RestartSec=2

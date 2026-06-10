@@ -32,6 +32,24 @@ CONFIG_R8169=y
 CONFIG_USB_XHCI_HCD=y
 CONFIG_RTC_DRV_CMOS=y
 
+# --- display console on real hardware (UEFI GOP framebuffer → fbcon).
+#     QEMU smoke runs serial-only; without these, HDMI/DP freezes at GRUB's
+#     last line on real boards even when boot succeeds (Mu bring-up
+#     2026-06-09 looked exactly like a hang because of this). ---
+CONFIG_FB=y
+CONFIG_FB_EFI=y
+CONFIG_FB_SIMPLE=y
+CONFIG_FRAMEBUFFER_CONSOLE=y
+CONFIG_FRAMEBUFFER_CONSOLE_DETECT_PRIMARY=y
+
+# --- filesystems the boot path depends on (pinned for the same reason as
+#     the NICs above): vfat+NLS for the seed/boot FAT, ext4 for the
+#     persistent partition ---
+CONFIG_VFAT_FS=y
+CONFIG_NLS_CODEPAGE_437=y
+CONFIG_NLS_ISO8859_1=y
+CONFIG_EXT4_FS=y
+
 # --- watchdog (the systemd-watchdog leg of the update defense-in-depth) ---
 CONFIG_WATCHDOG=y
 CONFIG_ITCO_WDT=y

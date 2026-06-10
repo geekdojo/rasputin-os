@@ -14,14 +14,22 @@
 #
 set -eu
 
+# PERSIST is the mounted persistent partition (fstab: PARTLABEL=persistent,
+# formatted on first use via x-systemd.makefs). The rootfs is read-only
+# squashfs, so EVERYTHING this script writes must land under PERSIST.
+# /etc/rasputin/node.env is a baked-in symlink to $NODE_ENV for operators.
 PERSIST=/var/lib/rasputin
-NODE_ENV=/etc/rasputin/node.env
+NODE_ENV=$PERSIST/node.env
 SEED_MNT=/run/rasputin-seed
 SEED_FILE="$SEED_MNT/rasputin-seed.env"
 
-mkdir -p "$PERSIST" "$(dirname "$NODE_ENV")"
-
-log() { echo "rasputin-firstboot: $*"; }
+# Also log to /dev/kmsg: systemd stops mirroring unit output to the console
+# once journald is up, but printk always reaches every console= device —
+# so these lines show on serial/HDMI and the CI smoke can assert on them.
+log() {
+	echo "rasputin-firstboot: $*"
+	echo "rasputin-firstboot: $*" > /dev/kmsg 2>/dev/null || true
+}
 
 # --- locate + read the seed --------------------------------------------------
 # The seed FAT is mounted read-only at $SEED_MNT by run-rasputin\x2dseed.mount
@@ -102,12 +110,18 @@ if [ -n "$JOIN_TOKEN" ] && [ "$ROLE" != "controlplane" ]; then
 	log "tailnet join token present (enrollment TODO in scaffold)"
 fi
 
-# --- enable controlplane-only units ------------------------------------------
+# --- role marker: gates rasputin-api.service ----------------------------------
+# /etc is read-only squashfs, so runtime `systemctl enable` can't work (and
+# ConditionEnvironment can't see node.env — it checks PID 1's environment).
+# The api ships preset-enabled on every image and is gated by
+# ConditionPathExists on this marker instead. provisioning.md §2.
 if [ "$ROLE" = "controlplane" ]; then
-	log "enabling controlplane services (api + sidecars)"
-	systemctl enable rasputin-api.service || true
-	# TODO(scaffold): enable sidecar containers (Headscale, VictoriaMetrics,
-	# Loki, Grafana) once their compose units land.
+	log "marking controlplane role (gates rasputin-api + sidecars)"
+	touch "$PERSIST/role.controlplane"
+	# TODO(scaffold): sidecar containers (Headscale, VictoriaMetrics, Loki,
+	# Grafana) get the same marker gate once their compose units land.
+else
+	rm -f "$PERSIST/role.controlplane"
 fi
 
 # --- stamp provisioned + clear the seed token --------------------------------

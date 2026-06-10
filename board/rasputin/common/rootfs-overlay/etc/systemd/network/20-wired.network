@@ -1,0 +1,9 @@
+# Wired uplink — match any kernel/udev name an onboard NIC can get:
+# udev predictable naming gives enp*/eno*/ens* (enp1s0 on the Mu); plain
+# eth0 only survives with net.ifnames=0. Container/virtual interfaces
+# (docker0, br-*, veth*) intentionally don't match.
+[Match]
+Name=en* eth*
+
+[Network]
+DHCP=yes
