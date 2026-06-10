@@ -57,6 +57,9 @@ BR2_PACKAGE_RPI_FIRMWARE=y
 # os-images/buildroot-os.md §3 and HAOS PR #3842.
 
 # --- A/B + RAUC ---
+# real e2fsprogs: systemd-makefs execs mkfs.ext4; busybox mke2fs cannot
+# answer to that name (see rasputin_n100_defconfig)
+BR2_PACKAGE_E2FSPROGS=y
 BR2_PACKAGE_RAUC=y
 BR2_PACKAGE_HOST_RAUC=y
 BR2_PACKAGE_SQUASHFS=y

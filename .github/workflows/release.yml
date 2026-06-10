@@ -299,6 +299,19 @@ jobs:
             if grep -qE "Reached target .*Multi-User|Welcome to Rasputin" /tmp/console.log; then ok=1; break; fi
             sleep 2
           done
+          # Do NOT kill qemu yet: the getty prompt races firstboot (parallel
+          # multi-user jobs; firstboot waits on makefs→mount of the persistent
+          # partition and finishes a few seconds AFTER the login prompt).
+          # dev.2 false-failed by asserting the instant multi-user showed.
+          # Keep the same boot running and poll — a second boot can't work,
+          # firstboot is guarded by the .provisioned stamp it just wrote.
+          fb=0
+          if [ "$ok" = 1 ]; then
+            for _ in $(seq 1 60); do
+              if grep -q "rasputin-firstboot: provisioning complete" /tmp/console.log; then fb=1; break; fi
+              sleep 2
+            done
+          fi
           kill "$QPID" 2>/dev/null || true
           echo "----- last 60 lines of console -----"; tail -60 /tmp/console.log || true
           [ "$ok" = 1 ] || { echo "::error::image did not reach multi-user in QEMU"; exit 1; }
@@ -313,8 +326,8 @@ jobs:
           # (makefs+growfs path) and node.env was written — a fresh board
           # otherwise fails provisioning on read-only /etc (Mu bring-up
           # 2026-06-09).
-          grep -q "rasputin-firstboot: provisioning complete" /tmp/console.log \
-            || { echo "::error::firstboot did not complete — persistent mount or node.env write failed; see console artifact"; exit 1; }
+          [ "$fb" = 1 ] \
+            || { echo "::error::firstboot did not complete — persistent mount (e2fsprogs/makefs?) or node.env write failed; see console artifact"; exit 1; }
           echo "seed read + provisioning completion confirmed in boot output"
       - uses: actions/upload-artifact@v4
         if: always()

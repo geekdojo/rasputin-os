@@ -53,6 +53,12 @@ BR2_LINUX_KERNEL_NEEDS_HOST_LIBELF=y
 BR2_TARGET_GRUB2=y
 BR2_TARGET_GRUB2_X86_64_EFI=y
 
+# --- persistent partition: real e2fsprogs for systemd-makefs ---
+# busybox's mke2fs is ext2-only and doesn't answer to "mkfs.ext4" ("applet
+# not found"), which systemd-makefs execs — the x-systemd.makefs fstab path
+# needs the real tools (caught on 2026.06.0-dev.2).
+BR2_PACKAGE_E2FSPROGS=y
+
 # --- A/B + RAUC ---
 BR2_PACKAGE_RAUC=y
 BR2_PACKAGE_HOST_RAUC=y
