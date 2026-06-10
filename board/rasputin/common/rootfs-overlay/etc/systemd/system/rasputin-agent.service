@@ -6,12 +6,15 @@ Requires=rasputin-firstboot.service
 RequiresMountsFor=/var/lib/rasputin
 
 [Service]
+# Agent state (app compose files, updater/mesh backend state) must land on
+# the persistent partition — the rootfs is read-only squashfs. The agent
+# uses this value verbatim (no per-node suffix; one agent per host).
+# node.env can still override it: EnvironmentFile beats Environment=.
+Environment=RASPUTIN_AGENT_STATE_DIR=/var/lib/rasputin/agent-state
 # node.env is written by rasputin-firstboot onto the persistent partition.
 EnvironmentFile=-/var/lib/rasputin/node.env
-# The agent creates its state dir ("agent-state") relative to cwd; on a
-# read-only rootfs that must land on the persistent partition. Image-side
-# mitigation — the proper fix (a state-dir env var) is a control-plane
-# backlog item.
+# Safety net for anything else that resolves paths relative to cwd (the
+# env var above is the real fix for the agent's state dir).
 WorkingDirectory=/var/lib/rasputin
 ExecStart=/usr/bin/rasputin-agent
 Restart=always
