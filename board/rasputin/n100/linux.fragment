@@ -42,6 +42,18 @@ CONFIG_FB_SIMPLE=y
 CONFIG_FRAMEBUFFER_CONSOLE=y
 CONFIG_FRAMEBUFFER_CONSOLE_DETECT_PRIMARY=y
 
+# --- NO i915. The arch default config builds CONFIG_DRM_I915=y, and a
+#     BUILT-IN i915 initializing on real Alder Lake-N display hardware
+#     (with no GPU firmware blobs on this image) kills the LattePanda Mu
+#     dead during boot — black screen, no network, looks exactly like a
+#     pre-console hang. Found by config-bisecting against a booting
+#     Debian kernel on the first Mu bring-up (2026-06-11): ours-minus-
+#     i915 boots, ours-with-i915 dies, every QEMU run passes (no Intel
+#     GPU to probe). A headless appliance wants efifb/fbcon (above), not
+#     a GPU driver; if GPU ever becomes a feature, ship i915 as a module
+#     WITH linux-firmware blobs (backlog). ---
+CONFIG_DRM_I915=n
+
 # --- filesystems the boot path depends on (pinned for the same reason as
 #     the NICs above): vfat+NLS for the seed/boot FAT, ext4 for the
 #     persistent partition ---
