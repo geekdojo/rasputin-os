@@ -23,5 +23,13 @@ ln -sf /etc/systemd/system/rasputin-agent.service \
 # rasputin-api.service is intentionally NOT symlinked here — rasputin-firstboot
 # enables it at runtime only when role==controlplane (provisioning.md §2).
 
+# Login prompt on the local display. systemd only autospawns gettys on VTs
+# via getty@tty1 enablement (logind's autovt@ handles tty2+); without this,
+# HDMI shows console output but no way to log in — serial was the only getty
+# on the first Mu bring-up (2026-06-11).
+mkdir -p "$TARGET_DIR/etc/systemd/system/getty.target.wants"
+ln -sf /usr/lib/systemd/system/getty@.service \
+	"$TARGET_DIR/etc/systemd/system/getty.target.wants/getty@tty1.service"
+
 # Ensure the persistent data dir exists as a mountpoint.
 mkdir -p "$TARGET_DIR/var/lib/rasputin"
