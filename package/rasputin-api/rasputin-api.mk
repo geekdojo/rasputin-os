@@ -5,11 +5,12 @@
 # Vendored pre-built release binary, same model as rasputin-agent.
 # Ships on every image; the systemd unit is role-gated to controlplane.
 #
-# TODO(scaffold): real version + per-arch source + sha256 once the
-# control-plane repo publishes release binaries.
+# Bump VERSION together with rasputin-agent's — one control-plane tag
+# publishes both tarballs — and refresh both .hash files from the
+# release's published *.hash assets.
 ################################################################################
 
-RASPUTIN_API_VERSION = 0.1.0
+RASPUTIN_API_VERSION = 0.3.0
 RASPUTIN_API_SITE = https://github.com/geekdojo/rasputin-control-plane/releases/download/v$(RASPUTIN_API_VERSION)
 
 ifeq ($(BR2_aarch64),y)
@@ -24,10 +25,10 @@ RASPUTIN_API_SOURCE = rasputin-api-$(RASPUTIN_API_VERSION)-linux-$(RASPUTIN_API_
 # tar --strip-components=1 so the binary actually extracts.
 RASPUTIN_API_STRIP_COMPONENTS = 0
 
-# The api also bundles the built Next.js UI as static assets. The release
-# tarball is expected to contain `rasputin-api` + a `ui/` dir of static
-# export output. TODO(scaffold): confirm the tarball layout when the
-# control-plane release pipeline lands.
+# The api also bundles the built Next.js UI as static assets: the release
+# tarball contains `rasputin-api` + a `ui/` dir (static export), installed
+# to /usr/share/rasputin/ui — the api's RASPUTIN_UI_DIR default. Real
+# since control-plane v0.3.0; the `if` guard keeps older tarballs working.
 
 define RASPUTIN_API_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(@D)/rasputin-api \

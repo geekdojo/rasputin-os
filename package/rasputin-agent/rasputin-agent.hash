@@ -1,0 +1,3 @@
+# From https://github.com/geekdojo/rasputin-control-plane/releases/tag/v0.3.0 (*.hash assets)
+sha256  dee222e52cf1aa04ca6d70d632b8856d92900260f59cfd6da41606a5ca0b9c34  rasputin-agent-0.3.0-linux-amd64.tar.gz
+sha256  5539b53e541aa647853b545cd341f68ab03f8d5742bdbeb2afee90710bc2fa25  rasputin-agent-0.3.0-linux-arm64.tar.gz

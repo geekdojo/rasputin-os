@@ -7,12 +7,12 @@
 # build; we pull a statically-linked binary built + tested by the
 # rasputin-control-plane repo's own CI, verify its sha256, and install it.
 #
-# TODO(scaffold): wire the real version + per-arch source + sha256 once the
-# control-plane repo publishes release binaries. The values below are
-# placeholders that will NOT download until pointed at a real release.
+# Bump VERSION together with rasputin-api's — one control-plane tag
+# publishes both tarballs — and refresh both .hash files from the
+# release's published *.hash assets.
 ################################################################################
 
-RASPUTIN_AGENT_VERSION = 0.1.0
+RASPUTIN_AGENT_VERSION = 0.3.0
 RASPUTIN_AGENT_SITE = https://github.com/geekdojo/rasputin-control-plane/releases/download/v$(RASPUTIN_AGENT_VERSION)
 
 # Buildroot maps the target arch; the control-plane CI publishes one
@@ -30,10 +30,8 @@ RASPUTIN_AGENT_SOURCE = rasputin-agent-$(RASPUTIN_AGENT_VERSION)-linux-$(RASPUTI
 # which would strip the binary itself and extract nothing. Disable it.
 RASPUTIN_AGENT_STRIP_COMPONENTS = 0
 
-# TODO(scaffold): add the real hash once a release exists. Until then,
-# leave the hash file absent so Buildroot warns rather than silently
-# trusting an unverified download.
-# RASPUTIN_AGENT_SOURCE checksum lives in rasputin-agent.hash
+# Download verification: rasputin-agent.hash, copied from the release's
+# published .hash assets (build-release.sh emits Buildroot's format).
 
 define RASPUTIN_AGENT_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(@D)/rasputin-agent \
