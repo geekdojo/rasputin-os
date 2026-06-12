@@ -1,0 +1,29 @@
+[Unit]
+Description=Rasputin per-role hostname (only the controlplane answers rasputin.local)
+# Every-boot oneshot, NOT part of rasputin-firstboot: firstboot is guarded by
+# the .provisioned stamp and never runs again, but a TRANSIENT hostname (the
+# only kind a read-only-/etc image can have — /etc/hostname is baked squashfs)
+# evaporates on reboot and must be re-set each boot.
+#
+# Ordering: After firstboot so node.env exists on the very first boot (on
+# later boots firstboot is condition-skipped, which still satisfies the
+# ordering). Before api/agent so the api sees the final hostname when it
+# mints its self-signed cert / derives identity. systemd-resolved starts much
+# earlier than this unit can (it must wait for the persistent mount), but
+# that's fine: resolved polls /proc/sys/kernel/hostname (resolved-manager.c
+# manager_watch_hostname) and re-derives + re-announces its mDNS/LLMNR
+# records the moment the script writes the new name — no restart needed.
+# The baked placeholder hostname is "rasputin-node" (see the defconfigs), so
+# nothing ever answers rasputin.local before this unit promotes the
+# controlplane to it.
+After=rasputin-firstboot.service
+Before=rasputin-agent.service rasputin-api.service
+RequiresMountsFor=/var/lib/rasputin
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/rasputin/hostname/rasputin-hostname.sh
+
+[Install]
+WantedBy=multi-user.target

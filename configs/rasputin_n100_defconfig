@@ -27,11 +27,26 @@ BR2_INIT_SYSTEMD=y
 # NIC — enp1s0 on the Mu, enp0s2 in QEMU. The overlay ships
 # etc/systemd/network/20-wired.network matching en*/eth* instead.
 # Found on the first Mu bring-up, 2026-06-09.)
-BR2_TARGET_GENERIC_HOSTNAME="rasputin"
+# Baked hostname is a deliberately-colliding-with-nothing PLACEHOLDER, not
+# "rasputin": every node ships this same squashfs, and systemd-resolved
+# (mDNS responder) starts announcing <hostname>.local well before the
+# per-role rasputin-hostname.service can run (it waits on the persistent
+# mount). If the placeholder were "rasputin", every compute node would
+# transiently hijack rasputin.local on every boot. rasputin-hostname.service
+# promotes role==controlplane to the transient hostname "rasputin"; other
+# roles get their node id.
+BR2_TARGET_GENERIC_HOSTNAME="rasputin-node"
 BR2_TARGET_GENERIC_ISSUE="Welcome to Rasputin OS"
 # systemd logs + a getty on the serial console so QEMU (and a real serial
 # cable) can watch boot. The QEMU smoke job greps this output.
 BR2_TARGET_GENERIC_GETTY_PORT="ttyS0"
+# networkd + resolved are Buildroot defaults (=y) but the image now
+# FUNCTIONALLY depends on both: 20-wired.network (DHCP + per-link mDNS) and
+# resolved's mDNS responder for rasputin.local (first-run WebAuthn flow).
+# Pinned explicitly so a Buildroot default flip can't silently drop them.
+# (Buildroot 2025.02.3 ships systemd 256.7, built with default-mdns=yes.)
+BR2_PACKAGE_SYSTEMD_NETWORKD=y
+BR2_PACKAGE_SYSTEMD_RESOLVED=y
 
 # --- kernel: arch default config + Rasputin fragment ---
 # LATEST_VERSION tracks Buildroot's tested default for this release; pin a

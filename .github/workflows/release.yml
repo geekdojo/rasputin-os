@@ -47,7 +47,7 @@ jobs:
           set -e
           for f in scripts/*.sh \
                    board/rasputin/common/*.sh \
-                   board/rasputin/common/rootfs-overlay/usr/lib/rasputin/firstboot/*.sh; do
+                   board/rasputin/common/rootfs-overlay/usr/lib/rasputin/*/*.sh; do
             echo "bash -n $f"; bash -n "$f"
           done
       - name: External tree structure
@@ -297,7 +297,13 @@ jobs:
           # GH runners expose at /dev/kvm.)
           # user-mode NIC with a host forward so the runner can curl the
           # api/UI; virtio-net matches the virtio-blk the image already
-          # boots from. timeout stretched 300→900: this boot now also has
+          # boots from. The api listens on :80 now (HTTP bootstrap surface;
+          # RASPUTIN_HTTP_ADDR=:80 in rasputin-api.service — the old :8080
+          # default is gone from the image). /healthz stays plain-HTTP by
+          # contract. HTTPS (:443) and mDNS are NOT asserted here: user-mode
+          # networking makes multicast useless, and the self-signed-cert
+          # handshake adds nothing healthz doesn't already prove.
+          # timeout stretched 300→900: this boot now also has
           # to start the api (NATS + sqlite + docker units) under TCG, and
           # the poll budgets below (240s multi-user + 120s firstboot +
           # 240s api/UI) must all fit inside it.
@@ -306,7 +312,7 @@ jobs:
               -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
               -drive if=pflash,format=raw,file=/tmp/vars.fd \
               -drive file="$IMG",format=raw,if=virtio \
-              -nic user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:18080-:8080 \
+              -nic user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:18080-:80 \
               -serial mon:stdio > /tmp/console.log 2>&1 ) &
           QPID=$!
           ok=0
@@ -327,9 +333,14 @@ jobs:
               sleep 2
             done
           fi
-          # API + web UI smoke (same boot, via the hostfwd): the seed above
-          # made this a controlplane, so rasputin-api must come up and serve
-          # both /healthz and the bundled static UI at / (200 + HTML).
+          # API + web UI smoke (same boot, via the hostfwd to guest :80):
+          # the seed above made this a controlplane, so rasputin-api must
+          # come up and answer /healthz over plain HTTP on :80 (that stays
+          # the contract even after the HTTPS listener lands). GET / on :80
+          # passes as either the bundled UI HTML (api 0.3.x, HTTP-only) or
+          # a redirect to the HTTPS origin (api with native TLS treats :80
+          # as a bootstrap/redirect surface) — accept both so the smoke
+          # doesn't break across the api's HTTPS rollout.
           # Validated locally 2026-06-11: api answers within ~30s of
           # multi-user under TCG; budget 240s for slower runners.
           api=0 ui=0
@@ -339,8 +350,10 @@ jobs:
               sleep 5
             done
             if [ "$api" = 1 ]; then
-              root=$(curl -s --max-time 5 http://127.0.0.1:18080/ || true)
+              rcode=$(curl -s -o /tmp/root.body -w '%{http_code}' --max-time 5 http://127.0.0.1:18080/ || true)
+              root=$(cat /tmp/root.body 2>/dev/null || true)
               case "$root" in *"<html"*|*"<!DOCTYPE"*) ui=1;; esac
+              case "$rcode" in 301|302|307|308) ui=1;; esac
             fi
           fi
           kill "$QPID" 2>/dev/null || true
@@ -360,10 +373,19 @@ jobs:
           [ "$fb" = 1 ] \
             || { echo "::error::firstboot did not complete — persistent mount (e2fsprogs/makefs?) or node.env write failed; see console artifact"; exit 1; }
           echo "seed read + provisioning completion confirmed in boot output"
+          # Per-role hostname: rasputin-hostname.service runs every boot
+          # (after firstboot, before the api) and logs to kmsg like firstboot
+          # does. On this controlplane-seeded boot it must have promoted the
+          # baked "rasputin-node" placeholder to "rasputin" — that transient
+          # hostname is what resolved announces as rasputin.local (mDNS
+          # itself can't be asserted under user-mode networking).
+          grep -q "rasputin-hostname: transient hostname set to rasputin (role=controlplane)" /tmp/console.log \
+            || { echo "::error::rasputin-hostname.service did not set the controlplane hostname — mDNS rasputin.local would be broken; see console artifact"; exit 1; }
+          echo "per-role hostname (rasputin) confirmed in boot output"
           [ "$api" = 1 ] \
-            || { echo "::error::rasputin-api never answered /healthz on the controlplane boot — unit failed to start or networking regressed; see console artifact"; exit 1; }
+            || { echo "::error::rasputin-api never answered /healthz on :80 on the controlplane boot — unit failed to start, RASPUTIN_HTTP_ADDR regressed, or networking broke; see console artifact"; exit 1; }
           [ "$ui" = 1 ] \
-            || { echo "::error::GET / did not return the web UI — RASPUTIN_UI_DIR contents missing from the api tarball or the install step regressed"; exit 1; }
+            || { echo "::error::GET / on :80 returned neither the web UI nor an HTTPS redirect — RASPUTIN_UI_DIR contents missing from the api tarball or the bootstrap surface regressed"; exit 1; }
           echo "api healthz + web UI confirmed over hostfwd"
       - uses: actions/upload-artifact@v4
         if: always()

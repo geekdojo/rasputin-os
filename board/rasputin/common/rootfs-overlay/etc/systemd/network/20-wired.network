@@ -7,3 +7,16 @@ Name=en* eth*
 
 [Network]
 DHCP=yes
+# mDNS per-link opt-in (defaults to false): resolved answers <hostname>.local
+# on this link only when networkd sets this. Global responder mode lives in
+# etc/systemd/resolved.conf.d/10-rasputin-mdns.conf. Which hostname is
+# announced is decided per-role by rasputin-hostname.service — only the
+# controlplane answers rasputin.local.
+MulticastDNS=yes
+# IPv4 link-local FALLBACK for the dumb-switch/no-DHCP bench scenario.
+# "yes" = IPv6 LL always (the prior default) + IPv4 LL only while DHCPv4
+# has no lease: systemd 256's networkd starts sd-ipv4ll on DHCP transient
+# failure and drops the 169.254.x address the moment a lease is acquired
+# (networkd-dhcp4.c dhcp4_address_acquired → sd_ipv4ll_stop). So with
+# working DHCP no extra address ever exists to pollute the api's cert SANs.
+LinkLocalAddressing=yes

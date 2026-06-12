@@ -110,6 +110,12 @@ if [ -n "$JOIN_TOKEN" ] && [ "$ROLE" != "controlplane" ]; then
 	log "tailnet join token present (enrollment TODO in scaffold)"
 fi
 
+# NOTE: the per-role hostname (controlplane answers rasputin.local via mDNS,
+# everything else uses its node id) is NOT set here — firstboot runs once,
+# but a transient hostname must be re-set every boot. That lives in
+# rasputin-hostname.service / usr/lib/rasputin/hostname/rasputin-hostname.sh,
+# which reads the node.env written above.
+
 # --- role marker: gates rasputin-api.service ----------------------------------
 # /etc is read-only squashfs, so runtime `systemctl enable` can't work (and
 # ConditionEnvironment can't see node.env — it checks PID 1's environment).

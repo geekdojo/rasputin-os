@@ -13,8 +13,22 @@ RequiresMountsFor=/var/lib/rasputin
 ConditionPathExists=/var/lib/rasputin/role.controlplane
 
 [Service]
-EnvironmentFile=-/var/lib/rasputin/node.env
+# Image defaults via Environment=; the seed-written node.env can OVERRIDE
+# any of them — systemd.exec(5): "Settings from these files [EnvironmentFile]
+# override settings made with Environment=", and they're ordered after the
+# Environment= lines here as belt-and-braces anyway.
 Environment=RASPUTIN_DATA_DIR=/var/lib/rasputin
+# First-run surface: HTTP :80 is the bootstrap/redirect listener (and keeps
+# serving /healthz over plain HTTP — the QEMU smoke and the agent probe it);
+# HTTPS :443 carries the real UI/API. The unit runs as root, so low ports
+# need no extra capability grants. WebAuthn RP ID is the mDNS name the
+# image announces (rasputin-hostname.service + resolved): rasputin.local.
+Environment=RASPUTIN_HTTP_ADDR=:80
+Environment=RASPUTIN_HTTPS_ADDR=:443
+Environment=RASPUTIN_RP_ID=rasputin.local
+Environment=RASPUTIN_RP_ORIGINS=https://rasputin.local
+Environment=RASPUTIN_PUBLIC_BASE_URL=https://rasputin.local
+EnvironmentFile=-/var/lib/rasputin/node.env
 ExecStart=/usr/bin/rasputin-api
 Restart=always
 RestartSec=2
