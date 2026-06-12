@@ -28,6 +28,14 @@ Environment=RASPUTIN_HTTPS_ADDR=:443
 Environment=RASPUTIN_RP_ID=rasputin.local
 Environment=RASPUTIN_RP_ORIGINS=https://rasputin.local
 Environment=RASPUTIN_PUBLIC_BASE_URL=https://rasputin.local
+# Embedded NATS must be reachable from the other nodes' agents (firewall,
+# compute) — they attach LAN-first, mesh-second (first-run-bootstrap.md
+# decision #6). The api's code default is 127.0.0.1 (dev posture).
+# ⚠ MVS trust posture: the bus is currently TOFU/unauthenticated
+# (architecture.md decision #14 — production NKey/JWT via the seed join
+# token is the gating item before design partners). LAN exposure here is
+# the documented interim; override to 127.0.0.1 via node.env to close it.
+Environment=RASPUTIN_NATS_HOST=0.0.0.0
 EnvironmentFile=-/var/lib/rasputin/node.env
 ExecStart=/usr/bin/rasputin-api
 Restart=always
