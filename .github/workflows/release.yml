@@ -356,6 +356,27 @@ jobs:
               case "$rcode" in 301|302|307|308) ui=1;; esac
             fi
           fi
+          # Uptime soak: retry-until-success probes are blind to a crash
+          # loop (the api's missing sd_notify watchdog support meant every
+          # hardware boot SIGABRT-cycled it every ~33s for FIVE releases,
+          # and this smoke passed every time — found 2026-06-12 on the Mu
+          # bench). 70s straddles two 30s watchdog windows: if any unit is
+          # being watchdog-killed, healthz at the end fails and/or the
+          # console shows the kill. Both are asserted after shutdown below.
+          # Probe CONTINUOUSLY (every 2s for 70s, every probe must pass):
+          # a single end-of-window probe would land inside a crash loop's
+          # ~28s live window ~85% of the time — the exact blindness that
+          # let the bug ship. A 33s kill cycle has a 4-5s dead window that
+          # 2s-interval probes cannot miss.
+          soak=0
+          if [ "$api" = 1 ]; then
+            soak=1
+            for _ in $(seq 1 35); do
+              sleep 2
+              [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:18080/healthz || true)" = "200" ] \
+                || { soak=0; break; }
+            done
+          fi
           kill "$QPID" 2>/dev/null || true
           echo "----- last 60 lines of console -----"; tail -60 /tmp/console.log || true
           [ "$ok" = 1 ] || { echo "::error::image did not reach multi-user in QEMU"; exit 1; }
@@ -386,7 +407,12 @@ jobs:
             || { echo "::error::rasputin-api never answered /healthz on :80 on the controlplane boot — unit failed to start, RASPUTIN_HTTP_ADDR regressed, or networking broke; see console artifact"; exit 1; }
           [ "$ui" = 1 ] \
             || { echo "::error::GET / on :80 returned neither the web UI nor an HTTPS redirect — RASPUTIN_UI_DIR contents missing from the api tarball or the bootstrap surface regressed"; exit 1; }
-          echo "api healthz + web UI confirmed over hostfwd"
+          [ "$soak" = 1 ] \
+            || { echo "::error::api did not survive the 70s uptime soak — watchdog kill loop or crash; check console for 'Watchdog timeout' / SIGABRT"; exit 1; }
+          if grep -q "Watchdog timeout" /tmp/console.log; then
+            echo "::error::systemd watchdog killed a rasputin unit during the smoke — sd_notify petting regressed (see the v0.4.3 sdnotify package)"; exit 1
+          fi
+          echo "api healthz + web UI + 70s uptime soak confirmed over hostfwd"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

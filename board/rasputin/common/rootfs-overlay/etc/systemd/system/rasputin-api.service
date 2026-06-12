@@ -40,6 +40,15 @@ EnvironmentFile=-/var/lib/rasputin/node.env
 ExecStart=/usr/bin/rasputin-api
 Restart=always
 RestartSec=2
+# Watchdog contract: the api pets via sd_notify(WATCHDOG=1) gated on a
+# SQLite liveness probe — implemented in control-plane v0.4.3
+# (api/internal/sdnotify). BEFORE that the binary never notified and this
+# stanza silently SIGABRT-killed the api every ~33s on every hardware
+# boot (found 2026-06-12; the QEMU smoke's retry-until-success healthz
+# polls fit inside the live windows, so five releases shipped with it).
+# Type=notify makes the contract explicit — and the smoke now asserts
+# 70s of uninterrupted uptime so this class of bug can't ship again.
+Type=notify
 WatchdogSec=30
 NotifyAccess=main
 

@@ -21,9 +21,15 @@ Restart=always
 RestartSec=2
 # systemd watchdog — part of the update defense-in-depth (the CM5
 # bootloader can't count boot attempts, so userspace must catch a wedge).
-# The agent calls sd_notify(WATCHDOG=1); if it stops pinging, systemd
-# kills + restarts it, and after enough failures the bootloader retries
-# the other slot. See os-images/buildroot-os.md §3.
+# The agent pets via sd_notify(WATCHDOG=1) — implemented in control-plane
+# v0.4.3 (agent/internal/sdnotify); BEFORE that the binary never notified
+# and this stanza silently SIGABRT-killed the agent every 30s on every
+# hardware boot since the scaffold (found 2026-06-12 on the Mu bench —
+# every probe we had fit inside the ~28s live windows). Type=notify makes
+# the contract explicit: a binary without notify support now fails START
+# loudly instead of looping quietly. Do not pair WatchdogSec with a
+# non-notifying binary again. See os-images/buildroot-os.md §3.
+Type=notify
 WatchdogSec=30
 NotifyAccess=main
 
