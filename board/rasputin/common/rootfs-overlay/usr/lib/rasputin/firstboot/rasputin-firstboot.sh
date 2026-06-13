@@ -41,6 +41,7 @@ ROLE=""
 NODE_ID=""
 NATS_URL=""
 JOIN_TOKEN=""
+BUS_AUTH=""
 
 if [ -f "$SEED_FILE" ]; then
 	log "reading seed $SEED_FILE"
@@ -50,6 +51,7 @@ if [ -f "$SEED_FILE" ]; then
 	NODE_ID="${RASPUTIN_NODE_ID:-}"
 	NATS_URL="${RASPUTIN_NATS_URL:-}"
 	JOIN_TOKEN="${RASPUTIN_CP_JOIN_TOKEN:-}"
+	BUS_AUTH="${RASPUTIN_BUS_AUTH:-}"
 else
 	log "no seed file at $SEED_FILE; using defaults"
 fi
@@ -100,6 +102,13 @@ EOF
 # and the BMC host default (see control-plane/updates.md, bmc.md).
 if [ "$ROLE" = "controlplane" ]; then
 	echo "RASPUTIN_SELF_NODE_ID=$NODE_ID" >> "$NODE_ENV"
+	# A provisioned matched set ships enforce on (bus auth required), carried in
+	# the seed so a pre-paired cluster comes up enforced with no manual flip.
+	# Absent → the api's default (off). Only the controlplane's api reads this.
+	# token-provisioning-pipeline.md §4.
+	if [ -n "$BUS_AUTH" ]; then
+		echo "RASPUTIN_BUS_AUTH=$BUS_AUTH" >> "$NODE_ENV"
+	fi
 fi
 # Non-controlplane nodes present the join token to the bus auth callout: the
 # agent sends NATS username=node-id, password=token, and the controlplane

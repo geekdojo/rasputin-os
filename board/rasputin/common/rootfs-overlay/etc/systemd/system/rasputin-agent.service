@@ -1,6 +1,13 @@
 [Unit]
 Description=Rasputin node agent
-After=network-online.target rasputin-firstboot.service
+# Order after rasputin-api so the controlplane's co-located agent doesn't race
+# the embedded NATS broker on a simultaneous (re)start — found 2026-06-13 during
+# the bus-auth cutover: `systemctl restart rasputin-api rasputin-agent` started
+# the agent before NATS was ready, so its first start failed (it self-healed via
+# Restart=always). After= is ordering only and inert on non-controlplane nodes,
+# where rasputin-api condition-skips (no role marker) and is never in the
+# transaction.
+After=network-online.target rasputin-firstboot.service rasputin-api.service
 Wants=network-online.target
 Requires=rasputin-firstboot.service
 RequiresMountsFor=/var/lib/rasputin
