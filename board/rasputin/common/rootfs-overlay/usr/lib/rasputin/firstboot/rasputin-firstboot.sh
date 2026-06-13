@@ -101,6 +101,13 @@ EOF
 if [ "$ROLE" = "controlplane" ]; then
 	echo "RASPUTIN_SELF_NODE_ID=$NODE_ID" >> "$NODE_ENV"
 fi
+# Non-controlplane nodes present the join token to the bus auth callout: the
+# agent sends NATS username=node-id, password=token, and the controlplane
+# validates it (token-provisioning-pipeline.md). The controlplane's own
+# co-located agent is loopback-trusted and carries no token.
+if [ -n "$JOIN_TOKEN" ] && [ "$ROLE" != "controlplane" ]; then
+	echo "RASPUTIN_CP_JOIN_TOKEN=$JOIN_TOKEN" >> "$NODE_ENV"
+fi
 
 # --- tailnet enrollment (join token) -----------------------------------------
 # TODO(scaffold): call `tailscale up --login-server=… --auth-key=$JOIN_TOKEN`
@@ -126,6 +133,16 @@ if [ "$ROLE" = "controlplane" ]; then
 	touch "$PERSIST/role.controlplane"
 	# TODO(scaffold): sidecar containers (Headscale, VictoriaMetrics, Loki,
 	# Grafana) get the same marker gate once their compose units land.
+	# Copy the provisioning bus-token preseed (sha256 hashes + node bindings —
+	# NO plaintext) from the seed FAT onto the persistent partition, where the
+	# api preloads it so a pre-paired cluster's nodes are accepted on first boot
+	# with enforcement on (token-provisioning-pipeline.md §4c). Absent on a
+	# self-provisioned/un-paired controlplane — that's fine.
+	if [ -f "$SEED_MNT/rasputin-bus-tokens.json" ]; then
+		mkdir -p "$PERSIST/bus"
+		cp "$SEED_MNT/rasputin-bus-tokens.json" "$PERSIST/bus/preseed.json"
+		log "staged bus-token preseed for the api to preload"
+	fi
 else
 	rm -f "$PERSIST/role.controlplane"
 fi
