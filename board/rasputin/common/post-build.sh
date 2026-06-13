@@ -44,3 +44,13 @@ ln -sf /usr/lib/systemd/system/getty@.service \
 
 # Ensure the persistent data dir exists as a mountpoint.
 mkdir -p "$TARGET_DIR/var/lib/rasputin"
+
+# Bake the OS image version (CalVer) into a uniform runtime file. The agent
+# reads /etc/rasputin/image-version at startup and reports it on registration
+# so the control-plane UI can show which image each node is running — critical
+# for troubleshooting and support. The OpenWrt firewall image writes the same
+# file at its build time. CI exports RASPUTIN_VERSION as the CalVer tag; a
+# local build with no export falls back to 0.0.0-dev. /etc/rasputin already
+# holds node.env and trust/, so it's the right home for this.
+mkdir -p "$TARGET_DIR/etc/rasputin"
+printf '%s\n' "${RASPUTIN_VERSION:-0.0.0-dev}" > "$TARGET_DIR/etc/rasputin/image-version"
