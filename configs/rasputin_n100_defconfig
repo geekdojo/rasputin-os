@@ -86,6 +86,12 @@ BR2_PACKAGE_HOST_DOSFSTOOLS=y
 BR2_PACKAGE_HOST_MTOOLS=y
 
 # --- app primitive ---
+# ca-certificates: public CA trust store (Mozilla NSS bundle → /etc/ssl/certs).
+# Without it EVERY outbound TLS client fails cert verification — dockerd can't
+# pull from registry-1.docker.io (x509: certificate signed by unknown
+# authority — bench 2026-06-17, blocked self-hosted Headscale), tailscaled
+# can't reach public DERP relays, and the api can't fetch over HTTPS.
+BR2_PACKAGE_CA_CERTIFICATES=y
 BR2_PACKAGE_DOCKER_ENGINE=y
 BR2_PACKAGE_DOCKER_CLI=y
 # tailscale: mesh / remote access (Headscale self-hosted control server). The
