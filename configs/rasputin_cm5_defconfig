@@ -80,6 +80,11 @@ BR2_PACKAGE_HOST_MTOOLS=y
 # --- app primitive ---
 BR2_PACKAGE_DOCKER_ENGINE=y
 BR2_PACKAGE_DOCKER_CLI=y
+# tailscale: mesh / remote access (Headscale self-hosted control server). The
+# agent autodetects the binary via PATH and drives `tailscale up`; tailscaled
+# trusts the per-installation Mesh CA via SSL_CERT_FILE (see the tailscaled
+# drop-in in the overlay).
+BR2_PACKAGE_TAILSCALE=y
 
 # --- Rasputin packages (this external tree) ---
 BR2_PACKAGE_RASPUTIN_AGENT=y

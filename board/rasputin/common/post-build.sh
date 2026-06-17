@@ -30,6 +30,17 @@ ln -sf /etc/systemd/system/rasputin-agent.service \
 ln -sf /etc/systemd/system/rasputin-hostname.service \
 	"$TARGET_DIR/etc/systemd/system/multi-user.target.wants/rasputin-hostname.service"
 
+# tailscaled (mesh / remote access). The upstream Buildroot tailscale package
+# installs the unit at /usr/lib/systemd/system/tailscaled.service but does not
+# enable it; enable it on every image so it's up before the agent runs
+# `tailscale up` on mesh enrollment. (`systemctl restart tailscaled` from the
+# agent then talks to a daemon that's already running.) It idles harmlessly
+# until enrolled — no state until `tailscale up`. The SSL_CERT_FILE drop-in
+# that points tailscaled at the per-installation Mesh CA lives in the overlay
+# at etc/systemd/system/tailscaled.service.d/.
+ln -sf /usr/lib/systemd/system/tailscaled.service \
+	"$TARGET_DIR/etc/systemd/system/multi-user.target.wants/tailscaled.service"
+
 # rasputin-api.service is intentionally NOT symlinked here — preset-all
 # enables it; the role.controlplane marker condition gates the actual start
 # (provisioning.md §2).
