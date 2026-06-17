@@ -41,6 +41,26 @@ ln -sf /etc/systemd/system/rasputin-hostname.service \
 ln -sf /usr/lib/systemd/system/tailscaled.service \
 	"$TARGET_DIR/etc/systemd/system/multi-user.target.wants/tailscaled.service"
 
+# dropbear: key-only SSH for support/debugging a headless controlplane. Enable
+# the overlay unit (etc/systemd/system/dropbear.service, runs with -s = no
+# password auth). Bake root's authorized_keys from RASPUTIN_SSH_AUTHORIZED_KEY
+# so the image ships key-only — mirrors the firewall's RASPUTIN_SSH_AUTHORIZED_KEY
+# baking. No key → no network SSH (console still works), never passwordless
+# root over the network.
+ln -sf /etc/systemd/system/dropbear.service \
+	"$TARGET_DIR/etc/systemd/system/multi-user.target.wants/dropbear.service"
+mkdir -p "$TARGET_DIR/root/.ssh"
+chmod 700 "$TARGET_DIR/root/.ssh"
+if [ -n "${RASPUTIN_SSH_AUTHORIZED_KEY:-}" ]; then
+	printf '%s\n' "$RASPUTIN_SSH_AUTHORIZED_KEY" > "$TARGET_DIR/root/.ssh/authorized_keys"
+	chmod 600 "$TARGET_DIR/root/.ssh/authorized_keys"
+	echo "post-build: baked $(grep -c . "$TARGET_DIR/root/.ssh/authorized_keys") authorized SSH key line(s) — image is key-only"
+else
+	: > "$TARGET_DIR/root/.ssh/authorized_keys"
+	chmod 600 "$TARGET_DIR/root/.ssh/authorized_keys"
+	echo "post-build: WARNING — RASPUTIN_SSH_AUTHORIZED_KEY unset; no SSH key baked. Network SSH will be unusable (console only). Set the variable to enable key-only SSH."
+fi
+
 # rasputin-api.service is intentionally NOT symlinked here — preset-all
 # enables it; the role.controlplane marker condition gates the actual start
 # (provisioning.md §2).

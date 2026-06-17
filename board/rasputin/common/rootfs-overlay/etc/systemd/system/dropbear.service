@@ -1,0 +1,30 @@
+# Key-only SSH for support/debugging a headless controlplane. rasputin-os has
+# no display attached in normal operation, and until the mesh forms there's no
+# tailnet path in — so a baked-key dropbear is the supported remote shell.
+#
+# Posture: -s disables password auth entirely, so even though console root is
+# passwordless (bench), the NETWORK vector is key-only. The authorized key is
+# baked into /root/.ssh/authorized_keys at build time from
+# RASPUTIN_SSH_AUTHORIZED_KEY (post-build.sh); with no key baked, nobody can
+# SSH in (console still works) — never passwordless root over the network.
+#
+# Host keys live on the persistent partition (the rootfs is read-only
+# squashfs) so SSH host identity is stable across reboots and A/B updates;
+# they're generated on first boot if absent.
+[Unit]
+Description=Dropbear SSH server (key-only)
+After=network.target systemd-tmpfiles-setup.service
+Wants=network.target
+RequiresMountsFor=/var/lib/rasputin
+
+[Service]
+Type=simple
+ExecStartPre=/bin/sh -c 'mkdir -p /var/lib/rasputin/dropbear && { test -s /var/lib/rasputin/dropbear/ed25519_host_key || /usr/bin/dropbearkey -t ed25519 -f /var/lib/rasputin/dropbear/ed25519_host_key; }'
+# -F foreground (systemd-managed), -E log to the journal, -s NO password auth
+# (key-only). -r pins the persistent host key.
+ExecStart=/usr/sbin/dropbear -F -E -s -r /var/lib/rasputin/dropbear/ed25519_host_key
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

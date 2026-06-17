@@ -197,6 +197,10 @@ jobs:
         env:
           RASPUTIN_VERSION: ${{ steps.ver.outputs.version }}
           BR2_DL_DIR: ${{ github.workspace }}/dl
+          # Baked into /root/.ssh/authorized_keys by post-build.sh for key-only
+          # SSH. Same org/repo variable the firewall image uses. Empty → no
+          # network SSH (console only); set it for a key-only image.
+          RASPUTIN_SSH_AUTHORIZED_KEY: ${{ vars.RASPUTIN_SSH_AUTHORIZED_KEY }}
         run: |
           make -C buildroot BR2_EXTERNAL=${{ github.workspace }} \
             O=${{ github.workspace }}/output/${{ matrix.sku }} \
