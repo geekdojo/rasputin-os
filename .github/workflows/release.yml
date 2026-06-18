@@ -193,6 +193,31 @@ jobs:
           fetch rasputin-api
           echo "----- dl/ tarballs -----"; find "$dl" -name '*.tar.gz' -print
 
+      # Pre-pull + save the mesh container images (self-hosted Headscale) for
+      # the target arch so post-build.sh can bake them into the rootfs. The
+      # controlplane then forms its mesh on first boot WITHOUT internet (the
+      # supervisor's `docker image inspect` finds the loaded image and skips the
+      # pull). --platform so the cm5 (arm64) image is fetched correctly on this
+      # amd64 runner — we only `docker save` it here, never run it. Refs come
+      # from board/rasputin/common/mesh-images.list (single source; must match
+      # the api's defaultImage). See os-images/buildroot-os.md §7.1.
+      - name: Bake mesh container images
+        run: |
+          set -euo pipefail
+          arch='${{ matrix.arch }}'          # amd64 (n100) | arm64 (cm5)
+          list='${{ github.workspace }}/board/rasputin/common/mesh-images.list'
+          out='${{ github.workspace }}/mesh-images'
+          mkdir -p "$out"
+          grep -vE '^[[:space:]]*(#|$)' "$list" | while read -r ref; do
+            ref="$(printf '%s' "$ref" | tr -d '[:space:]')"
+            [ -n "$ref" ] || continue
+            file="$(printf '%s' "$ref" | tr '/:' '__').tar"
+            echo "→ pulling $ref (linux/$arch) → $file"
+            docker pull --platform "linux/$arch" "$ref"
+            docker save "$ref" -o "$out/$file"
+          done
+          echo "----- baked mesh image tarballs -----"; ls -lh "$out"
+
       - name: Build
         env:
           RASPUTIN_VERSION: ${{ steps.ver.outputs.version }}
@@ -201,6 +226,9 @@ jobs:
           # SSH. Same org/repo variable the firewall image uses. Empty → no
           # network SSH (console only); set it for a key-only image.
           RASPUTIN_SSH_AUTHORIZED_KEY: ${{ vars.RASPUTIN_SSH_AUTHORIZED_KEY }}
+          # Mesh image tarballs from the "Bake mesh container images" step;
+          # post-build.sh copies them into /usr/share/rasputin/mesh-images.
+          RASPUTIN_MESH_IMAGES_DIR: ${{ github.workspace }}/mesh-images
         run: |
           make -C buildroot BR2_EXTERNAL=${{ github.workspace }} \
             O=${{ github.workspace }}/output/${{ matrix.sku }} \

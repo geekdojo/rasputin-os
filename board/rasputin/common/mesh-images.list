@@ -1,0 +1,16 @@
+# Container images baked into the OS image so a controlplane forms its mesh on
+# FIRST BOOT WITHOUT INTERNET. CI's "Bake mesh container images" step
+# docker-pulls each ref (for the build's target arch) and docker-saves it into
+# the rootfs at /usr/share/rasputin/mesh-images/; rasputin-mesh-images.service
+# then `docker load`s them before rasputin-api starts, so the mesh supervisor's
+# `docker image inspect` succeeds and it SKIPS the network pull.
+#
+# Format: one image ref per line. Blank lines and "#" comments are ignored.
+#
+# SYNC CONTRACT: the headscale ref MUST match `defaultImage` in the control-
+# plane API at api/internal/mesh/supervisor_docker.go (currently
+# headscale/headscale:0.28.0). If they drift, the baked tarball simply isn't
+# matched by the supervisor and it falls back to pulling at runtime (needs
+# internet) — graceful degradation, but it defeats the offline-first-boot goal.
+# Bump both together. Full rationale: os-images/buildroot-os.md §7.1.
+headscale/headscale:0.28.0

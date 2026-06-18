@@ -1,0 +1,32 @@
+# Load OS-baked mesh container images into Docker before the control-plane API
+# starts, so a controlplane forms its self-hosted mesh on FIRST BOOT WITHOUT
+# INTERNET. CI's "Bake mesh container images" step docker-saved the refs from
+# board/rasputin/common/mesh-images.list into /usr/share/rasputin/mesh-images/
+# (see post-build.sh); `docker load` here makes the mesh supervisor's
+# `docker image inspect` succeed so it skips the pull (api ensureImage,
+# api/internal/mesh/supervisor_docker.go). Without this the controlplane could
+# only form its mesh online (bench 2026-06-18: a link-local / firewall-down
+# controlplane sat retrying `docker pull headscale/...` forever).
+#
+# Gated two ways by the Condition* lines, so it's a no-op where it shouldn't run:
+#   - controlplane-only: the supervisor (and thus the image) is needed only on
+#     the controlplane; compute nodes skip the load.
+#   - images-present: a local/dev build with no baked tarballs skips entirely
+#     and the supervisor pulls at runtime as before.
+# A failed load does NOT block rasputin-api (ordering only, no Requires from
+# api) — the supervisor just falls back to pulling.
+[Unit]
+Description=Load OS-baked mesh container images into Docker
+After=docker.service rasputin-firstboot.service
+Requires=docker.service
+Before=rasputin-api.service
+ConditionPathExists=/var/lib/rasputin/role.controlplane
+ConditionPathExistsGlob=/usr/share/rasputin/mesh-images/*.tar
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'for t in /usr/share/rasputin/mesh-images/*.tar; do [ -e "$t" ] || continue; echo "rasputin-mesh-images: loading $t"; /usr/bin/docker load -i "$t" || exit 1; done'
+
+[Install]
+WantedBy=multi-user.target

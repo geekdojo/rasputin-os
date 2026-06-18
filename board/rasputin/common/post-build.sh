@@ -61,6 +61,25 @@ else
 	echo "post-build: WARNING — RASPUTIN_SSH_AUTHORIZED_KEY unset; no SSH key baked. Network SSH will be unusable (console only). Set the variable to enable key-only SSH."
 fi
 
+# Bake mesh container images (self-hosted Headscale) into the rootfs so the
+# controlplane forms its mesh on FIRST BOOT WITHOUT INTERNET. CI's "Bake mesh
+# container images" step docker-saved the refs from
+# board/rasputin/common/mesh-images.list into $RASPUTIN_MESH_IMAGES_DIR; copy
+# the tarballs in, and rasputin-mesh-images.service `docker load`s them before
+# rasputin-api so the supervisor's `docker image inspect` finds the image and
+# skips the pull. No dir set (local dev build) → nothing baked; the supervisor
+# pulls at runtime as before (graceful). The loader unit is controlplane- and
+# images-present-gated, so enabling it unconditionally here is safe.
+if [ -n "${RASPUTIN_MESH_IMAGES_DIR:-}" ] && ls "$RASPUTIN_MESH_IMAGES_DIR"/*.tar >/dev/null 2>&1; then
+	mkdir -p "$TARGET_DIR/usr/share/rasputin/mesh-images"
+	cp "$RASPUTIN_MESH_IMAGES_DIR"/*.tar "$TARGET_DIR/usr/share/rasputin/mesh-images/"
+	echo "post-build: baked $(ls "$RASPUTIN_MESH_IMAGES_DIR"/*.tar | wc -l | tr -d ' ') mesh image tarball(s) into /usr/share/rasputin/mesh-images — controlplane forms its mesh offline"
+else
+	echo "post-build: no mesh images baked (RASPUTIN_MESH_IMAGES_DIR unset/empty) — controlplane will pull Headscale at runtime (needs internet)"
+fi
+ln -sf /etc/systemd/system/rasputin-mesh-images.service \
+	"$TARGET_DIR/etc/systemd/system/multi-user.target.wants/rasputin-mesh-images.service"
+
 # rasputin-api.service is intentionally NOT symlinked here — preset-all
 # enables it; the role.controlplane marker condition gates the actual start
 # (provisioning.md §2).
