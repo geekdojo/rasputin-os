@@ -12,5 +12,5 @@
 # headscale/headscale:0.28.0). If they drift, the baked tarball simply isn't
 # matched by the supervisor and it falls back to pulling at runtime (needs
 # internet) — graceful degradation, but it defeats the offline-first-boot goal.
-# Bump both together. Full rationale: os-images/buildroot-os.md §7.1.
+# Bump both together. Full rationale: os-images/buildroot-os.md §8.
 headscale/headscale:0.28.0

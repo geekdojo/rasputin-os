@@ -200,7 +200,7 @@ jobs:
       # pull). --platform so the cm5 (arm64) image is fetched correctly on this
       # amd64 runner — we only `docker save` it here, never run it. Refs come
       # from board/rasputin/common/mesh-images.list (single source; must match
-      # the api's defaultImage). See os-images/buildroot-os.md §7.1.
+      # the api's defaultImage). See os-images/buildroot-os.md §8.
       - name: Bake mesh container images
         run: |
           set -euo pipefail
