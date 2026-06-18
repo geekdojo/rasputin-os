@@ -40,6 +40,14 @@ BR2_TARGET_GENERIC_ISSUE="Welcome to Rasputin OS"
 # systemd logs + a getty on the serial console so QEMU (and a real serial
 # cable) can watch boot. The QEMU smoke job greps this output.
 BR2_TARGET_GENERIC_GETTY_PORT="ttyS0"
+# Default console/serial root password (Buildroot hashes it at build). Network
+# SSH stays key-only (dropbear -s ignores passwords), so this only guards the
+# physical console — defense-in-depth, not a network control. Baked because
+# /etc/shadow is on the read-only squashfs rootfs and can't be changed at
+# runtime yet; making it operator-changeable (passwd / wizard) needs shadow on
+# the persistent partition — tracked in the backlog. Document the default +
+# "change me" in getting-started.
+BR2_TARGET_GENERIC_ROOT_PASSWD="rasputin"
 # networkd + resolved are Buildroot defaults (=y) but the image now
 # FUNCTIONALLY depends on both: 20-wired.network (DHCP + per-link mDNS) and
 # resolved's mDNS responder for rasputin.local (first-run WebAuthn flow).

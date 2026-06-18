@@ -33,6 +33,13 @@ BR2_TARGET_GENERIC_HOSTNAME="rasputin-node"
 BR2_TARGET_GENERIC_ISSUE="Welcome to Rasputin OS"
 # Pi serial console (UART on the 40-pin header / debug connector).
 BR2_TARGET_GENERIC_GETTY_PORT="ttyAMA0"
+# Default console/serial root password (Buildroot hashes it at build). Network
+# SSH stays key-only (dropbear -s ignores passwords), so this only guards the
+# physical console — defense-in-depth, not a network control. Baked because
+# /etc/shadow is on the read-only squashfs rootfs and can't be changed at
+# runtime yet; making it operator-changeable (passwd / wizard) needs shadow on
+# the persistent partition — tracked in the backlog.
+BR2_TARGET_GENERIC_ROOT_PASSWD="rasputin"
 # networkd + resolved pinned explicitly (Buildroot defaults, but the image
 # functionally depends on them — see rasputin_n100_defconfig).
 BR2_PACKAGE_SYSTEMD_NETWORKD=y
