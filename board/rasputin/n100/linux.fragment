@@ -98,5 +98,20 @@ CONFIG_NF_NAT=y
 CONFIG_IP_NF_NAT=y
 CONFIG_IP_NF_TARGET_MASQUERADE=y
 
+# --- BPF + cgroup device controller. On cgroup v2 runc enforces container
+#     device access with an eBPF program attached to the cgroup
+#     (BPF_CGROUP_DEVICE). Without CONFIG_CGROUP_BPF the container start aborts
+#     with "bpf_prog_query(BPF_CGROUP_DEVICE) failed: function not implemented"
+#     and NO container can start (bench 2026-06-18: dockerd pulled the
+#     self-hosted Headscale image fine, then runc couldn't launch it). The arch
+#     default config does NOT enable these, and the QEMU smoke test never starts
+#     a container so it stayed invisible until real-hardware mesh bring-up.
+#     CGROUP_DEVICE is the v1 fallback controller; harmless to carry alongside. ---
+CONFIG_BPF=y
+CONFIG_BPF_SYSCALL=y
+CONFIG_BPF_JIT=y
+CONFIG_CGROUP_BPF=y
+CONFIG_CGROUP_DEVICE=y
+
 # --- tailscale (mesh / remote access): tailscaled needs /dev/net/tun ---
 CONFIG_TUN=y

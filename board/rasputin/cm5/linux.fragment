@@ -35,5 +35,16 @@ CONFIG_NF_NAT=y
 CONFIG_IP_NF_NAT=y
 CONFIG_IP_NF_TARGET_MASQUERADE=y
 
+# --- BPF + cgroup device controller. cgroup v2 + runc enforce container device
+#     access via an eBPF program (BPF_CGROUP_DEVICE); without CONFIG_CGROUP_BPF
+#     no container can start ("bpf_prog_query(BPF_CGROUP_DEVICE) failed:
+#     function not implemented"). Found on the N100 bench 2026-06-18; pinned
+#     here too so the CM5 SKU doesn't reintroduce it. ---
+CONFIG_BPF=y
+CONFIG_BPF_SYSCALL=y
+CONFIG_BPF_JIT=y
+CONFIG_CGROUP_BPF=y
+CONFIG_CGROUP_DEVICE=y
+
 # --- tailscale (mesh / remote access): tailscaled needs /dev/net/tun ---
 CONFIG_TUN=y
