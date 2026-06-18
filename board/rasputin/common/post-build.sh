@@ -95,6 +95,18 @@ ln -sf /usr/lib/systemd/system/getty@.service \
 # Ensure the persistent data dir exists as a mountpoint.
 mkdir -p "$TARGET_DIR/var/lib/rasputin"
 
+# Route /etc/resolv.conf through systemd-resolved's STUB (127.0.0.53), not the
+# uplink file (which lists the upstream DNS directly). nss "resolve" already
+# sends getaddrinfo() callers to resolved (so mDNS .local works for them), but
+# a PURE-GO resolver — which tailscale binaries are (CGO_ENABLED=0) — reads
+# /etc/resolv.conf directly and would query the upstream DNS, getting NXDOMAIN
+# for rasputin.local. Pointing at the stub makes every resolver, cgo or not,
+# go through resolved (mDNS for .local, forward for everything else). This is
+# what lets tailscaled reach the mesh login server at https://rasputin.local
+# (see rasputin-api.service RASPUTIN_HEADSCALE_URL). /etc is read-only squashfs,
+# so the symlink is baked here.
+ln -sf ../run/systemd/resolve/stub-resolv.conf "$TARGET_DIR/etc/resolv.conf"
+
 # Bake the OS image version (CalVer) into a uniform runtime file. The agent
 # reads /etc/rasputin/image-version at startup and reports it on registration
 # so the control-plane UI can show which image each node is running — critical

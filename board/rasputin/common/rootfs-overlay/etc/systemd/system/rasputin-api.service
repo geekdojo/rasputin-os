@@ -36,6 +36,16 @@ Environment=RASPUTIN_PUBLIC_BASE_URL=https://rasputin.local
 # token is the gating item before design partners). LAN exposure here is
 # the documented interim; override to 127.0.0.1 via node.env to close it.
 Environment=RASPUTIN_NATS_HOST=0.0.0.0
+# Self-hosted Headscale advertises THIS as its server_url — the address every
+# node's tailscaled connects to. Pin the stable mDNS name, not the controlplane's
+# DHCP IP: resolveServerHost() would otherwise bake the current lease into
+# Headscale + every node's tailscale state, so a lease change drops the whole
+# mesh (bench: .180→.181→.182 across reboots). The leaf cert already carries
+# rasputin.local in its SAN. URL-only (no RASPUTIN_HEADSCALE_API_KEY) keeps the
+# backend self-hosted — external mode needs BOTH (main.go wireMesh hasExternal).
+# Requires every node to resolve rasputin.local at the OS level (CP: resolved
+# mDNS via the stub resolv.conf below; firewall: its own mDNS resolver).
+Environment=RASPUTIN_HEADSCALE_URL=https://rasputin.local:18080
 EnvironmentFile=-/var/lib/rasputin/node.env
 ExecStart=/usr/bin/rasputin-api
 Restart=always
