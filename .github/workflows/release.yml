@@ -611,3 +611,28 @@ jobs:
             --notes "Channel: \`${{ steps.ver.outputs.channel }}\`. Verify the chain with the public root CA (\`vars.RASPUTIN_ROOT_CA_PEM\` on the geekdojo org); per-asset SHA-256 in \`manifest.json\`." \
             $PRERELEASE_FLAG \
             release-out/*
+
+      # Mirror to the PUBLIC release channel (geekdojo/rasputin-releases),
+      # tag-namespaced "os-<version>". The control plane reads that public repo
+      # anonymously for Check for Updates + pulls the .raucb into its bundle
+      # store (source repos stay private, no token on appliances). Only the
+      # manifest + RAUC bundle are mirrored — the full .img.xz flash image isn't
+      # needed by the channel. RASPUTIN_RELEASES is an org secret (Contents:write
+      # on rasputin-releases). Idempotent (create-or-clobber) on job re-runs.
+      - name: Mirror to public release channel
+        env:
+          GH_TOKEN: ${{ secrets.RASPUTIN_RELEASES }}
+        run: |
+          set -eu
+          PRERELEASE_FLAG=""
+          if [ "${{ steps.ver.outputs.prerelease }}" = "true" ]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+          tag="os-${{ steps.ver.outputs.version }}"
+          gh release create "$tag" --repo geekdojo/rasputin-releases \
+            --title "Rasputin OS ${{ steps.ver.outputs.version }}" \
+            --notes "Mirrored from \`rasputin-os@${{ steps.ver.outputs.version }}\` (channel: \`${{ steps.ver.outputs.channel }}\`). Signed; per-asset SHA-256 in \`manifest.json\`." \
+            $PRERELEASE_FLAG \
+            release-out/manifest.json release-out/*.raucb \
+          || gh release upload "$tag" --repo geekdojo/rasputin-releases --clobber \
+            release-out/manifest.json release-out/*.raucb
