@@ -42,6 +42,7 @@ NODE_ID=""
 NATS_URL=""
 JOIN_TOKEN=""
 BUS_AUTH=""
+RELEASE_CHANNEL=""
 
 if [ -f "$SEED_FILE" ]; then
 	log "reading seed $SEED_FILE"
@@ -52,6 +53,7 @@ if [ -f "$SEED_FILE" ]; then
 	NATS_URL="${RASPUTIN_NATS_URL:-}"
 	JOIN_TOKEN="${RASPUTIN_CP_JOIN_TOKEN:-}"
 	BUS_AUTH="${RASPUTIN_BUS_AUTH:-}"
+	RELEASE_CHANNEL="${RASPUTIN_RELEASE_CHANNEL:-}"
 else
 	log "no seed file at $SEED_FILE; using defaults"
 fi
@@ -108,6 +110,13 @@ if [ "$ROLE" = "controlplane" ]; then
 	# token-provisioning-pipeline.md §4.
 	if [ -n "$BUS_AUTH" ]; then
 		echo "RASPUTIN_BUS_AUTH=$BUS_AUTH" >> "$NODE_ENV"
+	fi
+	# Update channel (stable|dev) the api's Check-for-Updates tracks.
+	# provision-cluster writes this into the controlplane seed when flashing a
+	# dev/pre-release image; absent → the api's default (stable). Only the
+	# controlplane runs the api, so it's controlplane-only like BUS_AUTH.
+	if [ -n "$RELEASE_CHANNEL" ]; then
+		echo "RASPUTIN_RELEASE_CHANNEL=$RELEASE_CHANNEL" >> "$NODE_ENV"
 	fi
 fi
 # Non-controlplane nodes present the join token to the bus auth callout: the
