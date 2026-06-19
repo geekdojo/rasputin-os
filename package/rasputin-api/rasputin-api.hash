@@ -1,3 +1,3 @@
-# From https://github.com/geekdojo/rasputin-control-plane/releases/tag/v0.8.6 (*.hash assets)
-sha256  d305e6914725ea1d4dc6360849af6a846b5030993847dd902a5ba1551c73e34c  rasputin-api-0.8.6-linux-amd64.tar.gz
-sha256  bad8ca17b4c34f990cd26d549e24a4a50748886792841c11ebd409809cd9e97b  rasputin-api-0.8.6-linux-arm64.tar.gz
+# From https://github.com/geekdojo/rasputin-control-plane/releases/tag/v0.8.7-dev.1 (*.hash assets)
+sha256  9480fd32b4ffd5ff50359d625d9f5df7755346c722ba865aa85c18c1a19cee18  rasputin-api-0.8.7-dev.1-linux-amd64.tar.gz
+sha256  3c7b03fa7caea1ac50e93ffe92df328a7d503c4e3df0ef314b65f88296168408  rasputin-api-0.8.7-dev.1-linux-arm64.tar.gz
