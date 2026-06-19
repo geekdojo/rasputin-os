@@ -36,6 +36,16 @@ case "$SOC" in
 		# with ours (RAUC slot logic + serial console). genimage then packs the
 		# whole efi-part/EFI tree + bzImage onto the ESP (see genimage.cfg).
 		cp "$BOARD_DIR/grub.cfg" "$BINARIES_DIR/efi-part/EFI/BOOT/grub.cfg"
+		# Initialize grubenv next to grub.cfg (== grub $prefix, so `load_env`
+		# with no args finds it). Both slots ship the same rootfs (genimage
+		# populates rootfs-1 too) and are marked good, with A first in ORDER so
+		# it boots by default and B is a warm fallback. RAUC's grub-editenv
+		# rewrites this in place at runtime on activate/mark-*. grub-editenv here
+		# is the host tool built by host-grub2 (pulled in by the target grub2 build).
+		GRUBENV="$BINARIES_DIR/efi-part/EFI/BOOT/grubenv"
+		"$HOST_DIR/bin/grub-editenv" "$GRUBENV" create
+		"$HOST_DIR/bin/grub-editenv" "$GRUBENV" set ORDER="A B" A_OK=1 A_TRY=0 B_OK=1 B_TRY=0
+		echo "post-image: initialized grubenv (ORDER='A B', both slots good)"
 		;;
 	cm5)
 		# Pi firmware reads config.txt + autoboot.txt from the boot FAT. The

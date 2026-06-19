@@ -16,6 +16,9 @@
 #
 set -eu
 TARGET_DIR="$1"
+SOC="${2:-unknown}"                 # from BR2_ROOTFS_POST_SCRIPT_ARGS (n100|cm5)
+SCRIPT_DIR="$(dirname "$0")"        # board/rasputin/common
+BOARD_DIR="$SCRIPT_DIR/../$SOC"     # board/rasputin/<soc>
 
 # Enable agent + firstboot on every image. systemd's "enabled" state is just
 # a symlink in <target>.wants/; create that dir first — `ln` won't make
@@ -29,6 +32,25 @@ ln -sf /etc/systemd/system/rasputin-agent.service \
 # hostname isn't). Only the controlplane may answer rasputin.local via mDNS.
 ln -sf /etc/systemd/system/rasputin-hostname.service \
 	"$TARGET_DIR/etc/systemd/system/multi-user.target.wants/rasputin-hostname.service"
+
+# RAUC system config (A/B slots + GRUB backend + keyring). Per-SoC, so it's
+# copied from the board dir rather than the shared overlay. rauc errors without
+# it ("failed to load system config"), so any update would fail; see
+# os-images/buildroot-os.md §3.
+if [ -f "$BOARD_DIR/rauc-system.conf" ]; then
+	mkdir -p "$TARGET_DIR/etc/rauc"
+	cp "$BOARD_DIR/rauc-system.conf" "$TARGET_DIR/etc/rauc/system.conf"
+	echo "post-build: installed $SOC RAUC system.conf → /etc/rauc/system.conf"
+else
+	echo "post-build: WARNING — no rauc-system.conf for SoC '$SOC'; RAUC updates will fail"
+fi
+
+# Mark the running slot good once the OS has booted, resetting the grubenv
+# try-counter so a normal reboot doesn't fall back (RAUC GRUB boot-counter,
+# defense-in-depth layer 1; the update saga's app health-check is a separate
+# layer that can still mark-bad). Runs on every boot via multi-user.target.wants.
+ln -sf /etc/systemd/system/rasputin-mark-good.service \
+	"$TARGET_DIR/etc/systemd/system/multi-user.target.wants/rasputin-mark-good.service"
 
 # tailscaled (mesh / remote access). The upstream Buildroot tailscale package
 # installs the unit at /usr/lib/systemd/system/tailscaled.service but does not

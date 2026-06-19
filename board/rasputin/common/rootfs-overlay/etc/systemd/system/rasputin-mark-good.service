@@ -1,0 +1,27 @@
+# Marks the currently-booted RAUC slot "good" once the OS has reached a working
+# userspace, which resets the grubenv try-counter (<bootname>_OK=1, _TRY=0).
+#
+# Why this is required: the grub.cfg boot-counter consumes one try per boot;
+# without a mark-good on each healthy boot, a normal reboot would see TRY=1 and
+# fall back to the other slot. This is defense-in-depth LAYER 1 (the OS booted).
+# It does NOT gate on application health — the update saga runs its own
+# health-check and can still `rauc status mark-bad` to force a rollback, which
+# wins over this (mark-bad → OK=0). See os-images/buildroot-os.md §3.
+#
+# Ordered after the agent so "good" means we reached our own userspace; not
+# coupled to network so a network blip can't trigger a spurious rollback.
+# Condition-guarded so a node without RAUC config (e.g. a future cm5 build
+# before its config lands) silently skips rather than logging a failure.
+
+[Unit]
+Description=Mark the running RAUC slot good (reset grubenv boot-counter)
+After=rasputin-agent.service
+ConditionPathExists=/etc/rauc/system.conf
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/rauc status mark-good
+
+[Install]
+WantedBy=multi-user.target

@@ -75,6 +75,15 @@ BR2_LINUX_KERNEL_NEEDS_HOST_LIBELF=y
 # --- bootloader: GRUB2 (UEFI) — real boot-attempts counter via grubenv ---
 BR2_TARGET_GRUB2=y
 BR2_TARGET_GRUB2_X86_64_EFI=y
+# The boot-counter grub.cfg needs `test` (for `[ ]`), `loadenv` (load_env/
+# save_env), and serial/terminal for GRUB-side serial. Buildroot's default EFI
+# image omits these → "can't find command" at boot. Keep the known-good base
+# (part_gpt fat linux normal efi_gop) and add what the RAUC slot logic uses.
+BR2_TARGET_GRUB2_BUILTIN_MODULES_EFI="part_gpt fat linux normal efi_gop test loadenv serial terminal echo"
+# Install the GRUB userspace tools (grub-editenv) into the TARGET rootfs —
+# RAUC's grub backend shells out to grub-editenv at runtime to update grubenv
+# on mark-good / mark-bad / activate. Off by default in Buildroot.
+BR2_TARGET_GRUB2_INSTALL_TOOLS=y
 
 # --- persistent partition: real e2fsprogs for systemd-makefs ---
 # busybox's mke2fs is ext2-only and doesn't answer to "mkfs.ext4" ("applet

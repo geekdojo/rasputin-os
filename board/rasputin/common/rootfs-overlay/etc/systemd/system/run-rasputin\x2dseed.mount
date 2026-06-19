@@ -5,14 +5,17 @@
 # on n100 and "firmware" on cm5 (see each board's genimage.cfg), but both FATs
 # carry the same volume label RASPUTIN-FW — one unit serves both boards.
 #
-# Read-only: firstboot only reads the seed. If/when token-clearing after
-# enrollment lands, that step remounts rw explicitly rather than widening this.
+# Read-write: RAUC's grub backend updates grubenv (/EFI/BOOT/grubenv on this
+# FAT) at runtime on mark-good/mark-bad/activate, so the boot FAT must be
+# writable. The only runtime writer is grub-editenv (a fixed ~1 KB in-place
+# block); firstboot still only reads the seed. (Was ro; widened for the n100
+# RAUC GRUB boot-counter — os-images/buildroot-os.md §3.)
 #
 # Filename is the systemd-escape of /run/rasputin-seed (the "\x2d" IS the
 # escaped dash, literal in the filename — do not "fix" it).
 
 [Unit]
-Description=Rasputin provisioning seed (boot FAT, read-only)
+Description=Rasputin provisioning seed + grubenv (boot FAT)
 DefaultDependencies=no
 Before=umount.target
 Conflicts=umount.target
@@ -21,5 +24,5 @@ Conflicts=umount.target
 What=/dev/disk/by-label/RASPUTIN-FW
 Where=/run/rasputin-seed
 Type=vfat
-Options=ro
+Options=rw
 DirectoryMode=0755
