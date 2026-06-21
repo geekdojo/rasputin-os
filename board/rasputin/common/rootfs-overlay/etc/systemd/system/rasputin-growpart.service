@@ -1,0 +1,23 @@
+# One-time grow of the data partition to fill the disk, then reboot so the
+# kernel re-reads the table and x-systemd.growfs expands the fs (see the script
+# header). Idempotent — a no-op once grown.
+#
+# Ordering is load-bearing:
+#   - After rasputin-mark-good.service: the GRUB boot-counter consumes one try
+#     per boot, so the reboot this may trigger must happen only after the slot
+#     is committed, or the next boot would roll back to the other slot.
+#   - After var-lib-rasputin.mount: don't race makefs/growfs formatting the fs.
+#   - After rasputin-firstboot.service: let provisioning finish first (it's
+#     preserved across the grow, but no reason to interrupt it).
+[Unit]
+Description=Rasputin: grow the data partition to fill the disk (one-time)
+After=rasputin-mark-good.service var-lib-rasputin.mount rasputin-firstboot.service
+ConditionPathExists=/dev/disk/by-partlabel/persistent
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/rasputin/growpart/rasputin-growpart.sh
+
+[Install]
+WantedBy=multi-user.target

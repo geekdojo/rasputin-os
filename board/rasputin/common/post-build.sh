@@ -52,6 +52,13 @@ fi
 ln -sf /etc/systemd/system/rasputin-mark-good.service \
 	"$TARGET_DIR/etc/systemd/system/multi-user.target.wants/rasputin-mark-good.service"
 
+# Grow the data partition to fill the disk on first boot (genimage ships a fixed
+# small data partition; x-systemd.growfs only grows the fs to the partition).
+# One-time, idempotent, ordered AFTER mark-good so its reboot doesn't trip the
+# boot-counter. See usr/lib/rasputin/growpart/rasputin-growpart.sh.
+ln -sf /etc/systemd/system/rasputin-growpart.service \
+	"$TARGET_DIR/etc/systemd/system/multi-user.target.wants/rasputin-growpart.service"
+
 # tailscaled (mesh / remote access). The upstream Buildroot tailscale package
 # installs the unit at /usr/lib/systemd/system/tailscaled.service but does not
 # enable it; enable it on every image so it's up before the agent runs
