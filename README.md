@@ -148,9 +148,9 @@ under QEMU's default TCG, harmless on real silicon.
 Mount the image's FAT seed region and edit `rasputin-seed.env`:
 
 ```sh
-RASPUTIN_NODE_ROLE=compute            # or controlplane
-RASPUTIN_NATS_URL=nats://cp-1.rasputin.tailnet:4222
-RASPUTIN_CP_JOIN_TOKEN=...            # from the controlplane
+RASPUTIN_NODE_ROLE=compute            # required; or controlplane
+RASPUTIN_NATS_URL=nats://rasputin.local:4222
+RASPUTIN_CP_JOIN_TOKEN=...            # required for compute/storage; from the controlplane
 ```
 
 The first controlplane needs no token — it self-inits against its own

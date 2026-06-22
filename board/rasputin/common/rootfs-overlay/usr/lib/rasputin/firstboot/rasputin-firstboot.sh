@@ -10,7 +10,9 @@
 # Seed sources, in priority order:
 #   1. /run/rasputin-seed/rasputin-seed.env   (mounted seed partition)
 #   2. kernel cmdline rasputin.role=… rasputin.nats=… (override/escape hatch)
-#   3. defaults (role=compute, id from SoC serial, nats from controlplane mDNS)
+# ROLE is REQUIRED (from 1 or 2) — a blank/absent role is an un-provisioned node
+# and firstboot fails loud rather than inventing one. Optional fields default:
+# id from the SoC/DMI serial, nats to the controlplane mDNS name (rasputin.local).
 #
 set -eu
 
@@ -67,9 +69,36 @@ for tok in $(cat /proc/cmdline); do
 	esac
 done
 
-# --- defaults ----------------------------------------------------------------
-ROLE="${ROLE:-compute}"
+# --- require a real provisioning signal --------------------------------------
+# ROLE must come from the seed or the kernel cmdline. A blank/absent role means
+# the node was never provisioned — the seed template ships every field empty and
+# documents "firstboot waits until these are set". Do NOT invent an identity and
+# half-join: that strands the node as a zombie that never reaches the bus — it
+# looks "up" but never appears in inventory. Found 2026-06-22 on the bench, when
+# a seed write silently failed to land on the ESP: the node booted the blank
+# template and defaulted to compute + node-<dmi> + an unresolvable NATS fallback,
+# with no error anywhere. Fail loud instead — exit non-zero so this unit shows
+# failed (rasputin-agent Requires= us, so it won't start on a junk identity), and
+# leave .provisioned unset so firstboot re-runs once a real seed is dropped on
+# the RASPUTIN-FW partition and the node is rebooted.
+if [ -z "$ROLE" ]; then
+	log "ERROR: no provisioning seed — this node is un-provisioned."
+	log "Drop a rasputin-seed.env (control plane -> Add node) on the RASPUTIN-FW partition and reboot."
+	exit 1
+fi
 
+# Non-controlplane nodes enroll with a one-time join token minted by the control
+# plane and bound to their node id; without it they cannot pass the bus auth
+# callout. A provisioned compute/storage seed always carries one, so an empty
+# token here is a botched/partial seed — fail loud rather than half-join. The
+# controlplane is loopback-trusted and carries no token (handled below).
+if [ "$ROLE" != "controlplane" ] && [ -z "$JOIN_TOKEN" ]; then
+	log "ERROR: role=$ROLE seed carries no join token (RASPUTIN_CP_JOIN_TOKEN) — cannot enroll."
+	log "Re-generate the enrollment file from the control plane (Add node) and re-seed."
+	exit 1
+fi
+
+# --- defaults for the remaining (optional) fields ----------------------------
 if [ -z "$NODE_ID" ]; then
 	# Derive a stable id from the SoC serial. Pi: /proc/cpuinfo Serial;
 	# x86: DMI board serial. Fall back to machine-id.
@@ -81,14 +110,18 @@ if [ -z "$NODE_ID" ]; then
 	NODE_ID="node-$(echo "$SERIAL" | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9' | tail -c 8)"
 fi
 
-# The first controlplane self-inits against its own embedded NATS and needs
-# no upstream (it IS the authority). Others default to the controlplane's
-# tailnet hostname — overridden by the seed in practice.
+# NATS URL fallback. A provisioned seed sets this explicitly; the fallback only
+# matters for a self-initing controlplane or a partial seed. The controlplane
+# dials its own embedded broker; every other node defaults to the control
+# plane's mDNS name on the LAN — rasputin.local, IPv4-only (locked decision #9),
+# matching the control plane UI's enrollment default. NOT a hardcoded tailnet
+# hostname: that was unresolvable on a plain LAN and silently stranded a
+# mis-seeded node (2026-06-22).
 if [ -z "$NATS_URL" ]; then
 	if [ "$ROLE" = "controlplane" ]; then
 		NATS_URL="nats://127.0.0.1:4222"
 	else
-		NATS_URL="nats://cp-1.rasputin.tailnet:4222"
+		NATS_URL="nats://rasputin.local:4222"
 	fi
 fi
 
@@ -165,6 +198,22 @@ else
 	rm -f "$PERSIST/role.controlplane"
 fi
 
-# --- stamp provisioned + clear the seed token --------------------------------
+# --- stamp provisioned -------------------------------------------------------
 date -u +%Y-%m-%dT%H:%M:%SZ > "$PERSIST/.provisioned"
+
+# Scrub the consumed one-time join token from the seed FAT so it isn't left in
+# plaintext at rest. Best-effort, and only on this successful path: we've already
+# stamped .provisioned (firstboot won't re-run and re-need it) and the token now
+# lives in node.env on the root-only persistent partition for the agent. A
+# read-only/degraded seed mount just leaves it — the token is node-bound +
+# single-use. Never let a scrub hiccup fail an otherwise-successful provision.
+if [ -n "$JOIN_TOKEN" ] && [ -f "$SEED_FILE" ] && mount -o remount,rw "$SEED_MNT" 2>/dev/null; then
+	scrub="$PERSIST/.seed-scrub.$$"
+	if sed 's#^RASPUTIN_CP_JOIN_TOKEN=.*#RASPUTIN_CP_JOIN_TOKEN=#' "$SEED_FILE" > "$scrub" 2>/dev/null; then
+		cat "$scrub" > "$SEED_FILE" 2>/dev/null && sync && log "scrubbed consumed join token from seed FAT" || true
+	fi
+	rm -f "$scrub"
+	mount -o remount,ro "$SEED_MNT" 2>/dev/null || true
+fi
+
 log "provisioning complete"
