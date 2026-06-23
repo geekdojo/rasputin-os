@@ -30,12 +30,22 @@ PKI (root → intermediate → leaf) and publishes `.raucb` + `.img.xz` +
 Warm-cache iterations are ~50 min per SKU (cold ~2–3 h); ccache + a split
 restore/save-on-failure keeps the loop usable.
 
-**v1 scope (2026-05-30): N100-only.** Sourcing/hardware-vendor priorities
-favor N100 for first ship; CM5 is deferred post-v1. The cm5 entry is
-commented out of `.github/workflows/release.yml`'s build matrix, but
-`board/rasputin/cm5/`, `configs/rasputin_cm5_defconfig`, and the package
-.mks stay in place so a local `make rasputin_cm5_defconfig` still works
-and the CI matrix entry can be uncommented when CM5 sourcing aligns.
+**v1 scope (revised 2026-06-23): N100 ships; CM5/arm64 back in scope,
+bring-up in progress.** CM5/arm64 is back in v1 for compute + controlplane
+nodes (firewall stays N100-only) so design partners with only Raspberry Pis
+can join from the start. The **control-plane/UI side already supports
+arm64** (Add-node arch picker → `GET /api/cluster/node-image?arch=`). The
+**cm5 build stays commented out of `.github/workflows/release.yml`'s matrix
+for now**, deliberately: the cm5 image compiles green but is currently a
+**non-bootable scaffold** — `board/rasputin/cm5/genimage.cfg`'s boot FAT has
+no kernel `Image`/CM5 DTB/Pi firmware blobs, and the defconfig DTS + firmware
+variant still carry `BRING-UP:` markers. Uncommenting it now would publish a
+brick to the public channel. Re-enable it only after the CM5 hardware
+bring-up lands and the arm64 `.img` is boot-verified on a real CM5 (there is
+no CI boot smoke for arm64 — a Pi can't be emulated end-to-end). `board/
+rasputin/cm5/`, `configs/rasputin_cm5_defconfig`, and the package .mks stay
+in place so `make rasputin_cm5_defconfig` still works locally. Bring-up
+tasks: see "v1 ones" below + the [wiki backlog](https://github.com/geekdojo/geekdojo-wiki/blob/main/projects/rasputin/backlog/design/os-images/overview.md).
 
 The smaller open items are tracked in the
 [wiki backlog](https://github.com/geekdojo/geekdojo-wiki/blob/main/projects/rasputin/backlog.md#designos-imagesbuildroot-osmd-6);
@@ -55,11 +65,17 @@ the big v1 ones, in order:
   (RAUC fills it on first OTA); if slot A fails before any OTA the kernel
   panics. Cleaner: write the same squashfs into B at flash.
 
-**Post-v1:** CM5 hardware bring-up — confirm Pi 5 firmware variant + blob
-set in `genimage.cfg` (starter list with `BRING-UP:` markers in
-`configs/rasputin_cm5_defconfig`), swap DTS to a CM5 carrier
-(`bcm2712-rpi-cm5-*`), write `tryboot` RAUC hook scripts under
-`board/rasputin/cm5/rauc-hooks/`, re-enable the cm5 matrix entry.
+- **CM5 / arm64 bring-up to shipping parity (v1, back in scope 2026-06-23).**
+  The arm64 image must boot a real CM5 before the matrix entry is re-enabled:
+  add the kernel `Image` + CM5 DTB + Pi firmware blob set to
+  `board/rasputin/cm5/genimage.cfg`'s boot FAT (currently absent — the image
+  is non-bootable), confirm the Pi 5 firmware variant + blob set in
+  `configs/rasputin_cm5_defconfig` (still `BRING-UP:`), swap DTS to a CM5
+  carrier (`bcm2712-rpi-cm5-*`), write `tryboot` RAUC hook scripts under
+  `board/rasputin/cm5/rauc-hooks/` (Pi A/B = `autoboot.txt` `[all]`/`[tryboot]`,
+  not GRUB), then boot-verify on hardware (no CI smoke for arm64) and
+  re-enable the cm5 matrix entry. Full task list in the
+  [wiki backlog](https://github.com/geekdojo/geekdojo-wiki/blob/main/projects/rasputin/backlog/design/os-images/overview.md).
 
 ## Cutting a release
 

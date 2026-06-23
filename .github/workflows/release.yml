@@ -77,13 +77,23 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # v1 scope (2026-05-30): N100-only — sourcing/hardware-vendor
-        # priorities favor N100 for first ship; CM5 is deferred post-v1.
-        # The cm5 entry is COMMENTED OUT rather than deleted so it can be
-        # flipped back on (with `make rasputin_cm5_defconfig` locally still
-        # working) when CM5 sourcing aligns. The board/cm5/ tree,
-        # configs/rasputin_cm5_defconfig, and package .mks all stay in
-        # place. See os-images/overview.md §Status.
+        # v1 scope (revised 2026-06-23): CM5/arm64 is back IN scope for compute
+        # + controlplane nodes (decision #4 re-opened — some design partners
+        # only have Raspberry Pis, so the cluster must support arm64 from the
+        # start; firewall stays N100-only). The control-plane/UI side already
+        # serves a per-arch image (Add-node arch picker → /api/cluster/node-image
+        # ?arch=).
+        #
+        # The cm5 build is STILL commented out here, deliberately: the cm5 image
+        # compiles green but is currently a NON-BOOTABLE scaffold — board/cm5/
+        # genimage.cfg's boot FAT carries no kernel Image / CM5 DTB / Pi firmware
+        # blob set, and the defconfig DTS + firmware variant still carry
+        # BRING-UP markers. Uncommenting it now would publish a brick to the
+        # public release channel that the wizard's ARM64 option would hand to a
+        # Pi tester. Flip it back on only after the CM5 hardware bring-up lands
+        # AND the arm64 .img is boot-verified on a real CM5 (there's no CI boot
+        # smoke for arm64 — a Pi can't be emulated end-to-end here). Bring-up
+        # tasks tracked in the wiki backlog (os-images CM5/arm64 parity).
         include:
           # - sku: cm5
           #   defconfig: rasputin_cm5_defconfig
