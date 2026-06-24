@@ -84,21 +84,23 @@ jobs:
         # serves a per-arch image (Add-node arch picker → /api/cluster/node-image
         # ?arch=).
         #
-        # The rpi (arm64: Pi 4 / Pi 5 / CM5) build is STILL commented out here,
-        # deliberately: it compiles green but is currently a NON-BOOTABLE
-        # scaffold — board/rpi/genimage.cfg's boot FAT carries no kernel Image /
-        # Pi DTB / Pi firmware blob set, and the defconfig DTS + firmware variant
-        # still carry BRING-UP markers. Uncommenting it now would publish a brick
-        # to the public release channel that the wizard's ARM64 option would hand
-        # to a Pi tester. Flip it back on only after the Pi hardware bring-up
-        # lands AND the arm64 .img is boot-verified on real hardware (there's no
-        # CI boot smoke for arm64 — a Pi can't be emulated end-to-end here).
+        # The rpi (arm64: Pi 4 / Pi 5 / CM5) build is ENABLED for BUILDING but its
+        # public release is GATED (2026-06-24, hardware bring-up active). The
+        # image now stages a real boot FAT (kernel Image + both DTBs + Pi
+        # firmware) but is NOT yet boot-verified on hardware — there's no CI boot
+        # smoke for arm64 (a Pi can't be emulated end-to-end here). So:
+        #   - workflow_dispatch (full_build=true) builds the rpi .img as an
+        #     ARTIFACT for flashing on the bench — never published.
+        #   - a tagged release builds + signs rpi, but the "Mirror to public
+        #     release channel" step withholds the arm64 assets (and strips them
+        #     from the public manifest) UNLESS repo var RASPUTIN_ARM64_PUBLIC is
+        #     "true". Flip that var on only after a Pi boots the image.
         # Bring-up tasks tracked in the wiki backlog (os-images arm64/Pi parity).
         include:
-          # - sku: rpi
-          #   defconfig: rasputin_rpi_defconfig
-          #   arch: arm64
-          #   compatible: rasputin-rpi-arm64
+          - sku: rpi
+            defconfig: rasputin_rpi_defconfig
+            arch: arm64
+            compatible: rasputin-rpi-arm64
           - sku: n100
             defconfig: rasputin_n100_defconfig
             arch: amd64
@@ -642,10 +644,27 @@ jobs:
             PRERELEASE_FLAG="--prerelease"
           fi
           tag="os-${{ steps.ver.outputs.version }}"
+          # arm64/rpi publish gate (hardware bring-up): until the arm64 image is
+          # boot-verified on a real Pi, withhold its assets from the public
+          # channel AND strip the arm64 artifact from the public manifest, so the
+          # control plane never advertises an arm64 download that isn't there.
+          # Flip repo var RASPUTIN_ARM64_PUBLIC=true once a Pi boots it.
+          if [ "${{ vars.RASPUTIN_ARM64_PUBLIC }}" = "true" ]; then
+            assets=(release-out/manifest.json release-out/*.raucb release-out/*.img.xz)
+          else
+            echo "RASPUTIN_ARM64_PUBLIC != true → withholding arm64 assets, stripping arm64 from public manifest"
+            jq '.artifacts |= map(select(.architecture != "arm64"))' \
+              release-out/manifest.json > release-out/manifest.public.json
+            mv release-out/manifest.public.json release-out/manifest.json
+            assets=(release-out/manifest.json)
+            for f in release-out/*-n100-*.raucb release-out/*-n100-*.img.xz; do
+              [ -e "$f" ] && assets+=("$f")
+            done
+          fi
           gh release create "$tag" --repo geekdojo/rasputin-releases \
             --title "Rasputin OS ${{ steps.ver.outputs.version }}" \
             --notes "Mirrored from \`rasputin-os@${{ steps.ver.outputs.version }}\` (channel: \`${{ steps.ver.outputs.channel }}\`). Signed; per-asset SHA-256 in \`manifest.json\`." \
             $PRERELEASE_FLAG \
-            release-out/manifest.json release-out/*.raucb release-out/*.img.xz \
+            "${assets[@]}" \
           || gh release upload "$tag" --repo geekdojo/rasputin-releases --clobber \
-            release-out/manifest.json release-out/*.raucb release-out/*.img.xz
+            "${assets[@]}"

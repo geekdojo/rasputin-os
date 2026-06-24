@@ -53,30 +53,39 @@ BR2_TARGET_GENERIC_ROOT_PASSWD="rasputin"
 BR2_PACKAGE_SYSTEMD_NETWORKD=y
 BR2_PACKAGE_SYSTEMD_RESOLVED=y
 
-# --- kernel: BCM2712 ---
-# Use mainline's UNIFIED arm64 config (arch/arm64/configs/defconfig) — it
-# carries broad SoC support including BCM2712 (Pi 5 / CM5) in recent
-# kernels. NOTE: `bcm2712_defconfig` only exists in the Raspberry Pi kernel
-# FORK, not mainline — using it errors with "Can't find default
-# configuration". If a peripheral is missing on the real CM5, switch to the
-# Pi fork (BR2_LINUX_KERNEL_CUSTOM_GIT → raspberrypi/linux + its
-# bcm2712_defconfig); that's the documented bring-up fallback.
-# BRING-UP: the DTS below is the Pi 5 B board; swap to the CM5 carrier DTB
-# (bcm2712-rpi-cm5-cb / -cm5io) once the carrier is known.
+# --- kernel: BCM2711 (Pi 4) + BCM2712 (Pi 5 / CM5), ONE Image ---
+# Mainline's UNIFIED arm64 config (arch/arm64/configs/defconfig) carries broad
+# SoC support including BCM2711 + BCM2712 — so a single arm64 Image boots both
+# the Pi 4 and the Pi 5 / CM5. This is the whole reason for mainline over the
+# Raspberry Pi kernel FORK: the fork uses per-SoC defconfigs (bcm2711 vs
+# bcm2712 — and `bcm2712_defconfig` exists ONLY in the fork), which would mean
+# two kernels for a unified image. BRING-UP RISK: mainline's Pi 5 (BCM2712)
+# peripheral support lags the fork; if a needed peripheral is missing on the
+# bench Pi 5, the documented fallback is the fork (BR2_LINUX_KERNEL_CUSTOM_GIT
+# → raspberrypi/linux + bcm2712_defconfig) at the cost of per-SoC kernels.
+# Both board DTBs are built; the Pi firmware auto-selects the right one by board
+# (BRING-UP: swap the Pi-5 DTB to the CM5 carrier — bcm2712-rpi-cm5-cb / -cm5io
+# — once the carrier is known).
 BR2_LINUX_KERNEL=y
 BR2_LINUX_KERNEL_LATEST_VERSION=y
 BR2_LINUX_KERNEL_USE_ARCH_DEFAULT_CONFIG=y
 BR2_LINUX_KERNEL_DTS_SUPPORT=y
-BR2_LINUX_KERNEL_INTREE_DTS_NAME="broadcom/bcm2712-rpi-5-b"
+BR2_LINUX_KERNEL_INTREE_DTS_NAME="broadcom/bcm2711-rpi-4-b broadcom/bcm2712-rpi-5-b"
 BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_RASPUTIN_PATH)/board/rasputin/rpi/linux.fragment"
 BR2_LINUX_KERNEL_NEEDS_HOST_OPENSSL=y
 
-# --- RPi firmware (the bootloader on Pi; tryboot A/B lives here) ---
+# --- RPi firmware (the GPU/boot firmware on the FAT) ---
+# Pi 5 boots from its SPI-EEPROM bootloader → reads config.txt → loads the
+# kernel Image + DTB (no start*.elf needed on the card). Pi 4 boots its GPU
+# firmware (start4.elf/fixup4.dat) FROM the card — so we install the PI4
+# variant: harmless extra files on a Pi 5, required on a Pi 4. config.txt +
+# cmdline.txt are installed into the firmware output dir from our board files
+# (Buildroot's CONFIG_FILE/CMDLINE_FILE mechanism); post-image.sh stages the
+# whole rpi-firmware/ set + the kernel Image + both DTBs onto the boot FAT.
 BR2_PACKAGE_RPI_FIRMWARE=y
-# BRING-UP: confirm the Pi 5 firmware variant + the exact blob set genimage
-# needs in the FAT partition (Pi 5 boots via the EEPROM bootloader → config.txt
-# → kernel; the tryboot one-shot flag is the A/B mechanism). See
-# os-images/buildroot-os.md §3 and HAOS PR #3842.
+BR2_PACKAGE_RPI_FIRMWARE_VARIANT_PI4=y
+BR2_PACKAGE_RPI_FIRMWARE_CONFIG_FILE="$(BR2_EXTERNAL_RASPUTIN_PATH)/board/rasputin/rpi/config.txt"
+BR2_PACKAGE_RPI_FIRMWARE_CMDLINE_FILE="$(BR2_EXTERNAL_RASPUTIN_PATH)/board/rasputin/rpi/cmdline.txt"
 
 # --- A/B + RAUC ---
 # real e2fsprogs: systemd-makefs execs mkfs.ext4; busybox mke2fs cannot

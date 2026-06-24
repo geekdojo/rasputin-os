@@ -48,20 +48,39 @@ case "$SOC" in
 		echo "post-image: initialized grubenv (ORDER='A B', both slots good)"
 		;;
 	rpi)
-		# Pi firmware reads config.txt + autoboot.txt from the boot FAT. The
-		# kernel Image + firmware blobs are added during hardware bring-up
-		# (see genimage.cfg TODO); these two get the layout assembling now.
-		cp "$BOARD_DIR/config.txt" "$BINARIES_DIR/config.txt"
-		cat > "$BINARIES_DIR/autoboot.txt" <<'EOF'
-# tryboot A/B one-shot (no boot-counter) — RAUC's custom rpi backend rewrites
-# this on mark-good / set-primary. STARTER values; confirm on real Pi hardware.
-[all]
-tryboot_a_b=1
-boot_partition=2
-
-[tryboot]
-boot_partition=3
-EOF
+		# Assemble the Pi boot FAT (label RASPUTIN-FW) ourselves with mtools so
+		# we control exactly what lands at the FAT ROOT — the Pi GPU firmware
+		# reads config.txt + the kernel + DTBs + start4.elf/fixup4.dat from the
+		# root, never a subdir. We pre-build the vfat here (rather than let
+		# genimage generate it from a `files` list) because the firmware blob set
+		# is large + version-varying, and genimage's vfat `files` preserves the
+		# relative path of each entry (rpi-firmware/start4.elf would land in a
+		# /rpi-firmware subdir, where the firmware can't find it). Staging flat +
+		# `mcopy ::` is unambiguous.
+		#
+		# Contents, all flattened to the FAT root:
+		#   Image            mainline arm64 kernel (config.txt `kernel=Image`)
+		#   *.dtb            both board DTBs (bcm2711-rpi-4-b + bcm2712-rpi-5-b);
+		#                    the firmware auto-selects the right one per board
+		#   rpi-firmware/*   GPU/boot firmware + our config.txt + cmdline.txt +
+		#                    overlays/ (from BR2_PACKAGE_RPI_FIRMWARE_*)
+		#   rasputin-seed.env  the provisioning seed firstboot reads
+		#
+		# BRING-UP: single-slot for now — cmdline.txt roots at PARTLABEL=rootfs-0.
+		# The tryboot A/B (two FAT boot partitions + autoboot.txt + the RAUC
+		# custom backend) lands after a basic Pi 5 boot is confirmed on the bench.
+		BOOT_STAGE="$BINARIES_DIR/rpi-boot"
+		rm -rf "$BOOT_STAGE"; mkdir -p "$BOOT_STAGE"
+		cp "$BINARIES_DIR/Image" "$BOOT_STAGE/"
+		cp "$BINARIES_DIR"/*.dtb "$BOOT_STAGE/"
+		cp -a "$BINARIES_DIR"/rpi-firmware/. "$BOOT_STAGE/"
+		cp "$COMMON_DIR/rasputin-seed.env.template" "$BOOT_STAGE/rasputin-seed.env"
+		BOOT_VFAT="$BINARIES_DIR/boot.vfat"
+		rm -f "$BOOT_VFAT"
+		dd if=/dev/zero of="$BOOT_VFAT" bs=1M count=256 status=none
+		"$HOST_DIR/sbin/mkfs.vfat" -F 32 -n RASPUTIN-FW "$BOOT_VFAT" >/dev/null
+		MTOOLS_SKIP_CHECK=1 "$HOST_DIR/bin/mcopy" -s -i "$BOOT_VFAT" "$BOOT_STAGE"/* ::
+		echo "post-image: built boot FAT ($(du -h "$BOOT_VFAT" | cut -f1)) — $(MTOOLS_SKIP_CHECK=1 "$HOST_DIR/bin/mdir" -i "$BOOT_VFAT" :: | grep -c '^')"
 		;;
 esac
 

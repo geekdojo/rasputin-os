@@ -1,6 +1,9 @@
-# Rasputin kernel config fragment — CM5 (arm64, BCM2712), merged on top of
-# the bcm2712 defconfig. Only the Rasputin-critical options; the bcm2712
-# config carries the Pi peripherals (NIC, USB, SD/eMMC, RP1, etc.).
+# Rasputin kernel config fragment — rpi SKU (arm64: Pi 4 BCM2711 + Pi 5 / CM5
+# BCM2712), merged on top of the MAINLINE arm64 defconfig (arch/arm64/configs/
+# defconfig). Only the Rasputin-critical options; the arm64 defconfig carries
+# the broad Pi peripheral set (NIC, USB, SD/eMMC, RP1, etc.). BRING-UP: if a Pi
+# 5 peripheral is missing from mainline at boot (serial will show where it
+# stops), add it here or fall back to the Pi kernel fork (see the defconfig).
 
 # --- read-only squashfs rootfs + dm-verity (RAUC verity bundles) ---
 CONFIG_SQUASHFS=y
@@ -8,6 +11,14 @@ CONFIG_SQUASHFS_XZ=y
 CONFIG_BLK_DEV_DM=y
 CONFIG_DM_VERITY=y
 CONFIG_OVERLAY_FS=y
+
+# --- GPT partition-label parsing: REQUIRED for cmdline `root=PARTLABEL=rootfs-0`
+#     + RAUC's /dev/disk/by-partlabel slots + firstboot's PARTLABEL=persistent.
+#     Pinned explicitly rather than relying on the defconfig default — without
+#     it the kernel can't resolve PARTLABEL= and panics "VFS: unable to mount
+#     root". ---
+CONFIG_PARTITION_ADVANCED=y
+CONFIG_EFI_PARTITION=y
 
 # --- serial console (Pi PL011 UART) ---
 CONFIG_SERIAL_AMBA_PL011=y

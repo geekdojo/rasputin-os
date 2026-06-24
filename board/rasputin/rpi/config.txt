@@ -1,10 +1,30 @@
-# Raspberry Pi CM5 firmware config (os-images/buildroot-os.md §3).
-# Minimal starter — refine when the RPi firmware package set is pinned.
+# Raspberry Pi firmware config — rpi SKU (arm64: Pi 4 / Pi 5 / CM5).
+# Installed into the firmware output dir via BR2_PACKAGE_RPI_FIRMWARE_CONFIG_FILE
+# and staged onto the boot FAT by board/rasputin/common/post-image.sh.
+#
+# One unified image: the firmware auto-selects the matching DTB by board, so the
+# same FAT boots a Pi 4 (BCM2711) or a Pi 5 / CM5 (BCM2712). config.txt is read
+# from the boot partition on every model.
 
+# 64-bit kernel, named `Image` (the mainline arm64 kernel image; staged at the
+# FAT root next to the per-board DTBs).
 arm_64bit=1
 kernel=Image
-# A/B is driven by autoboot.txt's [all]/[tryboot] sections + the one-shot
-# tryboot flag, not by config.txt directly. RAUC's custom backend rewrites
-# autoboot.txt on mark-good / set-primary.
 auto_initramfs=1
 disable_overscan=1
+
+# Serial console on the GPIO UART (GPIO 14/15 → ttyAMA0). REQUIRED for bring-up:
+# with this on, the GPU firmware prints its boot banner to the UART before the
+# kernel even starts, so a USB-UART gives us a window into the firmware→kernel
+# handoff even if the kernel console node turns out to differ on the Pi 5 (RP1
+# enumerates UARTs differently — VERIFY the kernel console= on first boot).
+enable_uart=1
+
+# Per-model knobs (firmware applies the matching [block]). Kept minimal for the
+# first boot; the SSD-HAT PCIe/NVMe enablement (dtparam=pciex1 + the nvme
+# overlay) lands with the Pi-5-on-SSD test.
+[pi4]
+# Pi 4 boots its GPU firmware (start4.elf/fixup4.dat) from this FAT.
+[pi5]
+# Pi 5 boots from its SPI-EEPROM bootloader → this config.txt → Image + DTB.
+[all]
