@@ -18,7 +18,7 @@ HOST_DIR="${HOST_DIR:-$BINARIES_DIR/../host}"
 VERSION="${RASPUTIN_VERSION:-0.0.0-dev}"   # CI exports the CalVer tag
 
 case "$SOC" in
-	cm5)  ARCH=arm64; COMPATIBLE=rasputin-pi5-cm5 ;;
+	rpi)  ARCH=arm64; COMPATIBLE=rasputin-rpi-arm64 ;;
 	n100) ARCH=amd64; COMPATIBLE=rasputin-n100 ;;
 	*) echo "post-image: unknown SoC '$SOC'" >&2; exit 1 ;;
 esac
@@ -47,13 +47,13 @@ case "$SOC" in
 		"$HOST_DIR/bin/grub-editenv" "$GRUBENV" set ORDER="A B" A_OK=1 A_TRY=0 B_OK=1 B_TRY=0
 		echo "post-image: initialized grubenv (ORDER='A B', both slots good)"
 		;;
-	cm5)
+	rpi)
 		# Pi firmware reads config.txt + autoboot.txt from the boot FAT. The
 		# kernel Image + firmware blobs are added during hardware bring-up
 		# (see genimage.cfg TODO); these two get the layout assembling now.
 		cp "$BOARD_DIR/config.txt" "$BINARIES_DIR/config.txt"
 		cat > "$BINARIES_DIR/autoboot.txt" <<'EOF'
-# tryboot A/B one-shot (no boot-counter) — RAUC's custom CM5 backend rewrites
+# tryboot A/B one-shot (no boot-counter) — RAUC's custom rpi backend rewrites
 # this on mark-good / set-primary. STARTER values; confirm on real Pi hardware.
 [all]
 tryboot_a_b=1

@@ -54,10 +54,10 @@ jobs:
         run: |
           set -e
           req="external.desc external.mk Config.in
-               configs/rasputin_cm5_defconfig configs/rasputin_n100_defconfig
+               configs/rasputin_rpi_defconfig configs/rasputin_n100_defconfig
                package/rasputin-agent/rasputin-agent.mk
                package/rasputin-api/rasputin-api.mk
-               board/rasputin/cm5/genimage.cfg
+               board/rasputin/rpi/genimage.cfg
                board/rasputin/n100/genimage.cfg
                board/rasputin/common/post-image.sh"
           for f in $req; do
@@ -84,21 +84,21 @@ jobs:
         # serves a per-arch image (Add-node arch picker → /api/cluster/node-image
         # ?arch=).
         #
-        # The cm5 build is STILL commented out here, deliberately: the cm5 image
-        # compiles green but is currently a NON-BOOTABLE scaffold — board/cm5/
-        # genimage.cfg's boot FAT carries no kernel Image / CM5 DTB / Pi firmware
-        # blob set, and the defconfig DTS + firmware variant still carry
-        # BRING-UP markers. Uncommenting it now would publish a brick to the
-        # public release channel that the wizard's ARM64 option would hand to a
-        # Pi tester. Flip it back on only after the CM5 hardware bring-up lands
-        # AND the arm64 .img is boot-verified on a real CM5 (there's no CI boot
-        # smoke for arm64 — a Pi can't be emulated end-to-end here). Bring-up
-        # tasks tracked in the wiki backlog (os-images CM5/arm64 parity).
+        # The rpi (arm64: Pi 4 / Pi 5 / CM5) build is STILL commented out here,
+        # deliberately: it compiles green but is currently a NON-BOOTABLE
+        # scaffold — board/rpi/genimage.cfg's boot FAT carries no kernel Image /
+        # Pi DTB / Pi firmware blob set, and the defconfig DTS + firmware variant
+        # still carry BRING-UP markers. Uncommenting it now would publish a brick
+        # to the public release channel that the wizard's ARM64 option would hand
+        # to a Pi tester. Flip it back on only after the Pi hardware bring-up
+        # lands AND the arm64 .img is boot-verified on real hardware (there's no
+        # CI boot smoke for arm64 — a Pi can't be emulated end-to-end here).
+        # Bring-up tasks tracked in the wiki backlog (os-images arm64/Pi parity).
         include:
-          # - sku: cm5
-          #   defconfig: rasputin_cm5_defconfig
+          # - sku: rpi
+          #   defconfig: rasputin_rpi_defconfig
           #   arch: arm64
-          #   compatible: rasputin-pi5-cm5
+          #   compatible: rasputin-rpi-arm64
           - sku: n100
             defconfig: rasputin_n100_defconfig
             arch: amd64
@@ -555,7 +555,7 @@ jobs:
             # Derive arch/compatible from the manifest.raucm the build wrote
             # (matches what's baked into the bundle — single source of truth).
             compatible=$(awk -F'=' '/^compatible=/{print $2}' "$d/bundle/manifest.raucm")
-            case "$sku" in n100) arch=amd64 ;; cm5) arch=arm64 ;; esac
+            case "$sku" in n100) arch=amd64 ;; rpi) arch=arm64 ;; esac
 
             echo "::group::Sign $sku (compatible=$compatible)"
             rauc bundle \

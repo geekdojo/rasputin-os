@@ -1,19 +1,27 @@
-# Rasputin OS — Raspberry Pi CM5 (arm64, BCM2712).
+# Rasputin OS — Raspberry Pi / arm64 SKU (BCM2711 + BCM2712).
 #
-# Derived from Buildroot's Raspberry Pi 5 reference defconfig (same BCM2712
-# silicon as the CM5) + HAOS's CM5 config for the firmware/DTB/tryboot bits.
-# Plus systemd, squashfs+verity rootfs, Docker, RAUC A/B, Rasputin packages.
+# The `rpi` SKU is one unified arm64 image that boots Raspberry Pi 4 (BCM2711)
+# + Pi 5 / CM5 (BCM2712) — the Raspberry Pi OS model (firmware supports the
+# whole family + auto-selects the DTB by board). Derived from Buildroot's Pi 5
+# reference defconfig + HAOS's firmware/DTB/tryboot bits. Plus systemd,
+# squashfs+verity rootfs, Docker, RAUC A/B, Rasputin packages. CPU is the
+# Cortex-A72 baseline (Pi 4 floor; runs on the Pi 5's A76) — NOT a76, which
+# enables LSE atomics the A72 lacks.
 #
 # This is the image that most wants the real board for final validation:
 # the Pi firmware boot flow + the one-shot `tryboot` A/B (no boot-counter)
 # can't be fully exercised in QEMU. The bring-up items are flagged below.
 # Evolve loop:
-#   make BR2_EXTERNAL=$PWD O=output/cm5 rasputin_cm5_defconfig
-#   make BR2_EXTERNAL=$PWD O=output/cm5 linux-menuconfig   # then savedefconfig
+#   make BR2_EXTERNAL=$PWD O=output/rpi rasputin_rpi_defconfig
+#   make BR2_EXTERNAL=$PWD O=output/rpi linux-menuconfig   # then savedefconfig
 
 # --- target arch ---
 BR2_aarch64=y
-BR2_cortex_a76=y
+# Cortex-A72 baseline, NOT A76: this one arm64 image must boot the Pi 4 (A72)
+# as well as the Pi 5 / CM5 (A76). A76 (`BR2_cortex_a76`) enables ARMv8.1 LSE
+# atomics the Pi 4's A72 lacks, so an a76-tuned binary illegal-opcodes on a Pi
+# 4. A72-tuned code runs fine on the A76. Negligible perf cost for this load.
+BR2_cortex_a72=y
 
 # --- build: ccache (CI caches ~/.buildroot-ccache across runs; warm rebuilds
 # of the kernel + packages drop from hours to minutes — release-pipeline.md §6) ---
@@ -60,7 +68,7 @@ BR2_LINUX_KERNEL_LATEST_VERSION=y
 BR2_LINUX_KERNEL_USE_ARCH_DEFAULT_CONFIG=y
 BR2_LINUX_KERNEL_DTS_SUPPORT=y
 BR2_LINUX_KERNEL_INTREE_DTS_NAME="broadcom/bcm2712-rpi-5-b"
-BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_RASPUTIN_PATH)/board/rasputin/cm5/linux.fragment"
+BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_RASPUTIN_PATH)/board/rasputin/rpi/linux.fragment"
 BR2_LINUX_KERNEL_NEEDS_HOST_OPENSSL=y
 
 # --- RPi firmware (the bootloader on Pi; tryboot A/B lives here) ---
@@ -122,4 +130,4 @@ BR2_TARGET_ROOTFS_SQUASHFS4_XZ=y
 BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_RASPUTIN_PATH)/board/rasputin/common/rootfs-overlay"
 BR2_ROOTFS_POST_BUILD_SCRIPT="$(BR2_EXTERNAL_RASPUTIN_PATH)/board/rasputin/common/post-build.sh"
 BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL_RASPUTIN_PATH)/board/rasputin/common/post-image.sh"
-BR2_ROOTFS_POST_SCRIPT_ARGS="cm5"
+BR2_ROOTFS_POST_SCRIPT_ARGS="rpi"

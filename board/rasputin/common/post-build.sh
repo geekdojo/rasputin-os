@@ -16,7 +16,7 @@
 #
 set -eu
 TARGET_DIR="$1"
-SOC="${2:-unknown}"                 # from BR2_ROOTFS_POST_SCRIPT_ARGS (n100|cm5)
+SOC="${2:-unknown}"                 # from BR2_ROOTFS_POST_SCRIPT_ARGS (n100|rpi)
 SCRIPT_DIR="$(dirname "$0")"        # board/rasputin/common
 BOARD_DIR="$SCRIPT_DIR/../$SOC"     # board/rasputin/<soc>
 
