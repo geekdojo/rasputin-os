@@ -1,9 +1,22 @@
-# Rasputin kernel config fragment — rpi SKU (arm64: Pi 4 BCM2711 + Pi 5 / CM5
-# BCM2712), merged on top of the MAINLINE arm64 defconfig (arch/arm64/configs/
-# defconfig). Only the Rasputin-critical options; the arm64 defconfig carries
-# the broad Pi peripheral set (NIC, USB, SD/eMMC, RP1, etc.). BRING-UP: if a Pi
-# 5 peripheral is missing from mainline at boot (serial will show where it
-# stops), add it here or fall back to the Pi kernel fork (see the defconfig).
+# Rasputin kernel config fragment — rpi SKU (arm64: Pi 5 / CM5, BCM2712),
+# merged on top of the Raspberry Pi FORK's `bcm2712` defconfig (see the
+# defconfig — mainline can't boot the Pi 5 D0 silicon). Only the Rasputin-
+# critical deltas; the bcm2712 defconfig carries the broad Pi peripheral set
+# (NIC, USB, NVMe, RP1, etc.).
+
+# --- module loading: DISABLE module compression. The fork's bcm2712 defconfig
+#     compresses modules to .ko.xz, but the build's host `depmod` can't index
+#     the compressed modules → modules.dep comes out EMPTY → kmod modprobe
+#     can't load ANY module (bridge, br_netfilter, …) even though the .ko.xz
+#     files are present. Bench-confirmed on the Pi 5: dockerd couldn't create
+#     docker0 ("create bridge: operation not supported"). Uncompressed modules
+#     → depmod indexes them → modules load. ---
+CONFIG_MODULE_COMPRESS_NONE=y
+
+# --- expose the running kernel config on-device (/proc/config.gz) so a missing
+#     option can be diagnosed by SSH instead of a rebuild ---
+CONFIG_IKCONFIG=y
+CONFIG_IKCONFIG_PROC=y
 
 # --- read-only squashfs rootfs + dm-verity (RAUC verity bundles) ---
 CONFIG_SQUASHFS=y
