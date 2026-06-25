@@ -79,6 +79,13 @@ BR2_LINUX_KERNEL_DTS_SUPPORT=y
 BR2_LINUX_KERNEL_INTREE_DTS_NAME="broadcom/bcm2712-rpi-5-b broadcom/bcm2712d0-rpi-5-b broadcom/bcm2712-rpi-500"
 BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_RASPUTIN_PATH)/board/rasputin/rpi/linux-4k-page-size.fragment $(BR2_EXTERNAL_RASPUTIN_PATH)/board/rasputin/rpi/linux.fragment"
 BR2_LINUX_KERNEL_NEEDS_HOST_OPENSSL=y
+# Declare the custom kernel's headers series (the fork is 6.6.x). REQUIRED with
+# a CUSTOM_TARBALL kernel: without it Buildroot defaults the kernel-headers
+# version to 2.6, which (a) fails the linux-headers staging check ("expected
+# 2.6.x, got 6.6.x") and (b) drops BR2_TOOLCHAIN_HEADERS_AT_LEAST below glibc's
+# floor → kconfig silently falls the toolchain back to uClibc. Matches
+# Buildroot's raspberrypi5_defconfig.
+BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_6_6=y
 
 # --- RPi firmware (the GPU/boot firmware on the FAT) ---
 # Pi 5 boots from its SPI-EEPROM bootloader → reads config.txt → loads the
