@@ -1,0 +1,5 @@
+# Force 4K pages on the Pi 5 (bcm2712) kernel. The RPi fork's bcm2712 defconfig
+# defaults to 16K pages, which breaks container/glibc compatibility (and our
+# squashfs/overlay stack). Mirrors Buildroot's board/raspberrypi/
+# linux-4k-page-size.fragment, applied by raspberrypi5_defconfig.
+CONFIG_ARM64_4K_PAGES=y

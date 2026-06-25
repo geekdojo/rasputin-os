@@ -59,9 +59,10 @@ case "$SOC" in
 		# `mcopy ::` is unambiguous.
 		#
 		# Contents, all flattened to the FAT root:
-		#   Image            mainline arm64 kernel (config.txt `kernel=Image`)
-		#   *.dtb            both board DTBs (bcm2711-rpi-4-b + bcm2712-rpi-5-b);
-		#                    the firmware auto-selects the right one per board
+		#   Image            RPi-fork bcm2712 arm64 kernel (config.txt `kernel=Image`)
+		#   *.dtb            the Pi 5 board DTBs incl. the D0 variant (bcm2712-
+		#                    rpi-5-b + bcm2712d0-rpi-5-b + bcm2712-rpi-500); the
+		#                    firmware auto-selects the right one per board/stepping
 		#   rpi-firmware/*   GPU/boot firmware + our config.txt + cmdline.txt +
 		#                    overlays/ (from BR2_PACKAGE_RPI_FIRMWARE_*)
 		#   rasputin-seed.env  the provisioning seed firstboot reads

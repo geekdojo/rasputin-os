@@ -53,37 +53,42 @@ BR2_TARGET_GENERIC_ROOT_PASSWD="rasputin"
 BR2_PACKAGE_SYSTEMD_NETWORKD=y
 BR2_PACKAGE_SYSTEMD_RESOLVED=y
 
-# --- kernel: BCM2711 (Pi 4) + BCM2712 (Pi 5 / CM5), ONE Image ---
-# Mainline's UNIFIED arm64 config (arch/arm64/configs/defconfig) carries broad
-# SoC support including BCM2711 + BCM2712 — so a single arm64 Image boots both
-# the Pi 4 and the Pi 5 / CM5. This is the whole reason for mainline over the
-# Raspberry Pi kernel FORK: the fork uses per-SoC defconfigs (bcm2711 vs
-# bcm2712 — and `bcm2712_defconfig` exists ONLY in the fork), which would mean
-# two kernels for a unified image. BRING-UP RISK: mainline's Pi 5 (BCM2712)
-# peripheral support lags the fork; if a needed peripheral is missing on the
-# bench Pi 5, the documented fallback is the fork (BR2_LINUX_KERNEL_CUSTOM_GIT
-# → raspberrypi/linux + bcm2712_defconfig) at the cost of per-SoC kernels.
-# Both board DTBs are built; the Pi firmware auto-selects the right one by board
-# (BRING-UP: swap the Pi-5 DTB to the CM5 carrier — bcm2712-rpi-cm5-cb / -cm5io
-# — once the carrier is known).
+# --- kernel: Raspberry Pi FORK (raspberrypi/linux), bcm2712 — Pi 5 / CM5 ---
+# Switched from mainline 2026-06-25: a brand-new (rev 1.1 / "D0" silicon) Pi 5
+# does NOT boot a mainline kernel — mainline lacks `bcm2712d0-rpi-5-b.dtb` (and
+# fuller D0 support). Confirmed on the bench: our mainline image = solid-green
+# no-boot / blank HDMI, while stock Raspberry Pi OS (the fork) boots the same
+# board fine. So we use the fork, exactly as Buildroot's raspberrypi5_defconfig
+# does: pinned commit + `bcm2712` defconfig + the 4K-page fragment (the bcm2712
+# defconfig defaults to 16K pages, which breaks container/glibc compat) + the
+# Pi 5 DTBs incl. the D0 variant.
+#
+# TRADE-OFF (the unified-image plan changes): the fork is PER-SoC. `bcm2712` is
+# a Pi-5/CM5 kernel and will NOT boot a Pi 4 (BCM2711) — so this image is now
+# Pi-5-focused; Pi 4 (which booted fine on mainline) is dropped for the moment.
+# True Pi 4 + Pi 5 unification = a SECOND kernel (`kernel8.img` from bcm2711) on
+# the same FAT, config.txt auto-selecting — the Raspberry Pi OS model — tracked
+# as a follow-up. Pin matches Buildroot 2025.02.3 (a known-good combination).
+# CM5 carrier note: bcm2712-rpi-5-b is the Pi 5 board; swap/add the CM5 carrier
+# DTB (bcm2712-rpi-cm5-cb / -cm5io) once a CM5 is on the bench.
 BR2_LINUX_KERNEL=y
-BR2_LINUX_KERNEL_LATEST_VERSION=y
-BR2_LINUX_KERNEL_USE_ARCH_DEFAULT_CONFIG=y
+BR2_LINUX_KERNEL_CUSTOM_TARBALL=y
+BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="$(call github,raspberrypi,linux,576cc10e1ed50a9eacffc7a05c796051d7343ea4)/linux-576cc10e1ed50a9eacffc7a05c796051d7343ea4.tar.gz"
+BR2_LINUX_KERNEL_DEFCONFIG="bcm2712"
 BR2_LINUX_KERNEL_DTS_SUPPORT=y
-BR2_LINUX_KERNEL_INTREE_DTS_NAME="broadcom/bcm2711-rpi-4-b broadcom/bcm2712-rpi-5-b"
-BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_RASPUTIN_PATH)/board/rasputin/rpi/linux.fragment"
+BR2_LINUX_KERNEL_INTREE_DTS_NAME="broadcom/bcm2712-rpi-5-b broadcom/bcm2712d0-rpi-5-b broadcom/bcm2712-rpi-500"
+BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_RASPUTIN_PATH)/board/rasputin/rpi/linux-4k-page-size.fragment $(BR2_EXTERNAL_RASPUTIN_PATH)/board/rasputin/rpi/linux.fragment"
 BR2_LINUX_KERNEL_NEEDS_HOST_OPENSSL=y
 
 # --- RPi firmware (the GPU/boot firmware on the FAT) ---
 # Pi 5 boots from its SPI-EEPROM bootloader → reads config.txt → loads the
-# kernel Image + DTB (no start*.elf needed on the card). Pi 4 boots its GPU
-# firmware (start4.elf/fixup4.dat) FROM the card — so we install the PI4
-# variant: harmless extra files on a Pi 5, required on a Pi 4. config.txt +
-# cmdline.txt are installed into the firmware output dir from our board files
-# (Buildroot's CONFIG_FILE/CMDLINE_FILE mechanism); post-image.sh stages the
-# whole rpi-firmware/ set + the kernel Image + both DTBs onto the boot FAT.
+# kernel Image + DTB (no start*.elf on the card). We use the firmware package's
+# default variant (mirrors Buildroot's raspberrypi5_defconfig — no VARIANT set).
+# config.txt + cmdline.txt are installed into the firmware output dir from our
+# board files (Buildroot's CONFIG_FILE/CMDLINE_FILE mechanism); post-image.sh
+# stages the whole rpi-firmware/ set + the kernel Image + the Pi 5 DTBs onto the
+# boot FAT.
 BR2_PACKAGE_RPI_FIRMWARE=y
-BR2_PACKAGE_RPI_FIRMWARE_VARIANT_PI4=y
 BR2_PACKAGE_RPI_FIRMWARE_CONFIG_FILE="$(BR2_EXTERNAL_RASPUTIN_PATH)/board/rasputin/rpi/config.txt"
 BR2_PACKAGE_RPI_FIRMWARE_CMDLINE_FILE="$(BR2_EXTERNAL_RASPUTIN_PATH)/board/rasputin/rpi/cmdline.txt"
 
