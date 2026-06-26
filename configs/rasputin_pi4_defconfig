@@ -1,0 +1,151 @@
+# Rasputin OS — Raspberry Pi / arm64 SKU (BCM2711 + BCM2712).
+#
+# The `rpi` SKU is one unified arm64 image that boots Raspberry Pi 4 (BCM2711)
+# + Pi 5 / CM5 (BCM2712) — the Raspberry Pi OS model (firmware supports the
+# whole family + auto-selects the DTB by board). Derived from Buildroot's Pi 5
+# reference defconfig + HAOS's firmware/DTB/tryboot bits. Plus systemd,
+# squashfs+verity rootfs, Docker, RAUC A/B, Rasputin packages. CPU is the
+# Cortex-A72 baseline (Pi 4 floor; runs on the Pi 5's A76) — NOT a76, which
+# enables LSE atomics the A72 lacks.
+#
+# This is the image that most wants the real board for final validation:
+# the Pi firmware boot flow + the one-shot `tryboot` A/B (no boot-counter)
+# can't be fully exercised in QEMU. The bring-up items are flagged below.
+# Evolve loop:
+#   make BR2_EXTERNAL=$PWD O=output/rpi rasputin_rpi_defconfig
+#   make BR2_EXTERNAL=$PWD O=output/rpi linux-menuconfig   # then savedefconfig
+
+# --- target arch ---
+BR2_aarch64=y
+# Cortex-A72 baseline, NOT A76: this one arm64 image must boot the Pi 4 (A72)
+# as well as the Pi 5 / CM5 (A76). A76 (`BR2_cortex_a76`) enables ARMv8.1 LSE
+# atomics the Pi 4's A72 lacks, so an a76-tuned binary illegal-opcodes on a Pi
+# 4. A72-tuned code runs fine on the A76. Negligible perf cost for this load.
+BR2_cortex_a72=y
+
+# --- build: ccache (CI caches ~/.buildroot-ccache across runs; warm rebuilds
+# of the kernel + packages drop from hours to minutes — release-pipeline.md §6) ---
+BR2_CCACHE=y
+
+# --- toolchain / init / libc ---
+BR2_TOOLCHAIN_BUILDROOT_GLIBC=y
+BR2_TOOLCHAIN_BUILDROOT_CXX=y
+BR2_INIT_SYSTEMD=y
+# (no BR2_SYSTEM_DHCP — see rasputin_n100_defconfig: the literal "eth0" match
+# never fires under udev predictable naming; the overlay 20-wired.network
+# covers en*/eth* on both arches.)
+# Placeholder, not "rasputin" — see rasputin_n100_defconfig: the per-role
+# rasputin-hostname.service promotes only the controlplane to "rasputin"
+# (mDNS rasputin.local); the baked name must collide with nothing.
+BR2_TARGET_GENERIC_HOSTNAME="rasputin-node"
+BR2_TARGET_GENERIC_ISSUE="Welcome to Rasputin OS"
+# Pi serial console (UART on the 40-pin header / debug connector).
+BR2_TARGET_GENERIC_GETTY_PORT="ttyAMA0"
+# Default console/serial root password (Buildroot hashes it at build). Network
+# SSH stays key-only (dropbear -s ignores passwords), so this only guards the
+# physical console — defense-in-depth, not a network control. Baked because
+# /etc/shadow is on the read-only squashfs rootfs and can't be changed at
+# runtime yet; making it operator-changeable (passwd / wizard) needs shadow on
+# the persistent partition — tracked in the backlog.
+BR2_TARGET_GENERIC_ROOT_PASSWD="rasputin"
+# networkd + resolved pinned explicitly (Buildroot defaults, but the image
+# functionally depends on them — see rasputin_n100_defconfig).
+BR2_PACKAGE_SYSTEMD_NETWORKD=y
+BR2_PACKAGE_SYSTEMD_RESOLVED=y
+
+# --- kernel: Raspberry Pi FORK (raspberrypi/linux), bcm2711 — Pi 4 ---
+# THROWAWAY validation defconfig: rasputin_rpi_defconfig with the kernel swapped
+# to the fork's `bcm2711` defconfig (Pi 4 / BCM2711) + the Pi 4 DTB + the PI4
+# firmware variant (start4.elf/fixup4.dat). Purpose: validate the Pi 4 boots +
+# runs our stack (Docker, enroll) on the fork BEFORE building the unified two-
+# kernel image (`kernel8.img` bcm2711 + `kernel_2712.img` bcm2712 on one FAT,
+# config.txt auto-selecting — the Raspberry Pi OS model). Same fork commit + the
+# same fragments as the rpi SKU, so the netfilter / module-compression / glibc-
+# headers fixes all carry to the Pi 4. Reuses board/rasputin/rpi/ (config.txt's
+# [pi4] section + kernel=Image + root=PARTLABEL all work on a Pi 4). bcm2711 is
+# 4K-pages already, so the 4K fragment is a harmless no-op here. Fold into the
+# unified image, then delete this defconfig.
+BR2_LINUX_KERNEL=y
+BR2_LINUX_KERNEL_CUSTOM_TARBALL=y
+BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="$(call github,raspberrypi,linux,576cc10e1ed50a9eacffc7a05c796051d7343ea4)/linux-576cc10e1ed50a9eacffc7a05c796051d7343ea4.tar.gz"
+BR2_LINUX_KERNEL_DEFCONFIG="bcm2711"
+BR2_LINUX_KERNEL_DTS_SUPPORT=y
+BR2_LINUX_KERNEL_INTREE_DTS_NAME="broadcom/bcm2711-rpi-4-b"
+BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_RASPUTIN_PATH)/board/rasputin/rpi/linux-4k-page-size.fragment $(BR2_EXTERNAL_RASPUTIN_PATH)/board/rasputin/rpi/linux.fragment"
+BR2_LINUX_KERNEL_NEEDS_HOST_OPENSSL=y
+# Declare the custom kernel's headers series (the fork is 6.6.x). REQUIRED with
+# a CUSTOM_TARBALL kernel: without it Buildroot defaults the kernel-headers
+# version to 2.6, which (a) fails the linux-headers staging check ("expected
+# 2.6.x, got 6.6.x") and (b) drops BR2_TOOLCHAIN_HEADERS_AT_LEAST below glibc's
+# floor → kconfig silently falls the toolchain back to uClibc. Matches
+# Buildroot's raspberrypi5_defconfig.
+BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_6_6=y
+
+# --- RPi firmware (the GPU/boot firmware on the FAT) ---
+# Pi 5 boots from its SPI-EEPROM bootloader → reads config.txt → loads the
+# kernel Image + DTB (no start*.elf on the card). We use the firmware package's
+# default variant (mirrors Buildroot's raspberrypi5_defconfig — no VARIANT set).
+# config.txt + cmdline.txt are installed into the firmware output dir from our
+# board files (Buildroot's CONFIG_FILE/CMDLINE_FILE mechanism); post-image.sh
+# stages the whole rpi-firmware/ set + the kernel Image + the Pi 5 DTBs onto the
+# boot FAT.
+BR2_PACKAGE_RPI_FIRMWARE=y
+# Pi 4 (unlike Pi 5) boots its GPU firmware (start4.elf/fixup4.dat) FROM the
+# card → install the PI4 variant.
+BR2_PACKAGE_RPI_FIRMWARE_VARIANT_PI4=y
+BR2_PACKAGE_RPI_FIRMWARE_CONFIG_FILE="$(BR2_EXTERNAL_RASPUTIN_PATH)/board/rasputin/rpi/config.txt"
+BR2_PACKAGE_RPI_FIRMWARE_CMDLINE_FILE="$(BR2_EXTERNAL_RASPUTIN_PATH)/board/rasputin/rpi/cmdline.txt"
+
+# --- A/B + RAUC ---
+# real e2fsprogs: systemd-makefs execs mkfs.ext4; busybox mke2fs cannot
+# answer to that name (see rasputin_n100_defconfig)
+BR2_PACKAGE_E2FSPROGS=y
+BR2_PACKAGE_RAUC=y
+BR2_PACKAGE_HOST_RAUC=y
+BR2_PACKAGE_SQUASHFS=y
+BR2_PACKAGE_CRYPTSETUP=y          # veritysetup for dm-verity at runtime
+
+# --- host tools for image assembly (post-image.sh) ---
+BR2_PACKAGE_HOST_GENIMAGE=y
+BR2_PACKAGE_HOST_DOSFSTOOLS=y
+BR2_PACKAGE_HOST_MTOOLS=y
+
+# --- app primitive ---
+# ca-certificates: public CA trust store (Mozilla NSS bundle → /etc/ssl/certs).
+# Without it EVERY outbound TLS client fails cert verification — dockerd can't
+# pull from registry-1.docker.io (x509: certificate signed by unknown
+# authority — bench 2026-06-17, blocked self-hosted Headscale), tailscaled
+# can't reach public DERP relays, and the api can't fetch over HTTPS.
+BR2_PACKAGE_CA_CERTIFICATES=y
+BR2_PACKAGE_DOCKER_ENGINE=y
+BR2_PACKAGE_DOCKER_CLI=y
+# tailscale: mesh / remote access (Headscale self-hosted control server). The
+# agent autodetects the binary via PATH and drives `tailscale up`; tailscaled
+# trusts the per-installation Mesh CA via SSL_CERT_FILE (see the tailscaled
+# drop-in in the overlay).
+BR2_PACKAGE_TAILSCALE=y
+
+# --- remote access (SSH) ---
+# dropbear: key-only SSH for support/debugging a headless controlplane. The
+# dropbear.service overlay runs it with -s (no password auth) and host keys on
+# the persistent partition; the authorized key is baked into /root/.ssh at
+# build time from RASPUTIN_SSH_AUTHORIZED_KEY (post-build.sh). With no baked
+# key, network SSH is simply unusable (console stays available) — never
+# passwordless root over the network. DISABLE_REVERSEDNS keeps logins snappy
+# on LANs without reverse DNS.
+BR2_PACKAGE_DROPBEAR=y
+BR2_PACKAGE_DROPBEAR_DISABLE_REVERSEDNS=y
+
+# --- Rasputin packages (this external tree) ---
+BR2_PACKAGE_RASPUTIN_AGENT=y
+BR2_PACKAGE_RASPUTIN_API=y
+
+# --- rootfs: squashfs (read-only, verity-friendly) ---
+BR2_TARGET_ROOTFS_SQUASHFS=y
+BR2_TARGET_ROOTFS_SQUASHFS4_XZ=y
+
+# --- overlay + hooks (shared across both arches) ---
+BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_RASPUTIN_PATH)/board/rasputin/common/rootfs-overlay"
+BR2_ROOTFS_POST_BUILD_SCRIPT="$(BR2_EXTERNAL_RASPUTIN_PATH)/board/rasputin/common/post-build.sh"
+BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL_RASPUTIN_PATH)/board/rasputin/common/post-image.sh"
+BR2_ROOTFS_POST_SCRIPT_ARGS="rpi"

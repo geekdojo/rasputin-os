@@ -101,6 +101,13 @@ jobs:
             defconfig: rasputin_rpi_defconfig
             arch: arm64
             compatible: rasputin-rpi-arm64
+          # THROWAWAY Pi-4 validation build (fork bcm2711 kernel) — see
+          # configs/rasputin_pi4_defconfig. Remove once Pi 4 folds into the
+          # unified two-kernel rpi image. Publish-gated like rpi (arm64).
+          - sku: pi4
+            defconfig: rasputin_pi4_defconfig
+            arch: arm64
+            compatible: rasputin-rpi-arm64
           - sku: n100
             defconfig: rasputin_n100_defconfig
             arch: amd64
@@ -151,7 +158,13 @@ jobs:
           # NOT buildroot/.git/HEAD — that's a submodule gitlink file, not a
           # hashable path, and breaks hashFiles ("template is not valid").
           key: br-${{ matrix.sku }}-${{ hashFiles(format('configs/{0}', matrix.defconfig), 'scripts/init-buildroot.sh') }}
-          restore-keys: br-${{ matrix.sku }}-
+          # Fall back to the rpi cache for warm-start: pi4 shares the fork kernel
+          # tarball (dl/) + the glibc/A72 toolchain ccache with rpi, so it isn't
+          # a fully-cold ~2h build. Harmless for n100 (content-addressed ccache
+          # won't match the x86 toolchain).
+          restore-keys: |
+            br-${{ matrix.sku }}-
+            br-rpi-
 
       - name: Inject trust root
         run: |
