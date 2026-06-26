@@ -59,6 +59,12 @@ ln -sf /etc/systemd/system/rasputin-mark-good.service \
 ln -sf /etc/systemd/system/rasputin-growpart.service \
 	"$TARGET_DIR/etc/systemd/system/multi-user.target.wants/rasputin-growpart.service"
 
+# Console login banner shows the node's IP (/etc/issue carries agetty's `\4`).
+# This oneshot re-renders agetty once the network is up so the IP isn't blank
+# when getty started before DHCP. See rasputin-issue-ip.service.
+ln -sf /etc/systemd/system/rasputin-issue-ip.service \
+	"$TARGET_DIR/etc/systemd/system/multi-user.target.wants/rasputin-issue-ip.service"
+
 # tailscaled (mesh / remote access). The upstream Buildroot tailscale package
 # installs the unit at /usr/lib/systemd/system/tailscaled.service but does not
 # enable it; enable it on every image so it's up before the agent runs
