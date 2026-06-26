@@ -27,4 +27,10 @@ enable_uart=1
 # Pi 4 boots its GPU firmware (start4.elf/fixup4.dat) from this FAT.
 [pi5]
 # Pi 5 boots from its SPI-EEPROM bootloader → this config.txt → Image + DTB.
+# Enable the external PCIe x1 lane so the kernel sees an NVMe SSD on the M.2 /
+# SSD HAT (Pi 5 PCIe is OFF by default). Required for booting/running from NVMe;
+# harmless when no PCIe device is attached (just powers the controller). The
+# EEPROM bootloader has its own NVMe support for finding the boot partition;
+# this is what lets the OS use the drive once booted.
+dtparam=pciex1
 [all]
