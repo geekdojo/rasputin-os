@@ -14,9 +14,12 @@ DHCP=yes
 # controlplane answers rasputin.local.
 MulticastDNS=yes
 # IPv4 link-local FALLBACK for the dumb-switch/no-DHCP bench scenario.
-# "yes" = IPv6 LL always (the prior default) + IPv4 LL only while DHCPv4
-# has no lease: systemd 256's networkd starts sd-ipv4ll on DHCP transient
-# failure and drops the 169.254.x address the moment a lease is acquired
-# (networkd-dhcp4.c dhcp4_address_acquired → sd_ipv4ll_stop). So with
-# working DHCP no extra address ever exists to pollute the api's cert SANs.
-LinkLocalAddressing=yes
+# "ipv4" = IPv4 LL only while DHCPv4 has no lease: systemd 256's networkd
+# starts sd-ipv4ll on DHCP transient failure and drops the 169.254.x address
+# the moment a lease is acquired (networkd-dhcp4.c dhcp4_address_acquired →
+# sd_ipv4ll_stop). So with working DHCP no extra address ever exists to
+# pollute the api's cert SANs. NOT "yes" — that also brings up IPv6
+# link-local, which Rasputin is IPv4-only (LOCKED decision #9) forbids.
+LinkLocalAddressing=ipv4
+# Refuse router advertisements / SLAAC so no IPv6 address appears via RA.
+IPv6AcceptRA=no
