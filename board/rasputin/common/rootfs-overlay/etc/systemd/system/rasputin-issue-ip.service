@@ -1,19 +1,17 @@
 [Unit]
-Description=Refresh the console login banner with the node's IP
-# /etc/issue carries `\4` (IPv4); agetty resolves it when it renders the issue,
-# which happens at getty start — often BEFORE DHCP has assigned an address, so
-# the IP line would otherwise show blank. Once the network is up, `agetty
-# --reload` (it touches /run/agetty.reload) makes every running agetty
-# re-display the issue with the now-assigned address. Read-only /etc means we
-# can't rewrite /etc/issue at runtime, so `\4` + reload is the read-only-
-# friendly way to surface a live IP on the console login screen.
+Description=Write the node's IP into the console login banner
+# /etc/issue is a symlink to /run/issue (writable tmpfs); this oneshot fills it
+# with the node's REAL routable IPv4 (default-route source addr) and reloads
+# agetty so the login screen shows it. Reads the route source rather than
+# agetty's `\4` so it never flashes loopback/link-local before DHCP settles.
+# See usr/lib/rasputin/issue/rasputin-issue-ip.sh.
 Wants=network-online.target
 After=network-online.target
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/sbin/agetty --reload
+ExecStart=/usr/lib/rasputin/issue/rasputin-issue-ip.sh
 
 [Install]
 WantedBy=multi-user.target
