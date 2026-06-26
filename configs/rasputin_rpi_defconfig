@@ -76,11 +76,12 @@ BR2_LINUX_KERNEL_CUSTOM_TARBALL=y
 BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="$(call github,raspberrypi,linux,576cc10e1ed50a9eacffc7a05c796051d7343ea4)/linux-576cc10e1ed50a9eacffc7a05c796051d7343ea4.tar.gz"
 BR2_LINUX_KERNEL_DEFCONFIG="bcm2712"
 BR2_LINUX_KERNEL_DTS_SUPPORT=y
-# bcm2712-rpi-5-b = Pi 5 rev 1.0 (C-stepping); bcm2712d0-rpi-5-b = rev 1.1 (D0).
-# NOTE: dropped Buildroot's third entry `bcm2712-rpi-500` (the Pi 500 keyboard-
-# PC) — it has no build rule at fork commit 576cc10 ("No rule to make target …
-# bcm2712-rpi-500.dtb") and isn't a Rasputin target anyway.
-BR2_LINUX_KERNEL_INTREE_DTS_NAME="broadcom/bcm2712-rpi-5-b broadcom/bcm2712d0-rpi-5-b"
+# UNIFIED image DTBs: Pi 5 (bcm2712-rpi-5-b = rev 1.0 / C-step; bcm2712d0-rpi-5-b
+# = rev 1.1 / D0) + Pi 4 (bcm2711-rpi-4-b). The bcm2712 primary kernel compiles
+# all three DTBs fine (DTS compilation is config-independent); the Pi 4 kernel
+# itself (kernel8.img) is built separately in post-build.sh. NOTE: dropped
+# Buildroot's `bcm2712-rpi-500` (Pi 500) — no build rule at fork commit 576cc10.
+BR2_LINUX_KERNEL_INTREE_DTS_NAME="broadcom/bcm2712-rpi-5-b broadcom/bcm2712d0-rpi-5-b broadcom/bcm2711-rpi-4-b"
 BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_RASPUTIN_PATH)/board/rasputin/rpi/linux-4k-page-size.fragment $(BR2_EXTERNAL_RASPUTIN_PATH)/board/rasputin/rpi/linux.fragment"
 BR2_LINUX_KERNEL_NEEDS_HOST_OPENSSL=y
 # Declare the custom kernel's headers series (the fork is 6.6.x). REQUIRED with
@@ -92,14 +93,14 @@ BR2_LINUX_KERNEL_NEEDS_HOST_OPENSSL=y
 BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_6_6=y
 
 # --- RPi firmware (the GPU/boot firmware on the FAT) ---
-# Pi 5 boots from its SPI-EEPROM bootloader → reads config.txt → loads the
-# kernel Image + DTB (no start*.elf on the card). We use the firmware package's
-# default variant (mirrors Buildroot's raspberrypi5_defconfig — no VARIANT set).
-# config.txt + cmdline.txt are installed into the firmware output dir from our
-# board files (Buildroot's CONFIG_FILE/CMDLINE_FILE mechanism); post-image.sh
-# stages the whole rpi-firmware/ set + the kernel Image + the Pi 5 DTBs onto the
-# boot FAT.
+# Pi 5 boots from its SPI-EEPROM bootloader → config.txt → kernel (no start*.elf
+# on the card). Pi 4 boots its GPU firmware (start4.elf/fixup4.dat) FROM the card
+# → install the PI4 variant so the unified image boots a Pi 4 too (harmless on
+# Pi 5). config.txt + cmdline.txt come from our board files (CONFIG_FILE/
+# CMDLINE_FILE); post-image.sh stages the rpi-firmware/ set + BOTH kernels
+# (kernel_2712.img + kernel8.img) + all DTBs onto the boot FAT.
 BR2_PACKAGE_RPI_FIRMWARE=y
+BR2_PACKAGE_RPI_FIRMWARE_VARIANT_PI4=y
 BR2_PACKAGE_RPI_FIRMWARE_CONFIG_FILE="$(BR2_EXTERNAL_RASPUTIN_PATH)/board/rasputin/rpi/config.txt"
 BR2_PACKAGE_RPI_FIRMWARE_CMDLINE_FILE="$(BR2_EXTERNAL_RASPUTIN_PATH)/board/rasputin/rpi/cmdline.txt"
 

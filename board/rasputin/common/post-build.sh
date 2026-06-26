@@ -151,3 +151,39 @@ ln -sf ../run/systemd/resolve/stub-resolv.conf "$TARGET_DIR/etc/resolv.conf"
 # holds node.env and trust/, so it's the right home for this.
 mkdir -p "$TARGET_DIR/etc/rasputin"
 printf '%s\n' "${RASPUTIN_VERSION:-0.0.0-dev}" > "$TARGET_DIR/etc/rasputin/image-version"
+
+# === SECOND kernel for the UNIFIED rpi image: bcm2711 (Pi 4) → kernel8.img ===
+# Buildroot built the primary bcm2712 (Pi 5/CM5) kernel + installed its modules
+# to $TARGET_DIR/lib/modules/<2712-ver>. Here — after that build, BEFORE the
+# rootfs is squashed — we recompile the SAME fork source for bcm2711 (Pi 4) and
+# install its modules ALONGSIDE, so one rootfs serves whichever kernel the Pi
+# firmware boots. The primary kernel's Image + all three DTBs are already copied
+# to images/, so reconfiguring the kernel build dir in place is safe (nothing
+# rebuilds the kernel after post-build). post-image.sh stages BOTH Images onto
+# the FAT (kernel_2712.img for Pi 5, kernel8.img for Pi 4) and config.txt's
+# [pi4]/[pi5] sections select per board. See os-images/buildroot-os.md §3.
+if [ "$SOC" = "rpi" ]; then
+	O_DIR="$(cd "$(dirname "$TARGET_DIR")" && pwd)"   # output/rpi
+	BIN_DIR="$O_DIR/images"
+	HOST_DIR="$O_DIR/host"
+	KSRC="$O_DIR/build/linux-custom"
+	CROSS="$HOST_DIR/bin/aarch64-buildroot-linux-gnu-"
+	FRAG="$SCRIPT_DIR/../rpi"
+	if [ ! -d "$KSRC" ]; then
+		echo "post-build: ERROR — kernel source $KSRC not found for the Pi 4 second kernel" >&2
+		exit 1
+	fi
+	echo "post-build: building the Pi 4 (bcm2711) second kernel for the unified image…"
+	MK="make -C $KSRC ARCH=arm64 CROSS_COMPILE=$CROSS KCFLAGS=-Wno-attribute-alias WERROR=0 REGENERATE_PARSERS=1"
+	$MK mrproper
+	$MK bcm2711_defconfig
+	# Our fragments (squashfs / netfilter / CONFIG_MODULE_COMPRESS_NONE / etc.)
+	# must apply to the Pi 4 kernel too — appended last so they win, then
+	# olddefconfig resolves. 4K-page fragment is a no-op on bcm2711 (already 4K).
+	cat "$FRAG/linux-4k-page-size.fragment" "$FRAG/linux.fragment" >> "$KSRC/.config"
+	$MK olddefconfig
+	$MK -j"$(nproc)" Image modules
+	$MK INSTALL_MOD_PATH="$TARGET_DIR" INSTALL_MOD_STRIP=1 DEPMOD="$HOST_DIR/sbin/depmod" modules_install
+	cp "$KSRC/arch/arm64/boot/Image" "$BIN_DIR/kernel8.img"
+	echo "post-build: Pi 4 kernel → images/kernel8.img; both kernels' modules now in the rootfs"
+fi

@@ -101,13 +101,6 @@ jobs:
             defconfig: rasputin_rpi_defconfig
             arch: arm64
             compatible: rasputin-rpi-arm64
-          # THROWAWAY Pi-4 validation build (fork bcm2711 kernel) — see
-          # configs/rasputin_pi4_defconfig. Remove once Pi 4 folds into the
-          # unified two-kernel rpi image. Publish-gated like rpi (arm64).
-          - sku: pi4
-            defconfig: rasputin_pi4_defconfig
-            arch: arm64
-            compatible: rasputin-rpi-arm64
           - sku: n100
             defconfig: rasputin_n100_defconfig
             arch: amd64

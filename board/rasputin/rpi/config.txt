@@ -2,14 +2,15 @@
 # Installed into the firmware output dir via BR2_PACKAGE_RPI_FIRMWARE_CONFIG_FILE
 # and staged onto the boot FAT by board/rasputin/common/post-image.sh.
 #
-# One unified image: the firmware auto-selects the matching DTB by board, so the
+# One unified image, TWO kernels: the firmware auto-selects the matching DTB by
+# board, and the [pi4]/[pi5] sections below pick the matching kernel — so the
 # same FAT boots a Pi 4 (BCM2711) or a Pi 5 / CM5 (BCM2712). config.txt is read
 # from the boot partition on every model.
 
-# 64-bit kernel, named `Image` (the mainline arm64 kernel image; staged at the
-# FAT root next to the per-board DTBs).
+# 64-bit. The kernel is chosen per board in the [pi4]/[pi5] sections below
+# (kernel8.img = bcm2711/Pi 4, kernel_2712.img = bcm2712/Pi 5) — NOT a global
+# `kernel=`, since the two SoCs need different kernels.
 arm_64bit=1
-kernel=Image
 auto_initramfs=1
 disable_overscan=1
 
@@ -20,13 +21,13 @@ disable_overscan=1
 # enumerates UARTs differently — VERIFY the kernel console= on first boot).
 enable_uart=1
 
-# Per-model knobs (firmware applies the matching [block]). Kept minimal for the
-# first boot; the SSD-HAT PCIe/NVMe enablement (dtparam=pciex1 + the nvme
-# overlay) lands with the Pi-5-on-SSD test.
+# Per-model knobs (firmware applies the matching [block]).
 [pi4]
-# Pi 4 boots its GPU firmware (start4.elf/fixup4.dat) from this FAT.
+# Pi 4 (bcm2711): its GPU firmware (start4.elf/fixup4.dat) loads this kernel.
+kernel=kernel8.img
 [pi5]
-# Pi 5 boots from its SPI-EEPROM bootloader → this config.txt → Image + DTB.
+# Pi 5 / CM5 (bcm2712): the SPI-EEPROM bootloader loads this kernel via config.txt.
+kernel=kernel_2712.img
 # Enable the external PCIe x1 lane so the kernel sees an NVMe SSD on the M.2 /
 # SSD HAT (Pi 5 PCIe is OFF by default). Required for booting/running from NVMe;
 # harmless when no PCIe device is attached (just powers the controller). The

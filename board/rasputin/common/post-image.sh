@@ -58,13 +58,15 @@ case "$SOC" in
 		# /rpi-firmware subdir, where the firmware can't find it). Staging flat +
 		# `mcopy ::` is unambiguous.
 		#
-		# Contents, all flattened to the FAT root:
-		#   Image            RPi-fork bcm2712 arm64 kernel (config.txt `kernel=Image`)
-		#   *.dtb            the Pi 5 board DTBs incl. the D0 variant (bcm2712-
-		#                    rpi-5-b + bcm2712d0-rpi-5-b + bcm2712-rpi-500); the
-		#                    firmware auto-selects the right one per board/stepping
-		#   rpi-firmware/*   GPU/boot firmware + our config.txt + cmdline.txt +
-		#                    overlays/ (from BR2_PACKAGE_RPI_FIRMWARE_*)
+		# UNIFIED image — TWO kernels so one FAT boots Pi 4 + Pi 5/CM5; config.txt's
+		# [pi4]/[pi5] sections pick the right one. Contents, all flattened to root:
+		#   kernel_2712.img  Pi 5 / CM5 kernel (the bcm2712 primary `Image`)
+		#   kernel8.img      Pi 4 kernel (the bcm2711 Image built in post-build.sh)
+		#   *.dtb            all board DTBs: bcm2712-rpi-5-b + bcm2712d0-rpi-5-b
+		#                    (Pi 5 rev 1.0 / D0) + bcm2711-rpi-4-b (Pi 4); firmware
+		#                    auto-selects per board
+		#   rpi-firmware/*   GPU/boot firmware (incl. Pi 4 start4.elf/fixup4.dat) +
+		#                    our config.txt + cmdline.txt + overlays/
 		#   rasputin-seed.env  the provisioning seed firstboot reads
 		#
 		# BRING-UP: single-slot for now — cmdline.txt roots at PARTLABEL=rootfs-0.
@@ -72,7 +74,8 @@ case "$SOC" in
 		# custom backend) lands after a basic Pi 5 boot is confirmed on the bench.
 		BOOT_STAGE="$BINARIES_DIR/rpi-boot"
 		rm -rf "$BOOT_STAGE"; mkdir -p "$BOOT_STAGE"
-		cp "$BINARIES_DIR/Image" "$BOOT_STAGE/"
+		cp "$BINARIES_DIR/Image" "$BOOT_STAGE/kernel_2712.img"   # Pi 5 / CM5 (bcm2712)
+		cp "$BINARIES_DIR/kernel8.img" "$BOOT_STAGE/kernel8.img" # Pi 4 (bcm2711, from post-build)
 		cp "$BINARIES_DIR"/*.dtb "$BOOT_STAGE/"
 		cp -a "$BINARIES_DIR"/rpi-firmware/. "$BOOT_STAGE/"
 		cp "$COMMON_DIR/rasputin-seed.env.template" "$BOOT_STAGE/rasputin-seed.env"
