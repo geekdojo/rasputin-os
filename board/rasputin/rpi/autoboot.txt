@@ -1,17 +1,23 @@
-# Raspberry Pi A/B tryboot selector — read by the firmware BEFORE config.txt.
-# Staged onto the boot FAT root by board/rasputin/common/post-image.sh.
+# Raspberry Pi A/B selector — read by the EEPROM BOOTLOADER before config.txt,
+# from the first FAT partition (boot-a / p1). Staged there by post-image.sh.
 #
-# tryboot_a_b=1 makes a one-shot `tryboot` reboot re-read the NORMAL config.txt
-# (not tryboot.txt), so our config.txt's [tryboot] section can swap the kernel
-# cmdline to the candidate rootfs slot. We deliberately do NOT switch
-# boot_partition here: the image has a SINGLE boot FAT shared by both slots
-# (one kernel set + firmware), and only the rootfs is A/B — exactly like the
-# n100 (one /bzImage, A/B squashfs). The slot is chosen entirely by which
-# cmdline the firmware loads: cmdline.txt = the committed slot, tryboot.txt =
-# the trial slot. A failed trial (no mark-good) consumes the one-shot and the
-# next normal boot reverts to cmdline.txt — that IS the rollback.
+# This is the CANONICAL Pi tryboot A/B mechanism: the bootloader picks which
+# BOOT PARTITION to load config.txt + the kernel from, by NUMBER:
+#   [all]     boot_partition=1  → normal boot uses boot-a (p1) → slot A
+#   [tryboot] boot_partition=2  → a one-shot `tryboot` reboot uses boot-b (p2) → slot B
+# The RAUC custom backend (/usr/lib/rauc/rpi-tryboot-backend.sh) rewrites these
+# numbers: it sets [tryboot] to the candidate's partition to arm a trial, and
+# promotes [all] to that partition on commit. A failed trial consumes the
+# one-shot and the next normal boot falls back to [all] — that IS the rollback.
 #
-# Driven by the RAUC custom backend at /usr/lib/rauc/rpi-tryboot-backend.sh.
-# See os-images/buildroot-os.md §3.
+# tryboot_a_b=1 makes the tryboot load the partition's NORMAL config.txt (not
+# tryboot.txt), so each boot partition just uses its own plain config.txt +
+# cmdline.txt (which statically roots its slot). Done at the bootloader stage,
+# this is portable across Pi 4 (EEPROM → start4.elf) and Pi 5 (unified EEPROM) —
+# unlike the config.txt `[tryboot]` cmdline filter, which the Pi 4's start4.elf
+# ignored (bench 2026-06-27). See os-images/buildroot-os.md §3.
 [all]
 tryboot_a_b=1
+boot_partition=1
+[tryboot]
+boot_partition=2

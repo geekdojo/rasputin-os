@@ -34,13 +34,10 @@ kernel=kernel_2712.img
 # EEPROM bootloader has its own NVMe support for finding the boot partition;
 # this is what lets the OS use the drive once booted.
 dtparam=pciex1
-
-# A/B update trial (RAUC custom backend + autoboot.txt tryboot_a_b=1). On a
-# one-shot `tryboot` reboot the firmware re-reads THIS config.txt and the
-# [tryboot] filter passes, swapping the kernel cmdline to the candidate slot
-# (tryboot.txt). A NORMAL boot ignores [tryboot] and uses the default
-# cmdline.txt (the committed slot) — so a failed trial auto-reverts. Filters
-# compose: on a Pi 5 trial both [pi5] (kernel) and [tryboot] (cmdline) apply.
-[tryboot]
-cmdline=tryboot.txt
 [all]
+
+# NOTE: A/B is handled ONE level up, in autoboot.txt (boot_partition switching
+# at the EEPROM stage) — NOT here. This config.txt is identical on both boot
+# FATs (boot-a / boot-b); each FAT's own cmdline.txt statically roots its slot,
+# so there is no [tryboot] section. The earlier `[tryboot] cmdline=…` swap was
+# Pi-5-only (the Pi 4's start4.elf ignored it). See autoboot.txt.

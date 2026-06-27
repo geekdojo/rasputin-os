@@ -2,14 +2,16 @@
 # so rasputin-firstboot.sh can read rasputin-seed.env. os-images/provisioning.md §1.
 #
 # Mounted by FILESYSTEM LABEL, not PARTLABEL: the GPT partition is named "esp"
-# on n100 and "firmware" on cm5 (see each board's genimage.cfg), but both FATs
-# carry the same volume label RASPUTIN-FW — one unit serves both boards.
+# on n100 and "boot-a" on rpi (see each board's genimage.cfg), but both FATs
+# carry the same volume label RASPUTIN-FW — one unit serves both boards. On the
+# rpi this is boot-a (p1), which also holds autoboot.txt + the RAUC tryboot
+# backend's slot state; the rpi's SECOND boot FAT (boot-b, p2) has label
+# RASPUTIN-B and is deliberately NOT matched here.
 #
-# Read-write: RAUC's grub backend updates grubenv (/EFI/BOOT/grubenv on this
-# FAT) at runtime on mark-good/mark-bad/activate, so the boot FAT must be
-# writable. The only runtime writer is grub-editenv (a fixed ~1 KB in-place
-# block); firstboot still only reads the seed. (Was ro; widened for the n100
-# RAUC GRUB boot-counter — os-images/buildroot-os.md §3.)
+# Read-write: the bootloader backend updates state on this FAT at runtime —
+# grubenv on the n100 (grub-editenv), autoboot.txt + slot-state files on the rpi
+# (the tryboot backend) — so it must be writable. firstboot still only reads the
+# seed. (Was ro; widened for the n100 RAUC GRUB boot-counter — buildroot-os.md §3.)
 #
 # Filename is the systemd-escape of /run/rasputin-seed (the "\x2d" IS the
 # escaped dash, literal in the filename — do not "fix" it).
