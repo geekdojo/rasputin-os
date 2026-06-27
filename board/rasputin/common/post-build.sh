@@ -52,6 +52,14 @@ fi
 ln -sf /etc/systemd/system/rasputin-mark-good.service \
 	"$TARGET_DIR/etc/systemd/system/multi-user.target.wants/rasputin-mark-good.service"
 
+# Reconcile a rolled-back RAUC tryboot trial (Raspberry Pi only). Runs before
+# mark-good; clears a stale "trial pending" marker and marks the failed slot bad
+# when a one-shot trial reverted. ConditionPathExists=/run/rasputin-seed/autoboot.txt
+# makes it a silent no-op on the n100 (GRUB backend, no autoboot.txt), so
+# enabling it on every image is safe.
+ln -sf /etc/systemd/system/rasputin-rauc-reconcile.service \
+	"$TARGET_DIR/etc/systemd/system/multi-user.target.wants/rasputin-rauc-reconcile.service"
+
 # Grow the data partition to fill the disk on first boot (genimage ships a fixed
 # small data partition; x-systemd.growfs only grows the fs to the partition).
 # One-time, idempotent, ordered AFTER mark-good so its reboot doesn't trip the

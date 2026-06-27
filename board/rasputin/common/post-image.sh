@@ -67,17 +67,25 @@ case "$SOC" in
 		#                    auto-selects per board
 		#   rpi-firmware/*   GPU/boot firmware (incl. Pi 4 start4.elf/fixup4.dat) +
 		#                    our config.txt + cmdline.txt + overlays/
+		#   autoboot.txt     A/B tryboot selector (tryboot_a_b=1)
+		#   tryboot.txt      initial candidate-slot cmdline (the RAUC backend
+		#                    rewrites it at runtime on set-primary)
 		#   rasputin-seed.env  the provisioning seed firstboot reads
 		#
-		# BRING-UP: single-slot for now — cmdline.txt roots at PARTLABEL=rootfs-0.
-		# The tryboot A/B (two FAT boot partitions + autoboot.txt + the RAUC
-		# custom backend) lands after a basic Pi 5 boot is confirmed on the bench.
+		# A/B: ONE shared boot FAT + A/B rootfs (n100 parity). cmdline.txt roots at
+		# the committed slot; a one-shot `tryboot` reboot loads tryboot.txt (the
+		# candidate). The RAUC custom backend (/usr/lib/rauc/rpi-tryboot-backend.sh)
+		# rewrites cmdline.txt/tryboot.txt on this FAT at runtime — no second boot
+		# partition. config.txt + cmdline.txt arrive via rpi-firmware/ (Buildroot
+		# CONFIG_FILE/CMDLINE_FILE); autoboot.txt + tryboot.txt are staged below.
 		BOOT_STAGE="$BINARIES_DIR/rpi-boot"
 		rm -rf "$BOOT_STAGE"; mkdir -p "$BOOT_STAGE"
 		cp "$BINARIES_DIR/Image" "$BOOT_STAGE/kernel_2712.img"   # Pi 5 / CM5 (bcm2712)
 		cp "$BINARIES_DIR/kernel8.img" "$BOOT_STAGE/kernel8.img" # Pi 4 (bcm2711, from post-build)
 		cp "$BINARIES_DIR"/*.dtb "$BOOT_STAGE/"
 		cp -a "$BINARIES_DIR"/rpi-firmware/. "$BOOT_STAGE/"
+		cp "$BOARD_DIR/autoboot.txt" "$BOOT_STAGE/autoboot.txt"  # A/B tryboot selector
+		cp "$BOARD_DIR/tryboot.txt"  "$BOOT_STAGE/tryboot.txt"   # initial candidate cmdline
 		cp "$COMMON_DIR/rasputin-seed.env.template" "$BOOT_STAGE/rasputin-seed.env"
 		BOOT_VFAT="$BINARIES_DIR/boot.vfat"
 		rm -f "$BOOT_VFAT"

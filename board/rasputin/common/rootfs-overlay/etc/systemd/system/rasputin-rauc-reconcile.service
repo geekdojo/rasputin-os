@@ -1,0 +1,30 @@
+# Reconciles a rolled-back RAUC trial on the Raspberry Pi, early each boot.
+#
+# The Pi's A/B rollback is the firmware one-shot `tryboot`: a trial that never
+# reaches mark-good is spent, and the next boot falls back to the committed
+# slot. When that happens the backend still has a stale "trial pending" marker
+# on the boot FAT. This oneshot runs `rpi-tryboot-backend.sh reconcile`: if a
+# trial was armed but we did NOT come up running it, the trial failed → mark
+# that slot bad and clear the marker. On a healthy boot (committed slot, or a
+# trial that IS running as itself) it's a no-op. See os-images/buildroot-os.md §3.
+#
+# Pi-ONLY: gated on /run/rasputin-seed/autoboot.txt, which exists only on the
+# Pi boot FAT — the n100 (GRUB backend) has no autoboot.txt, so this silently
+# skips there even though the unit ships in the shared overlay. Runs BEFORE
+# mark-good so a rolled-back marker is cleared before RAUC re-evaluates state.
+
+[Unit]
+Description=Reconcile rolled-back RAUC tryboot trial (Raspberry Pi)
+DefaultDependencies=no
+Wants=run-rasputin\x2dseed.mount
+After=run-rasputin\x2dseed.mount
+Before=rasputin-mark-good.service rasputin-agent.service
+ConditionPathExists=/run/rasputin-seed/autoboot.txt
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/rauc/rpi-tryboot-backend.sh reconcile
+
+[Install]
+WantedBy=multi-user.target

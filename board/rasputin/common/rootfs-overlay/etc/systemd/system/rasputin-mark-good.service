@@ -1,5 +1,9 @@
 # Marks the currently-booted RAUC slot "good" once the OS has reached a working
-# userspace, which resets the grubenv try-counter (<bootname>_OK=1, _TRY=0).
+# userspace. On the n100 (GRUB) this resets the grubenv try-counter
+# (<bootname>_OK=1, _TRY=0); on the Pi (custom tryboot backend) marking the slot
+# we're TRIALLING good is what COMMITS it (promotes tryboot.txt → cmdline.txt),
+# so the next normal boot stays on the new slot. Same `rauc status mark-good`
+# call drives both backends.
 #
 # Why this is required: the grub.cfg boot-counter consumes one try per boot;
 # without a mark-good on each healthy boot, a normal reboot would see TRY=1 and
