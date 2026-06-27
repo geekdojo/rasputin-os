@@ -1,23 +1,26 @@
 # Raspberry Pi A/B selector — read by the EEPROM BOOTLOADER before config.txt,
-# from the first FAT partition (boot-a / p1). Staged there by post-image.sh.
+# from the first FAT partition (the selector / p1). Staged there by post-image.sh.
 #
-# This is the CANONICAL Pi tryboot A/B mechanism: the bootloader picks which
-# BOOT PARTITION to load config.txt + the kernel from, by NUMBER:
-#   [all]     boot_partition=1  → normal boot uses boot-a (p1) → slot A
-#   [tryboot] boot_partition=2  → a one-shot `tryboot` reboot uses boot-b (p2) → slot B
-# The RAUC custom backend (/usr/lib/rauc/rpi-tryboot-backend.sh) rewrites these
-# numbers: it sets [tryboot] to the candidate's partition to arm a trial, and
-# promotes [all] to that partition on commit. A failed trial consumes the
-# one-shot and the next normal boot falls back to [all] — that IS the rollback.
+# CANONICAL Pi tryboot A/B: the bootloader picks which BOOT SLOT to load
+# start4.elf + config.txt + the kernel from, BY NUMBER:
+#   [all]     boot_partition=2  → normal boot uses boot-a (p2) → slot A
+#   [tryboot] boot_partition=3  → a one-shot `tryboot` reboot uses boot-b (p3) → slot B
+# boot_partition NEVER points at p1 (this selector) — p1 has no kernel, so the
+# firmware is forced to redirect to a real boot slot. The RAUC custom backend
+# (/usr/lib/rauc/rpi-tryboot-backend.sh) rewrites these numbers: it sets
+# [tryboot] to the candidate's partition to arm a trial, and promotes [all] to
+# that partition on commit. A failed trial consumes the one-shot and the next
+# normal boot falls back to [all] — that IS the rollback.
 #
-# tryboot_a_b=1 makes the tryboot load the partition's NORMAL config.txt (not
-# tryboot.txt), so each boot partition just uses its own plain config.txt +
-# cmdline.txt (which statically roots its slot). Done at the bootloader stage,
-# this is portable across Pi 4 (EEPROM → start4.elf) and Pi 5 (unified EEPROM) —
-# unlike the config.txt `[tryboot]` cmdline filter, which the Pi 4's start4.elf
-# ignored (bench 2026-06-27). See os-images/buildroot-os.md §3.
+# tryboot_a_b=1 makes the tryboot load the slot's NORMAL config.txt (not
+# tryboot.txt), so each boot slot just uses its own plain config.txt +
+# cmdline.txt (which statically roots its slot). Switching at the bootloader
+# stage is portable across Pi 4 (EEPROM loads start4.elf FROM boot_partition) +
+# Pi 5 (unified EEPROM). The earlier self-referential layout (autoboot.txt on
+# boot-a, boot_partition=1) failed on the Pi 4 with "kernel not found" (7 LED
+# flashes) — start4.elf couldn't resolve the kernel. See os-images/buildroot-os.md §3.
 [all]
 tryboot_a_b=1
-boot_partition=1
-[tryboot]
 boot_partition=2
+[tryboot]
+boot_partition=3

@@ -58,21 +58,21 @@ case "$SOC" in
 		# + `mcopy ::` is unambiguous.
 		#
 		# A/B = the CANONICAL Pi tryboot mechanism: autoboot.txt `boot_partition`
-		# switching at the EEPROM stage (portable Pi 4 + Pi 5). So we build TWO boot
-		# FATs — boot-a (p1) + boot-b (p2) — each a COMPLETE boot env that statically
-		# roots its own slot. They are byte-identical EXCEPT:
-		#   - boot-a (label RASPUTIN-FW): carries autoboot.txt (the selector the
-		#     firmware reads from p1) + cmdline.txt rooting rootfs-0 (slot A) + the
-		#     provisioning seed. The RAUC backend edits autoboot.txt here at runtime.
-		#   - boot-b (label RASPUTIN-B): cmdline.txt rooting rootfs-1 (slot B); NO
-		#     autoboot.txt (only p1's is read), NO seed.
-		# Shared contents, all flattened to root: kernel_2712.img (Pi 5/CM5 bcm2712
-		# `Image`) + kernel8.img (Pi 4 bcm2711, built in post-build.sh) + all *.dtb
-		# (bcm2712-rpi-5-b + bcm2712d0-rpi-5-b D0 + bcm2711-rpi-4-b) + rpi-firmware/*
-		# (GPU/boot firmware incl. start4.elf/fixup4.dat + config.txt + overlays/).
-		# config.txt arrives via rpi-firmware/ (Buildroot CONFIG_FILE); cmdline.txt
-		# arrives there too (CMDLINE_FILE = slot A) and is overwritten with the
-		# slot-B cmdline on boot-b.
+		# switching at the EEPROM stage (portable Pi 4 + Pi 5). THREE FATs:
+		#   - selector (p1, RASPUTIN-FW): autoboot.txt + the provisioning seed ONLY.
+		#     No kernel/config — so the firmware MUST honor boot_partition + redirect
+		#     to a real boot slot. The RAUC backend edits autoboot.txt here at runtime
+		#     (mounted /run/rasputin-seed).
+		#   - boot-a (p2, RASPUTIN-A): slot A's COMPLETE boot env, cmdline.txt → rootfs-0.
+		#   - boot-b (p3, RASPUTIN-B): same, cmdline.txt → rootfs-1.
+		# boot-a/boot-b shared contents, flattened to root: kernel_2712.img (Pi 5/CM5
+		# bcm2712 `Image`) + kernel8.img (Pi 4 bcm2711, built in post-build.sh) + all
+		# *.dtb (bcm2712-rpi-5-b + bcm2712d0-rpi-5-b D0 + bcm2711-rpi-4-b) +
+		# rpi-firmware/* (GPU/boot firmware incl. start4.elf/fixup4.dat + config.txt +
+		# overlays/). config.txt arrives via rpi-firmware/ (Buildroot CONFIG_FILE);
+		# cmdline.txt arrives there too (CMDLINE_FILE = slot A) and is overwritten with
+		# the slot-B cmdline on boot-b. The Pi 4 fix: the EEPROM loads start4.elf FROM
+		# boot_partition (p2/p3), so the kernel is in the same slot it reads.
 		COMMON_STAGE="$BINARIES_DIR/rpi-boot-common"
 		rm -rf "$COMMON_STAGE"; mkdir -p "$COMMON_STAGE"
 		cp "$BINARIES_DIR/Image" "$COMMON_STAGE/kernel_2712.img"   # Pi 5 / CM5 (bcm2712)
@@ -80,28 +80,32 @@ case "$SOC" in
 		cp "$BINARIES_DIR"/*.dtb "$COMMON_STAGE/"
 		cp -a "$BINARIES_DIR"/rpi-firmware/. "$COMMON_STAGE/"      # incl. config.txt + cmdline.txt(=A)
 
-		# Build one boot FAT from a staging dir: build_boot_fat <out.vfat> <label> <stagedir>
-		build_boot_fat() {
-			_out="$1"; _label="$2"; _stage="$3"
+		# Build one FAT from a staging dir: build_fat <out.vfat> <label> <MB> <stagedir>
+		build_fat() {
+			_out="$1"; _label="$2"; _mb="$3"; _stage="$4"
 			rm -f "$_out"
-			dd if=/dev/zero of="$_out" bs=1M count=256 status=none
+			dd if=/dev/zero of="$_out" bs=1M count="$_mb" status=none
 			"$HOST_DIR/sbin/mkfs.vfat" -F 32 -n "$_label" "$_out" >/dev/null
 			MTOOLS_SKIP_CHECK=1 "$HOST_DIR/bin/mcopy" -s -i "$_out" "$_stage"/* ::
 			echo "post-image: built $_label ($(du -h "$_out" | cut -f1)) — $(MTOOLS_SKIP_CHECK=1 "$HOST_DIR/bin/mdir" -i "$_out" :: | grep -c '^') entries"
 		}
 
-		# boot-a (p1): common + autoboot.txt + seed; cmdline.txt stays = slot A.
-		STAGE_A="$BINARIES_DIR/rpi-boot-a"
-		rm -rf "$STAGE_A"; cp -a "$COMMON_STAGE" "$STAGE_A"
-		cp "$BOARD_DIR/autoboot.txt" "$STAGE_A/autoboot.txt"
-		cp "$COMMON_DIR/rasputin-seed.env.template" "$STAGE_A/rasputin-seed.env"
-		build_boot_fat "$BINARIES_DIR/boot-a.vfat" RASPUTIN-FW "$STAGE_A"
+		# selector (p1): autoboot.txt + seed only. 64M = comfortably above the FAT32
+		# floor (~33M); the firmware reads autoboot.txt from this first FAT.
+		STAGE_SEL="$BINARIES_DIR/rpi-selector"
+		rm -rf "$STAGE_SEL"; mkdir -p "$STAGE_SEL"
+		cp "$BOARD_DIR/autoboot.txt" "$STAGE_SEL/autoboot.txt"
+		cp "$COMMON_DIR/rasputin-seed.env.template" "$STAGE_SEL/rasputin-seed.env"
+		build_fat "$BINARIES_DIR/selector.vfat" RASPUTIN-FW 64 "$STAGE_SEL"
 
-		# boot-b (p2): common, NO autoboot.txt/seed; cmdline.txt overwritten = slot B.
+		# boot-a (p2): common; cmdline.txt stays = slot A. No autoboot.txt/seed.
+		build_fat "$BINARIES_DIR/boot-a.vfat" RASPUTIN-A 256 "$COMMON_STAGE"
+
+		# boot-b (p3): common with cmdline.txt overwritten = slot B.
 		STAGE_B="$BINARIES_DIR/rpi-boot-b"
 		rm -rf "$STAGE_B"; cp -a "$COMMON_STAGE" "$STAGE_B"
 		cp "$BOARD_DIR/cmdline-b.txt" "$STAGE_B/cmdline.txt"
-		build_boot_fat "$BINARIES_DIR/boot-b.vfat" RASPUTIN-B "$STAGE_B"
+		build_fat "$BINARIES_DIR/boot-b.vfat" RASPUTIN-B 256 "$STAGE_B"
 		;;
 esac
 

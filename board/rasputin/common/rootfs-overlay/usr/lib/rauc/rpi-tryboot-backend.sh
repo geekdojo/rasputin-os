@@ -4,12 +4,15 @@
 #
 # The Pi has no official RAUC bootloader backend. This drives the firmware's
 # one-shot `tryboot` flag the CANONICAL way (Rtone/Bootlin/HAOS): A/B at the
-# BOOTLOADER stage via `autoboot.txt` `boot_partition` switching. The image has
-# TWO boot FATs, each a complete boot env that statically roots its own slot:
-#   partition 1 = boot-a (label RASPUTIN-FW) → rootfs-0 → bootname A
-#   partition 2 = boot-b (label RASPUTIN-B)  → rootfs-1 → bootname B
-# The firmware reads autoboot.txt from p1 (boot-a, mounted rw at
-# /run/rasputin-seed) and loads config.txt + kernel from the partition it names:
+# BOOTLOADER stage via `autoboot.txt` `boot_partition` switching. The image has a
+# SEPARATE selector partition + two boot slots, each a complete boot env that
+# statically roots its own slot:
+#   partition 1 = selector (label RASPUTIN-FW) → autoboot.txt + seed + slot state
+#   partition 2 = boot-a   (label RASPUTIN-A)  → rootfs-0 → bootname A
+#   partition 3 = boot-b   (label RASPUTIN-B)  → rootfs-1 → bootname B
+# The firmware reads autoboot.txt from the selector (p1, mounted rw at
+# /run/rasputin-seed) and loads start4.elf + config.txt + kernel from the slot it
+# names (p2/p3) — boot_partition never points at p1, so p1 needs no kernel:
 #   [all]     boot_partition=N  → the COMMITTED slot   (normal boot)
 #   [tryboot] boot_partition=M  → the CANDIDATE slot    (one-shot `tryboot` reboot)
 # This is portable across Pi 4 (EEPROM → start4.elf) + Pi 5 (unified EEPROM) —
@@ -40,9 +43,10 @@ AUTOBOOT="$SEED/autoboot.txt"           # the A/B selector (boot_partition per s
 PENDING="$SEED/rauc-trial.pending"     # bootname of an armed-but-uncommitted trial
 
 # bootname (A|B) <-> boot partition number. Mirrors the genimage layout:
-# boot-a=p1=rootfs-0=A, boot-b=p2=rootfs-1=B.
-part_for() { case "$1" in A) echo 1 ;; B) echo 2 ;; *) return 1 ;; esac; }
-name_for_part() { case "$1" in 1) echo A ;; 2) echo B ;; *) return 1 ;; esac; }
+# selector=p1, boot-a=p2=rootfs-0=A, boot-b=p3=rootfs-1=B (autoboot.txt's
+# boot_partition uses these numbers; MUST stay in sync with genimage.cfg order).
+part_for() { case "$1" in A) echo 2 ;; B) echo 3 ;; *) return 1 ;; esac; }
+name_for_part() { case "$1" in 2) echo A ;; 3) echo B ;; *) return 1 ;; esac; }
 
 state_file() { echo "$SEED/rauc-slot-$1.state"; }   # A/B distinct on case-insensitive vfat
 put() { printf '%s\n' "$2" > "$1.tmp" && mv "$1.tmp" "$1"; }

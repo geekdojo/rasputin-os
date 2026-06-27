@@ -2,11 +2,11 @@
 # so rasputin-firstboot.sh can read rasputin-seed.env. os-images/provisioning.md §1.
 #
 # Mounted by FILESYSTEM LABEL, not PARTLABEL: the GPT partition is named "esp"
-# on n100 and "boot-a" on rpi (see each board's genimage.cfg), but both FATs
+# on n100 and "selector" on rpi (see each board's genimage.cfg), but both FATs
 # carry the same volume label RASPUTIN-FW — one unit serves both boards. On the
-# rpi this is boot-a (p1), which also holds autoboot.txt + the RAUC tryboot
-# backend's slot state; the rpi's SECOND boot FAT (boot-b, p2) has label
-# RASPUTIN-B and is deliberately NOT matched here.
+# rpi this is the selector (p1), which holds autoboot.txt + the seed + the RAUC
+# tryboot backend's slot state; the rpi's boot slots (boot-a=p2 RASPUTIN-A,
+# boot-b=p3 RASPUTIN-B) hold the kernels and are deliberately NOT matched here.
 #
 # Read-write: the bootloader backend updates state on this FAT at runtime —
 # grubenv on the n100 (grub-editenv), autoboot.txt + slot-state files on the rpi
