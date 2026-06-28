@@ -1,26 +1,35 @@
 # Marks the currently-booted RAUC slot "good" once the OS has reached a working
-# userspace. On the n100 (GRUB) this resets the grubenv try-counter
-# (<bootname>_OK=1, _TRY=0); on the Pi (custom tryboot backend) marking the slot
-# we're TRIALLING good is what COMMITS it (promotes autoboot.txt's [all]
-# boot_partition to the trial slot), so the next normal boot stays on the new
-# slot. Same `rauc status mark-good` call drives both backends.
+# userspace, to reset the GRUB boot-counter. n100 (GRUB) ONLY.
 #
-# Why this is required: the grub.cfg boot-counter consumes one try per boot;
-# without a mark-good on each healthy boot, a normal reboot would see TRY=1 and
-# fall back to the other slot. This is defense-in-depth LAYER 1 (the OS booted).
-# It does NOT gate on application health — the update saga runs its own
-# health-check and can still `rauc status mark-bad` to force a rollback, which
-# wins over this (mark-bad → OK=0). See os-images/buildroot-os.md §3.
+# Why n100-only: on the n100 the grub.cfg boot-counter consumes one try per
+# boot; without a mark-good on each healthy boot, a normal reboot would see
+# TRY=1 and fall back to the other slot (defense-in-depth LAYER 1: the OS
+# booted). RAUC's grubenv carries a persistent OK flag, so the update saga can
+# still `mark-bad` AFTER this to force a rollback (mark-bad → OK=0, which grub
+# re-evaluates every boot — this auto-good doesn't prevent rollback).
 #
-# Ordered after the agent so "good" means we reached our own userspace; not
-# coupled to network so a network blip can't trigger a spurious rollback.
-# Condition-guarded so a node without RAUC config (e.g. a future cm5 build
-# before its config lands) silently skips rather than logging a failure.
+# The Pi (custom tryboot backend) is the OPPOSITE: there marking the running
+# slot good is the COMMIT (promotes autoboot.txt's [all] boot_partition) — an
+# irreversible point with no boot-counter to fall back on. Auto-committing on
+# OS-up would pre-empt the update saga's health check, so a later mark-bad
+# couldn't roll back. So on the Pi this service is gated OFF, and the saga's
+# health-gated mark-good (api healthCheckAndCommit → UpdateMarkGoodCmd) is the
+# sole committer — giving the Pi full app-health rollback within the trial
+# window. The gate is the presence of the Pi selector's autoboot.txt (the same
+# marker the agent's rebootArgs + rasputin-rauc-reconcile.service key off).
+#
+# Ordered after the agent so "good" means we reached our own userspace; after
+# the seed mount so the autoboot.txt gate is evaluated against the mounted FAT;
+# not coupled to network so a network blip can't trigger a spurious rollback.
+# Skips silently (no failure) on a node without RAUC config, or on any Pi.
 
 [Unit]
-Description=Mark the running RAUC slot good (reset grubenv boot-counter)
-After=rasputin-agent.service
+Description=Mark the running RAUC slot good — reset GRUB boot-counter (n100 only)
+After=rasputin-agent.service run-rasputin\x2dseed.mount
 ConditionPathExists=/etc/rauc/system.conf
+# n100-only: skip on the Pi, whose selector FAT carries autoboot.txt (the Pi
+# commit is saga-driven, not auto-on-OS-up — see the header).
+ConditionPathExists=!/run/rasputin-seed/autoboot.txt
 
 [Service]
 Type=oneshot
