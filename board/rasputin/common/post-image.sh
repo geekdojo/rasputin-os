@@ -76,7 +76,7 @@ case "$SOC" in
 		COMMON_STAGE="$BINARIES_DIR/rpi-boot-common"
 		rm -rf "$COMMON_STAGE"; mkdir -p "$COMMON_STAGE"
 		cp "$BINARIES_DIR/Image" "$COMMON_STAGE/kernel_2712.img"   # Pi 5 / CM5 (bcm2712)
-		cp "$BINARIES_DIR/kernel8.img" "$COMMON_STAGE/kernel8.img" # Pi 4 (bcm2711, post-build)
+		cp "$BINARIES_DIR/kernel8.bin" "$COMMON_STAGE/kernel8.img" # Pi 4 (bcm2711, post-build; .bin → kernel8.img on the FAT)
 		cp "$BINARIES_DIR"/*.dtb "$COMMON_STAGE/"
 		cp -a "$BINARIES_DIR"/rpi-firmware/. "$COMMON_STAGE/"      # incl. config.txt + cmdline.txt(=A)
 

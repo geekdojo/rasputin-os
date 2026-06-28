@@ -204,6 +204,11 @@ if [ "$SOC" = "rpi" ]; then
 	$MK olddefconfig
 	$MK -j"$(nproc)" Image modules
 	$MK INSTALL_MOD_PATH="$TARGET_DIR" INSTALL_MOD_STRIP=1 DEPMOD="$HOST_DIR/sbin/depmod" modules_install
-	cp "$KSRC/arch/arm64/boot/Image" "$BIN_DIR/kernel8.img"
-	echo "post-build: Pi 4 kernel → images/kernel8.img; both kernels' modules now in the rootfs"
+	# Stage as kernel8.bin (NOT .img): the release workflow uploads
+	# output/<sku>/images/*.img and the manifest step does `ls *.img | head -1` —
+	# a kernel8.img here sorts before rasputin-os-rpi-*.img and would be picked as
+	# the disk image. post-image.sh renames it to kernel8.img on the boot FAT,
+	# where the Pi 4 firmware expects that name.
+	cp "$KSRC/arch/arm64/boot/Image" "$BIN_DIR/kernel8.bin"
+	echo "post-build: Pi 4 kernel → images/kernel8.bin; both kernels' modules now in the rootfs"
 fi
