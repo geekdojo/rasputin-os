@@ -11,9 +11,19 @@ name: release
 # job instead, so the repo isn't perpetually red while it's a scaffold.
 #
 # Triggers:
-#   - push of a CalVer tag (e.g. 2026.06.0)  → validate + build + release
-#   - manual dispatch (full_build=false)     → validate only
-#   - manual dispatch (full_build=true)      → validate + build (no release)
+#   - push of a CalVer tag (e.g. 2026.07.1)  → validate + build + release
+#       · bare CalVer (2026.07.1)             → stable channel
+#       · -dev tag    (2026.07.1-dev.N)       → dev channel (legacy/manual)
+#   - manual dispatch (full_build=false, publish=false) → validate only
+#   - manual dispatch (full_build=true,  publish=false) → validate + build, no publish (bench)
+#   - manual dispatch (publish=true)                    → build + sign + publish a
+#       dev release to the public channel, versioned ${vars.RASPUTIN_VERSION}-dev.<run>.
+#       This is how dev releases are cut now — the dev.N is the workflow run number
+#       (monotonic, gaps OK), NOT a hand-incremented tag counter. The release base
+#       (YYYY.MM.MICRO) comes from the org var RASPUTIN_VERSION (the current dev
+#       target, shared across rasputin-os / -control-plane / -openwrt-firewall for
+#       lockstep). Bump that var when cutting a stable release; see the
+#       rasputin-os-release skill.
 
 on:
   push:
@@ -23,6 +33,10 @@ on:
     inputs:
       full_build:
         description: "Attempt the full Buildroot build (needs real BSP defconfigs + a published control-plane release; will fail until then)"
+        type: boolean
+        default: false
+      publish:
+        description: "Sign + publish this build as a dev release to the public channel (versioned from org var RASPUTIN_VERSION). Implies full_build."
         type: boolean
         default: false
 
@@ -72,7 +86,7 @@ jobs:
     # full_build arrives as a real boolean from the UI checkbox but as the
     # STRING "true" via the API / `gh -f`. Accept both. (Defaults to false
     # if the input wasn't set at all.)
-    if: ${{ startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && (inputs.full_build == true || inputs.full_build == 'true')) }}
+    if: ${{ startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && (inputs.full_build == true || inputs.full_build == 'true' || inputs.publish == true || inputs.publish == 'true')) }}
     runs-on: ubuntu-latest   # amd64; Buildroot cross-compiles arm64 fine
     strategy:
       fail-fast: false
@@ -112,17 +126,28 @@ jobs:
 
       - name: Compute version (CalVer)
         id: ver
+        # TARGET_VERSION = the org var RASPUTIN_VERSION (current dev target,
+        # YYYY.MM.MICRO), shared across the three Rasputin repos for lockstep.
+        # Only the dispatch (dev) path reads it; tagged releases use the tag.
+        env:
+          TARGET_VERSION: ${{ vars.RASPUTIN_VERSION }}
         run: |
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
             echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-            # `-dev` suffix in the tag → dev channel (e.g. 2026.06.0-dev.1).
-            # Plain CalVer (e.g. 2026.06.0) → stable.
+            # `-dev` suffix in the tag → dev channel (e.g. 2026.07.1-dev.1).
+            # Plain CalVer (e.g. 2026.07.1) → stable.
             case "${GITHUB_REF_NAME}" in
               *-dev*) echo "channel=dev"    >> "$GITHUB_OUTPUT" ;;
               *)      echo "channel=stable" >> "$GITHUB_OUTPUT" ;;
             esac
           else
-            echo "version=$(date -u +%Y.%m.0)-dev.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+            # Dev build: base from the org var, dev.N = this workflow's run
+            # number (monotonic per repo; gaps from skipped/failed runs are fine).
+            if [ -z "${TARGET_VERSION}" ]; then
+              echo "::error::org var RASPUTIN_VERSION is unset — set it to the current dev target (e.g. 2026.07.1): gh variable set RASPUTIN_VERSION --org geekdojo --body 2026.07.1 --visibility all"
+              exit 1
+            fi
+            echo "version=${TARGET_VERSION}-dev.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
             echo "channel=dev" >> "$GITHUB_OUTPUT"
           fi
 
@@ -301,7 +326,7 @@ jobs:
     # full_build arrives as a real boolean from the UI checkbox but as the
     # STRING "true" via the API / `gh -f`. Accept both. (Defaults to false
     # if the input wasn't set at all.)
-    if: ${{ !cancelled() && (startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && (inputs.full_build == true || inputs.full_build == 'true'))) }}
+    if: ${{ !cancelled() && (startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && (inputs.full_build == true || inputs.full_build == 'true' || inputs.publish == true || inputs.publish == 'true'))) }}
     runs-on: ubuntu-latest
     steps:
       - name: Install QEMU + OVMF (UEFI firmware) + mtools
@@ -478,7 +503,10 @@ jobs:
   # marked as prerelease.
   sign-and-release:
     needs: [build, smoke-amd64]
-    if: ${{ startsWith(github.ref, 'refs/tags/') }}
+    # Publishes on a tag (stable or legacy -dev tag) OR on a dispatch with
+    # publish=true (a run-number-versioned dev release). Bench dispatches
+    # (full_build only) skip this and just produce artifacts.
+    if: ${{ !cancelled() && (startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && (inputs.publish == true || inputs.publish == 'true'))) }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -487,8 +515,17 @@ jobs:
 
       - name: Compute version (CalVer, same logic as build)
         id: ver
+        env:
+          TARGET_VERSION: ${{ vars.RASPUTIN_VERSION }}
         run: |
-          VERSION="${GITHUB_REF_NAME}"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            VERSION="${GITHUB_REF_NAME}"
+          else
+            if [ -z "${TARGET_VERSION}" ]; then
+              echo "::error::org var RASPUTIN_VERSION is unset — cannot publish a dev release"; exit 1
+            fi
+            VERSION="${TARGET_VERSION}-dev.${GITHUB_RUN_NUMBER}"
+          fi
           case "$VERSION" in
             *-dev*) CHANNEL=dev    ; PRERELEASE=true  ;;
             *)      CHANNEL=stable ; PRERELEASE=false ;;
