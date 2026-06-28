@@ -25,12 +25,15 @@ CONFIG_BLK_DEV_DM=y
 CONFIG_DM_VERITY=y
 CONFIG_OVERLAY_FS=y
 
-# --- GPT partition-label parsing: REQUIRED for cmdline `root=PARTLABEL=rootfs-0`
-#     + RAUC's /dev/disk/by-partlabel slots + firstboot's PARTLABEL=persistent.
-#     Pinned explicitly rather than relying on the defconfig default — without
-#     it the kernel can't resolve PARTLABEL= and panics "VFS: unable to mount
-#     root". ---
+# --- partition parsing: the rpi uses an MBR (msdos) table — the Pi firmware's
+#     autoboot.txt boot_partition A/B switch is broken on GPT (rpi-eeprom#654),
+#     so REQUIRED for cmdline `root=PARTUUID=52415350-05` + RAUC's by-partuuid
+#     slots + firstboot's PARTUUID persistent mount. MSDOS_PARTITION resolves the
+#     MBR PARTUUID (disk-signature + partition number); without it the kernel
+#     panics "VFS: unable to mount root". EFI_PARTITION kept (harmless; lets the
+#     kernel still read a GPT medium if one is ever attached). ---
 CONFIG_PARTITION_ADVANCED=y
+CONFIG_MSDOS_PARTITION=y
 CONFIG_EFI_PARTITION=y
 
 # --- serial console (Pi PL011 UART) ---

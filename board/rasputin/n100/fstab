@@ -1,0 +1,14 @@
+# Overlay-managed fstab — n100 (amd64, GPT). Installed to /etc/fstab by
+# post-build.sh (per-SoC, because the persistent partition is addressed
+# differently per partition-table: GPT PARTLABEL here, MBR PARTUUID on the rpi).
+# Buildroot's generated fstab is replaced, so the /dev/root line must stay.
+/dev/root	/	auto	rw	0	1
+
+# Persistent state (node identity, role marker, api data dir). genimage leaves
+# this partition unformatted: x-systemd.makefs formats it on first boot
+# (systemd-makefs execs mkfs.ext4, from e2fsprogs — busybox's mke2fs can't answer
+# to that name) and x-systemd.growfs grows it to the full medium. nofail: a
+# wedged persistent partition skips provisioning (units RequiresMountsFor this
+# path) but the system still boots to something debuggable. fsck passno 0 — keep
+# it that way unless fsck.ext4 ships.
+PARTLABEL=persistent	/var/lib/rasputin	ext4	defaults,nofail,x-systemd.makefs,x-systemd.growfs	0	0

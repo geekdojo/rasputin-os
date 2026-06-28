@@ -1,0 +1,22 @@
+# Overlay-managed fstab — rpi (arm64, MBR). Installed to /etc/fstab by
+# post-build.sh (per-SoC). MBR has no PARTLABEL, so the persistent partition is
+# addressed by PARTUUID (disk-signature 0x52415350 + partition number; persistent
+# = p7 → 52415350-07). MUST match genimage's disk-signature + partition order.
+# Buildroot's generated fstab is replaced, so the /dev/root line must stay.
+/dev/root	/	auto	rw	0	1
+
+# Persistent state (node identity, role marker, api data dir). genimage leaves
+# this partition unformatted: x-systemd.makefs formats it on first boot
+# (systemd-makefs execs mkfs.ext4, from e2fsprogs — busybox's mke2fs can't answer
+# to that name) and x-systemd.growfs grows it to the full medium. nofail: a
+# wedged persistent partition skips provisioning (units RequiresMountsFor this
+# path) but the system still boots to something debuggable. fsck passno 0 — keep
+# it that way unless fsck.ext4 ships.
+#
+# NOTE: rasputin-growpart (which extends persistent to fill the disk) is
+# GPT/by-partlabel-specific today, so on the rpi it is skipped (its
+# ConditionPathExists=/dev/disk/by-partlabel/persistent is false on MBR) — the
+# partition mounts + works at its 512 MiB image size until MBR growpart lands
+# (tracked in the os-images backlog). x-systemd.growfs still grows the fs to the
+# partition, so this is only about reclaiming the rest of a large medium.
+PARTUUID=52415350-07	/var/lib/rasputin	ext4	defaults,nofail,x-systemd.makefs,x-systemd.growfs	0	0

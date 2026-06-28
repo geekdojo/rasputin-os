@@ -45,6 +45,18 @@ else
 	echo "post-build: WARNING — no rauc-system.conf for SoC '$SOC'; RAUC updates will fail"
 fi
 
+# fstab is PER-SoC too: the persistent partition is addressed by GPT PARTLABEL on
+# the n100 but MBR PARTUUID on the rpi (the rpi is MBR because the Pi firmware's
+# autoboot.txt boot_partition is broken on GPT — buildroot-os.md §3). Without the
+# right fstab line the persistent partition never mounts → firstboot can't write
+# node identity → provisioning fails. Replaces Buildroot's generated fstab.
+if [ -f "$BOARD_DIR/fstab" ]; then
+	cp "$BOARD_DIR/fstab" "$TARGET_DIR/etc/fstab"
+	echo "post-build: installed $SOC fstab → /etc/fstab"
+else
+	echo "post-build: WARNING — no fstab for SoC '$SOC'; persistent partition won't mount"
+fi
+
 # Mark the running slot good once the OS has booted, resetting the grubenv
 # try-counter so a normal reboot doesn't fall back (RAUC GRUB boot-counter,
 # defense-in-depth layer 1; the update saga's app health-check is a separate

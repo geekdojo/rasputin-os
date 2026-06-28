@@ -16,8 +16,9 @@
 #
 set -eu
 
-# PERSIST is the mounted persistent partition (fstab: PARTLABEL=persistent,
-# formatted on first use via x-systemd.makefs). The rootfs is read-only
+# PERSIST is the mounted persistent partition (per-SoC fstab: PARTLABEL on the
+# n100/GPT, PARTUUID on the rpi/MBR; formatted on first use via x-systemd.makefs).
+# The rootfs is read-only
 # squashfs, so EVERYTHING this script writes must land under PERSIST.
 # /etc/rasputin/node.env is a baked-in symlink to $NODE_ENV for operators.
 PERSIST=/var/lib/rasputin
