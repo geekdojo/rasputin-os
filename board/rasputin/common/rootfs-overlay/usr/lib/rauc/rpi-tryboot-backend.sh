@@ -130,13 +130,27 @@ case "$cmd" in
 		;;
 
 	reconcile)
-		# Early each boot, before mark-good. If a trial was armed but we did NOT
-		# come up running it (one-shot spent on a failed trial, or a plain reboot
-		# aborted the arm), it rolled back → mark that slot bad + clear the marker.
-		if [ -f "$PENDING" ] && ! in_trial; then
-			put "$(state_file "$(cat "$PENDING")")" bad
-			rm -f "$PENDING"
-			sync
+		# Early each boot, before mark-good. A spent one-shot (trial never taken,
+		# or aborted) falls back to the COMMITTED slot → mark the candidate bad +
+		# clear the marker.
+		#
+		# Detect the rollback CONFIDENTLY: we rolled back iff we're running the
+		# committed slot while a trial is pending. The earlier test was
+		# `! in_trial` (current_slot != candidate), which also fired on an
+		# *ambiguous* read — and once, at a cold boot, it wrongly cleared a VALID
+		# trial (current_slot read as not-the-candidate for a moment before the
+		# state settled; 2026-06-29, buildroot-os backlog). Comparing against
+		# committed_slot fails safe: a candidate boot has current==candidate!=committed
+		# (kept), and an empty/unreadable current_slot never equals committed (kept).
+		# We only ever clear when current_slot is definitively the committed slot.
+		if [ -f "$PENDING" ]; then
+			cur="$(current_slot 2>/dev/null)"
+			com="$(committed_slot 2>/dev/null)"
+			if [ -n "$cur" ] && [ "$cur" = "$com" ]; then
+				put "$(state_file "$(cat "$PENDING")")" bad
+				rm -f "$PENDING"
+				sync
+			fi
 		fi
 		;;
 
