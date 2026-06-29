@@ -5,14 +5,21 @@
 # Ordering is load-bearing:
 #   - After rasputin-mark-good.service: the GRUB boot-counter consumes one try
 #     per boot, so the reboot this may trigger must happen only after the slot
-#     is committed, or the next boot would roll back to the other slot.
+#     is committed, or the next boot would roll back to the other slot. (On the
+#     rpi mark-good is skipped, so this After is a no-op there — and growpart
+#     only reboots at first boot, before any A/B trial; see the script header.)
 #   - After var-lib-rasputin.mount: don't race makefs/growfs formatting the fs.
 #   - After rasputin-firstboot.service: let provisioning finish first (it's
 #     preserved across the grow, but no reason to interrupt it).
+#
+# Gate on the persistent MOUNT, not /dev/disk/by-partlabel/persistent: the rpi
+# is MBR and addresses persistent by PARTUUID (no by-partlabel symlink), so the
+# old gate skipped it. The mount exists for both arches when persistent is
+# present; the script resolves the device from the mount.
 [Unit]
 Description=Rasputin: grow the data partition to fill the disk (one-time)
 After=rasputin-mark-good.service var-lib-rasputin.mount rasputin-firstboot.service
-ConditionPathExists=/dev/disk/by-partlabel/persistent
+ConditionPathIsMountPoint=/var/lib/rasputin
 
 [Service]
 Type=oneshot

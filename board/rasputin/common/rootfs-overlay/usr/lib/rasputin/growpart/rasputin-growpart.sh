@@ -1,68 +1,104 @@
 #!/bin/sh
-# rasputin-growpart — one-time grow of the data partition to fill the disk.
+# rasputin-growpart — one-time grow of the data (persistent) partition to fill
+# the disk.
 #
-# The images ship a fixed-size GPT (genimage): a small data partition with the
-# rest of the medium left unallocated. The fstab's x-systemd.growfs only grows
-# the FILESYSTEM to its PARTITION, so without this the data partition stays at
-# its image size (e.g. 512 MiB) no matter how big the disk is — every unit ends
-# up cramped regardless of SSD/eMMC size. (Found on a 128 GB n100: ~116 GB sat
-# unpartitioned. See backlog updates.md.)
+# The images ship a fixed-size data partition with the rest of the medium left
+# unallocated. The fstab's x-systemd.growfs only grows the FILESYSTEM to its
+# PARTITION — so without this the partition stays at its image size (e.g. 512
+# MiB) no matter how big the disk is. This extends the partition into the
+# unallocated tail, then reboots so the kernel re-reads the table and the next
+# mount's x-systemd.growfs expands the fs. Only the END moves; the start (and
+# therefore the filesystem + data) is untouched.
 #
-# This extends the last (data) partition into the unallocated remainder, then
-# reboots so the kernel re-reads the table and the next mount's x-systemd.growfs
-# expands the ext4 filesystem to match. Only the partition's END moves — its
-# start (and therefore its filesystem + any data) is untouched.
+# Table-aware (the two arches diverge at the partition table):
+#   - GPT (n100): drop last-lba + the partition's size via sfdisk — the data
+#     partition is a top-level GPT partition, so this is a one-liner.
+#   - MBR (rpi):  persistent is the LAST LOGICAL inside an EXTENDED partition, so
+#     BOTH must grow (the extended first). Raw sfdisk on MBR extended/logical is
+#     a data-loss trap (the EBR-sector math) — so this uses the vendored
+#     cloud-utils `growpart` (battle-tested) with `-u off`: write the table only
+#     and defer the kernel re-read to the reboot below (the disk is busy because
+#     persistent is mounted). Validated against the rpi layout in a loopback
+#     container, including with partx/udevadm/sgdisk absent (the image case).
 #
 # IDEMPOTENT: a no-op once the partition already fills the disk, so it's safe to
-# run on every boot. It MUST be ordered AFTER rasputin-mark-good.service: the
-# GRUB boot-counter consumes one try per boot, so rebooting before the slot is
-# marked good would trip a rollback. By the time this runs the slot is committed,
-# so the reboot is clean.
+# run every boot. MUST be ordered AFTER rasputin-mark-good.service (n100 GRUB
+# boot-counter — rebooting before the slot is committed would trip a rollback).
+# On the rpi mark-good is skipped (n100-only) so the After is a no-op, and this
+# only ever reboots at FIRST boot (persistent still 512 MiB), before any OTA — so
+# it can't abort an A/B trial.
 set -eu
 
 log() { echo "rasputin-growpart: $*"; }
+GROWPART=/usr/lib/rasputin/growpart/growpart
 
-PARTDEV="$(readlink -f /dev/disk/by-partlabel/persistent 2>/dev/null || true)"
+# Resolve the persistent partition via its mount — works for GPT (PARTLABEL) and
+# MBR (PARTUUID) alike, since both mount at /var/lib/rasputin per the per-SoC fstab.
+PARTDEV="$(findmnt -no SOURCE /var/lib/rasputin 2>/dev/null || true)"
+PARTDEV="$(readlink -f "$PARTDEV" 2>/dev/null || true)"
 if [ -z "$PARTDEV" ] || [ ! -b "$PARTDEV" ]; then
-	log "data partition (by-partlabel/persistent) not present; nothing to do"
+	log "persistent (/var/lib/rasputin) not on a block device; nothing to do"
 	exit 0
 fi
 
-PARTBASE="${PARTDEV##*/}"                                       # nvme0n1p4 / sda4 / mmcblk0p4
-DISKBASE="$(lsblk -ndo pkname "$PARTDEV" 2>/dev/null || true)"  # nvme0n1 / sda / mmcblk0
+PARTBASE="${PARTDEV##*/}"                                      # nvme0n1p7 / sda4 / mmcblk0p7
+DISKBASE="$(lsblk -ndo pkname "$PARTDEV" 2>/dev/null || true)" # nvme0n1 / sda / mmcblk0
 if [ -z "$DISKBASE" ] || [ ! -b "/dev/$DISKBASE" ]; then
 	log "cannot resolve parent disk of $PARTDEV; nothing to do"
 	exit 0
 fi
 DISK="/dev/$DISKBASE"
 
-DISK_SZ="$(cat "/sys/class/block/$DISKBASE/size")"             # 512-byte sectors
+DISK_SZ="$(cat "/sys/class/block/$DISKBASE/size")"            # 512-byte sectors
 P_START="$(cat "/sys/class/block/$PARTBASE/start")"
 P_SZ="$(cat "/sys/class/block/$PARTBASE/size")"
-TAIL=$(( DISK_SZ - (P_START + P_SZ) ))                         # unallocated sectors after the partition
+TAIL=$(( DISK_SZ - (P_START + P_SZ) ))                        # unallocated sectors after the partition
 
-# Already fills the disk (tail < 32 MiB)? This is the steady state — and the
-# guard that makes the unit safe every boot and prevents any reboot loop.
+# Already fills the disk (tail < 32 MiB)? Steady state — and the guard that
+# makes the unit safe every boot and prevents any reboot loop.
 if [ "$TAIL" -lt 65536 ]; then
 	log "$PARTDEV already fills $DISK ($((P_SZ / 2048)) MiB; $((TAIL / 2048)) MiB tail) — nothing to do"
 	exit 0
 fi
 
-log "extending $PARTDEV into $((TAIL / 2048)) MiB of unallocated space on $DISK"
+PARTNUM="$(echo "$PARTBASE" | sed 's/.*[^0-9]//')"           # trailing digits = partition number
+PTTYPE="$(lsblk -ndo PTTYPE "$DISK" 2>/dev/null || true)"
+log "extending $PARTDEV (part $PARTNUM, table=$PTTYPE) into $((TAIL / 2048)) MiB on $DISK"
 
-# Rewrite the GPT: drop last-lba (sfdisk recomputes it to the real disk end) and
-# drop the data partition's size (it then fills to the disk end). Every other
-# partition is copied verbatim, so the ESP + rootfs A/B slots are untouched, and
-# the data partition's start is unchanged, so its filesystem is preserved.
-# --no-reread: the data partition is mounted, so the kernel can't re-read the
-# table now — that's fine, the reboot below picks it up cleanly.
-sfdisk --dump "$DISK" \
-	| grep -v '^last-lba:' \
-	| sed "\\#^${PARTDEV} #s/size=[[:space:]]*[0-9][0-9]*,[[:space:]]*//" \
-	| sfdisk --no-reread "$DISK"
+case "$PTTYPE" in
+gpt)
+	# Drop last-lba (sfdisk recomputes to the real disk end) + the partition's
+	# size (it then fills to the end). Every other partition is copied verbatim,
+	# and the start is unchanged, so the filesystem is preserved. --no-reread:
+	# the partition is mounted, so the reboot below picks up the new table.
+	sfdisk --dump "$DISK" \
+		| grep -v '^last-lba:' \
+		| sed "\\#^${PARTDEV} #s/size=[[:space:]]*[0-9][0-9]*,[[:space:]]*//" \
+		| sfdisk --no-reread "$DISK"
+	;;
+dos)
+	# Grow the EXTENDED partition (type 0x05/0x0f) first, then the persistent
+	# logical into it. growpart handles the EBR/extended math; -u off writes the
+	# table and defers the re-read to the reboot. If the extended can't be found,
+	# fail SAFE — skip (persistent just stays at its image size), never guess.
+	EXTNUM="$(sfdisk -d "$DISK" 2>/dev/null \
+		| grep -iE 'type=0?[5f]([^0-9a-f]|$)' \
+		| sed -n 's#.*[^0-9]\([0-9][0-9]*\) :.*#\1#p' | head -1)"
+	if [ -z "$EXTNUM" ]; then
+		log "no extended partition found on $DISK (MBR) — cannot grow a logical; skipping"
+		exit 0
+	fi
+	sh "$GROWPART" -u off "$DISK" "$EXTNUM"
+	sh "$GROWPART" -u off "$DISK" "$PARTNUM"
+	;;
+*)
+	log "unrecognized partition table '$PTTYPE' on $DISK; not growing"
+	exit 0
+	;;
+esac
 sync
 
-log "GPT extended; rebooting so the kernel re-reads it and growfs expands the fs"
+log "table extended; rebooting so the kernel re-reads it and growfs expands the fs"
 systemctl reboot
 # Hold the oneshot open until the reboot lands so boot doesn't race ahead.
 sleep 120
