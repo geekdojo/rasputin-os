@@ -48,7 +48,7 @@ in place so `make rasputin_cm5_defconfig` still works locally. Bring-up
 tasks: see "v1 ones" below + the [wiki backlog](https://github.com/geekdojo/geekdojo-wiki/blob/main/projects/rasputin/backlog/design/os-images/overview.md).
 
 The smaller open items are tracked in the
-[wiki backlog](https://github.com/geekdojo/geekdojo-wiki/blob/main/projects/rasputin/backlog.md#designos-imagesbuildroot-osmd-6);
+[wiki backlog](https://github.com/geekdojo/geekdojo-wiki/blob/main/projects/rasputin/backlog/design/os-images/buildroot-os.md);
 the big v1 ones, in order:
 
 - **dm-verity + initramfs.** Today the kernel mounts the squashfs root
