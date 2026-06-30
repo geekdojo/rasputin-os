@@ -55,9 +55,25 @@ P_SZ="$(cat "/sys/class/block/$PARTBASE/size")"
 TAIL=$(( DISK_SZ - (P_START + P_SZ) ))                        # unallocated sectors after the partition
 
 # Already fills the disk (tail < 32 MiB)? Steady state — and the guard that
-# makes the unit safe every boot and prevents any reboot loop.
+# makes the unit safe every boot and prevents any reboot loop. Checked BEFORE the
+# trial guard below so an already-grown node never reboots, even mid-trial.
 if [ "$TAIL" -lt 65536 ]; then
 	log "$PARTDEV already fills $DISK ($((P_SZ / 2048)) MiB; $((TAIL / 2048)) MiB tail) — nothing to do"
+	exit 0
+fi
+
+# Don't grow+reboot while in an uncommitted A/B trial — the reboot would boot the
+# COMMITTED slot and abort the trial before the update saga commits it. On the
+# n100 the unit's After=mark-good already guarantees a committed slot here; on the
+# rpi the commit is saga-driven (no local mark-good), so growpart can land mid-
+# trial — guard explicitly. A trial = the booted slot differs from the activated
+# (committed) slot in `rauc status`. Defer to a committed boot (a fresh flash's
+# first boot is already committed; after an OTA, the next committed boot grows it).
+RAUC_ST="$(rauc status 2>/dev/null)"
+BOOTED="$(printf '%s\n' "$RAUC_ST" | grep -i 'Booted from' | grep -oE 'rootfs\.[0-9]+' | head -1)"
+ACTIVE="$(printf '%s\n' "$RAUC_ST" | grep -i 'Activated'   | grep -oE 'rootfs\.[0-9]+' | head -1)"
+if [ -n "$BOOTED" ] && [ -n "$ACTIVE" ] && [ "$BOOTED" != "$ACTIVE" ]; then
+	log "in an uncommitted A/B trial (booted=$BOOTED, committed=$ACTIVE) — deferring grow+reboot to a committed boot"
 	exit 0
 fi
 
