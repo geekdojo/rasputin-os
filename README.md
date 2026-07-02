@@ -1,137 +1,95 @@
 # rasputin-os
 
 Buildroot external tree for the **Rasputin OS** image — the base OS that
-boots on every Rasputin **compute** and **controlplane** node. One tree,
-two architectures (CM5 arm64, N100 amd64), one rootfs whose role is chosen
-at provision time.
+boots on every Rasputin **compute** and **controlplane** node. One tree, two
+architectures (`rpi` arm64, `n100` amd64), one read-only rootfs whose role is
+chosen at provision time by a seed file — a compute node and a controlplane
+node run the same image.
 
-> The firewall node runs **OpenWrt**, not this image — see the
-> [`rasputin-openwrt-firewall`](https://github.com/geekdojo/rasputin-openwrt-firewall)
-> repo.
+> **Status: pre-alpha.** Rasputin is in its commodity-hardware proof phase.
+> Image layouts, partition schemes, and update formats change without notice.
 
-## Design docs (source of truth)
+Rasputin is a modular, node-based homelab system; the system-level overview
+lives in
+[ARCHITECTURE.md](https://github.com/geekdojo/rasputin-control-plane/blob/main/ARCHITECTURE.md)
+in the `rasputin-control-plane` repo. The firewall node runs **OpenWrt**, not
+this image — see
+[`rasputin-openwrt-firewall`](https://github.com/geekdojo/rasputin-openwrt-firewall).
 
-This repo implements the design in the geekdojo wiki:
+## What the image is
 
-- [OS Images — Overview](https://github.com/geekdojo/geekdojo-wiki/blob/main/projects/rasputin/design/os-images/overview.md)
-- [Buildroot OS](https://github.com/geekdojo/geekdojo-wiki/blob/main/projects/rasputin/design/os-images/buildroot-os.md) — external tree, RAUC A/B per SoC, dual output
-- [Provisioning & Role-at-Runtime](https://github.com/geekdojo/geekdojo-wiki/blob/main/projects/rasputin/design/os-images/provisioning.md)
-- [Release Pipeline](https://github.com/geekdojo/geekdojo-wiki/blob/main/projects/rasputin/design/os-images/release-pipeline.md)
+- **Buildroot 2025.02.x LTS** (pinned as a pristine submodule; all
+  customization lives in this external tree — near-zero Buildroot patches).
+- **Read-only squashfs rootfs, A/B slots + a persistent data partition.**
+  One build emits both a flashable `.img` and a signed **RAUC** `.raucb` OTA
+  bundle. The data partition grows to fill the medium on first boot.
+- **RAUC atomic A/B updates** with rollback, driven by the control plane's
+  update saga (stage → reboot into the new slot → health check → commit or
+  roll back). Bundles are verified against a CA baked into every image.
+- **Per-arch bootloader backends, honestly different:**
+  - `n100` (amd64, UEFI): GRUB with a real boot counter — bootloader-level
+    rollback even for a committed slot. Hardware-validated end-to-end
+    (install → auto-boot new slot → commit, and mark-bad → auto-revert).
+  - `rpi` (arm64): one unified image boots **Pi 4 / Pi 5 / CM5** (two-kernel
+    FAT, firmware picks per board; Raspberry Pi kernel fork — mainline can't
+    boot current Pi 5 steppings). A/B uses the Pi firmware's one-shot
+    `tryboot` flag via a custom RAUC backend. The firmware **cannot count
+    boot attempts and won't auto-fall-back from a committed slot**, so the Pi
+    relies on defense-in-depth: the one-shot trial, a systemd watchdog on the
+    agent, and the update saga's post-reboot health check. Boot, A/B commit,
+    simulated-failure rollback, and OTA are hardware-validated (microSD and
+    NVMe).
+- **Docker** as the app substrate; the control-plane binaries
+  (`rasputin-agent`, `rasputin-api`) are vendored as pre-built static
+  release binaries from
+  [`rasputin-control-plane`](https://github.com/geekdojo/rasputin-control-plane),
+  verified by hash — so an OS build takes minutes, not hours.
+- **Key-only SSH** (dropbear, password auth disabled; no baked key = no
+  network SSH at all), serial/HDMI console fallback. IPv6 is disabled across
+  the stack by design.
 
-## Status
-
-**Signed releases shipping end-to-end (2026-05-30).** Both SKU builds are
-green in CI, the n100 `.img` boots to a Rasputin login prompt in the
-`smoke-amd64` job (systemd + journal + network + containerd all up), and
-the `sign-and-release` job runs `rauc bundle` against the YubiKey-backed
-PKI (root → intermediate → leaf) and publishes `.raucb` + `.img.xz` +
-`manifest.json` to GitHub Releases. First green release:
-[2026.05.0-dev.3](https://github.com/geekdojo/rasputin-os/releases/tag/2026.05.0-dev.3).
-Warm-cache iterations are ~50 min per SKU (cold ~2–3 h); ccache + a split
-restore/save-on-failure keeps the loop usable.
-
-**v1 scope (revised 2026-06-23): N100 ships; CM5/arm64 back in scope,
-bring-up in progress.** CM5/arm64 is back in v1 for compute + controlplane
-nodes (firewall stays N100-only) so design partners with only Raspberry Pis
-can join from the start. The **control-plane/UI side already supports
-arm64** (Add-node arch picker → `GET /api/cluster/node-image?arch=`). The
-**cm5 build stays commented out of `.github/workflows/release.yml`'s matrix
-for now**, deliberately: the cm5 image compiles green but is currently a
-**non-bootable scaffold** — `board/rasputin/cm5/genimage.cfg`'s boot FAT has
-no kernel `Image`/CM5 DTB/Pi firmware blobs, and the defconfig DTS + firmware
-variant still carry `BRING-UP:` markers. Uncommenting it now would publish a
-brick to the public channel. Re-enable it only after the CM5 hardware
-bring-up lands and the arm64 `.img` is boot-verified on a real CM5 (there is
-no CI boot smoke for arm64 — a Pi can't be emulated end-to-end). `board/
-rasputin/cm5/`, `configs/rasputin_cm5_defconfig`, and the package .mks stay
-in place so `make rasputin_cm5_defconfig` still works locally. Bring-up
-tasks: see "v1 ones" below + the [wiki backlog](https://github.com/geekdojo/geekdojo-wiki/blob/main/projects/rasputin/backlog/design/os-images/overview.md).
-
-The smaller open items are tracked in the
-[wiki backlog](https://github.com/geekdojo/geekdojo-wiki/blob/main/projects/rasputin/backlog/design/os-images/buildroot-os.md);
-the big v1 ones, in order:
-
-- **dm-verity + initramfs.** Today the kernel mounts the squashfs root
-  directly (`rootfstype=squashfs ro`); verity hashes need to be wired in
-  `post-image.sh` and a small initramfs added to run `veritysetup` before
-  `switch_root`.
-- **Restore the RAUC GRUB slot logic** (n100). `board/rasputin/n100/grub.cfg`
-  is scaffolded as a hardcoded `default=rootfs.0` because Buildroot's
-  default EFI grub doesn't embed `test`/`loadenv`/`serial`/`terminal`. Add
-  those to `BR2_TARGET_GRUB2_BUILTIN_MODULES_EFI` and restore the
-  ORDER/A_TRY/B_TRY loop with a `default=""` guard so the first match
-  wins (pairs with dm-verity).
-- **Populate slot B at flash time.** `genimage.cfg` leaves rootfs-1 empty
-  (RAUC fills it on first OTA); if slot A fails before any OTA the kernel
-  panics. Cleaner: write the same squashfs into B at flash.
-
-- **CM5 / arm64 bring-up to shipping parity (v1, back in scope 2026-06-23).**
-  The arm64 image must boot a real CM5 before the matrix entry is re-enabled:
-  add the kernel `Image` + CM5 DTB + Pi firmware blob set to
-  `board/rasputin/cm5/genimage.cfg`'s boot FAT (currently absent — the image
-  is non-bootable), confirm the Pi 5 firmware variant + blob set in
-  `configs/rasputin_cm5_defconfig` (still `BRING-UP:`), swap DTS to a CM5
-  carrier (`bcm2712-rpi-cm5-*`), write `tryboot` RAUC hook scripts under
-  `board/rasputin/cm5/rauc-hooks/` (Pi A/B = `autoboot.txt` `[all]`/`[tryboot]`,
-  not GRUB), then boot-verify on hardware (no CI smoke for arm64) and
-  re-enable the cm5 matrix entry. Full task list in the
-  [wiki backlog](https://github.com/geekdojo/geekdojo-wiki/blob/main/projects/rasputin/backlog/design/os-images/overview.md).
-
-## Cutting a release
-
-`sign-and-release` triggers on any CalVer tag matching
-`YYYY.MM.MICRO[-suffix]`. Use a `-dev.N` suffix to land a prerelease
-(marked as such on GitHub and tagged `channel=dev` in `manifest.json`);
-bare CalVer is stable.
-
-```sh
-git tag -a 2026.06.0 -m "first stable cut"
-git push origin 2026.06.0
-# → build × 2 → smoke-amd64 → sign-and-release → GitHub Release with
-#   2 × .raucb + 2 × .img.xz + manifest.json
-```
+Known gaps (tracked, not hidden): dm-verity rootfs integrity + initramfs is
+designed but not wired; the console root password is baked at build time and
+not yet operator-changeable at runtime.
 
 ## Layout
 
 ```
 external.desc / external.mk / Config.in    BR2_EXTERNAL entry points
-configs/                                    per-SoC defconfigs (BR2_CCACHE on)
-board/rasputin/common/                      rootfs overlay, post-build, post-image
+configs/                                    rasputin_rpi_defconfig, rasputin_n100_defconfig
+board/rasputin/common/                      rootfs overlay (units, trust root, RAUC
+                                            config), post-build, post-image
                                             (dual .img/.raucb), seed template,
-                                            firstboot units + role-provisioning script
-board/rasputin/n100/                        genimage.cfg + grub.cfg + linux.fragment
-                                            + RAUC system.conf
-board/rasputin/cm5/                         genimage.cfg + config.txt + linux.fragment
-                                            + RAUC system.conf  (autoboot.txt is
-                                            generated in post-image.sh)
+                                            firstboot role-provisioning
+board/rasputin/n100/                        genimage.cfg (GPT) + grub.cfg + kernel
+                                            fragment + RAUC system.conf
+board/rasputin/rpi/                         genimage.cfg (MBR) + config.txt +
+                                            autoboot.txt + cmdline per slot +
+                                            tryboot RAUC backend bits
 package/rasputin-{agent,api}/               vendored release-binary packages
 scripts/init-buildroot.sh                   add the pinned Buildroot LTS submodule
-.github/workflows/release.yml               CalVer matrix build → QEMU smoke (amd64)
-                                            → sign → GitHub Release
+.github/workflows/release.yml               matrix build → QEMU smoke (amd64) →
+                                            sign → GitHub Release
 ```
 
 ## Quick start (dev)
 
-> **Host OS:** Buildroot needs Linux (it can't build on macOS or Windows
-> natively). On a Mac or Windows box, either build inside a Linux VM /
-> container, or use the CI — `gh workflow run release.yml -f full_build=true`
-> is the canonical loop, and warm cache keeps iterations to ~50 min/SKU.
-
-Local build (Linux host):
+> **Host OS:** Buildroot needs Linux (it can't build natively on macOS or
+> Windows). On those, build inside a Linux VM/container or use the CI
+> workflow. Warm-cache CI iterations are ~50 min per SKU; cold builds run
+> hours.
 
 ```sh
 git clone https://github.com/geekdojo/rasputin-os
 cd rasputin-os
 ./scripts/init-buildroot.sh        # adds Buildroot 2025.02.x LTS as a submodule
 
-# vendored agent/api binaries live in a private control-plane release; pre-
-# fetch them into Buildroot's dl/ so the package step finds them locally:
-gh release download v0.1.0 \
-  --repo geekdojo/rasputin-control-plane \
-  --pattern 'rasputin-agent-0.1.0-linux-amd64.tar.gz' --dir dl/rasputin-agent
-gh release download v0.1.0 \
-  --repo geekdojo/rasputin-control-plane \
-  --pattern 'rasputin-api-0.1.0-linux-amd64.tar.gz'   --dir dl/rasputin-api
+# Pre-fetch the vendored agent/api release tarballs into Buildroot's dl/
+# so the package step finds them locally (grab the version pinned in
+# package/rasputin-agent/rasputin-agent.mk from the rasputin-control-plane
+# releases page):
+#   dl/rasputin-agent/rasputin-agent-<ver>-linux-amd64.tar.gz
+#   dl/rasputin-api/rasputin-api-<ver>-linux-amd64.tar.gz
 
 # build the amd64 image (also the QEMU dev target)
 make -C buildroot BR2_EXTERNAL=$PWD O=$PWD/output/n100 BR2_DL_DIR=$PWD/dl rasputin_n100_defconfig
@@ -142,11 +100,10 @@ make -C buildroot BR2_EXTERNAL=$PWD O=$PWD/output/n100 BR2_DL_DIR=$PWD/dl
 #   rasputin-os-n100-<version>.raucb   (OTA bundle; sign before shipping)
 ```
 
-For arm64, swap `n100` → `cm5` and `linux-amd64` → `linux-arm64` in the
-`gh release download` patterns. Buildroot cross-compiles arm64 on an amd64
-host — no arm64 machine needed.
+For arm64, swap `n100` → `rpi` and fetch the `linux-arm64` tarballs.
+Buildroot cross-compiles arm64 on an amd64 host — no arm64 machine needed.
 
-Boot the amd64 image under QEMU (matches the CI smoke):
+Boot the amd64 image under QEMU (matches the CI smoke test):
 
 ```sh
 qemu-system-x86_64 -machine q35 -m 2048 -smp 2 -cpu max -nographic \
@@ -156,22 +113,39 @@ qemu-system-x86_64 -machine q35 -m 2048 -smp 2 -cpu max -nographic \
   -serial mon:stdio
 ```
 
-The build target is Nehalem-baseline (SSE4.2); `-cpu max` is required
-under QEMU's default TCG, harmless on real silicon.
+The build target is Nehalem-baseline (SSE4.2); `-cpu max` is required under
+QEMU's default TCG, harmless on real silicon.
+
+Building your own variant is a supported path, not a hack: the defconfigs are
+the documented entry point, and a third-party node image is "add a defconfig
++ a board dir."
 
 ## Provisioning a flashed node
 
-Mount the image's FAT seed region and edit `rasputin-seed.env`:
+Mount the image's FAT seed partition and edit `rasputin-seed.env`:
 
 ```sh
 RASPUTIN_NODE_ROLE=compute            # required; or controlplane
 RASPUTIN_NATS_URL=nats://rasputin.local:4222
-RASPUTIN_CP_JOIN_TOKEN=...            # required for compute/storage; from the controlplane
+RASPUTIN_CP_JOIN_TOKEN=...            # required for compute; minted by the controlplane
 ```
 
-The first controlplane needs no token — it self-inits against its own
-embedded NATS. See [provisioning.md](https://github.com/geekdojo/geekdojo-wiki/blob/main/projects/rasputin/design/os-images/provisioning.md).
+The first controlplane needs no token — it self-initializes against its own
+embedded NATS and becomes the authority that mints tokens for everyone else.
+
+## Releases
+
+CI builds both SKUs, boot-smokes the amd64 image under QEMU, signs the RAUC
+bundles, and publishes `.raucb` + `.img.xz` + `manifest.json` to GitHub
+Releases. Versioning is CalVer (`YYYY.MM.MICRO`, `-dev.N` suffix for
+prereleases), shared with the sibling repos so users see one Rasputin
+version.
+
+## Contributing
+
+Issues and discussion are welcome. The project is early and moving fast;
+open an issue before starting a non-trivial PR.
 
 ## License
 
-TODO: confirm license (the control-plane repo's choice should match).
+[AGPL-3.0](LICENSE).
