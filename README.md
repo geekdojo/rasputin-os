@@ -143,8 +143,8 @@ version.
 
 ## Contributing
 
-Issues and discussion are welcome. The project is early and moving fast;
-open an issue before starting a non-trivial PR.
+Issues and discussion are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md)
+for the PR flow and the CLA (signing is automatic on your first PR).
 
 ## License
 
