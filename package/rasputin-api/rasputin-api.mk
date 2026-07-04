@@ -10,7 +10,7 @@
 # release's published *.hash assets.
 ################################################################################
 
-RASPUTIN_API_VERSION = 2026.07.1-dev.35
+RASPUTIN_API_VERSION = 2026.07.1-dev.36
 RASPUTIN_API_SITE = https://github.com/geekdojo/rasputin-control-plane/releases/download/v$(RASPUTIN_API_VERSION)
 
 ifeq ($(BR2_aarch64),y)
