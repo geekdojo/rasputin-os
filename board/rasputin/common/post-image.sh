@@ -109,6 +109,28 @@ case "$SOC" in
 		;;
 esac
 
+# --- persistent (data) partition: ship it PRE-FORMATTED (empty ext4) ---------
+# The image used to leave the persistent partition's bytes unwritten (it's the
+# last, content-less partition, so genimage truncated the .img at the end of the
+# last populated partition). On BLANK media that region reads as zeros and
+# systemd-makefs formats it on first boot — fine. But reflashing onto a
+# PREVIOUSLY-USED drive left the old filesystem's superblock in place: makefs
+# (format-only-if-unformatted) skipped it and the mount then failed on the
+# geometry mismatch — e.g. a prior node whose persistent was grown to fill a
+# 500 GB medium leaves "block count … exceeds size of device (131072 blocks)",
+# which cascades to firstboot and bricks the node. Shipping a real empty 512 MiB
+# ext4 makes a flash write a correct superblock over whatever was there, so first
+# boot works regardless of the disk's prior state. rasputin-growpart re-expands
+# it to fill the medium on first boot as before. Keep this size == the genimage
+# `persistent` partition size in BOTH board layouts.
+PERSIST_MB=512
+PERSIST_IMG="$BINARIES_DIR/persistent.ext4"
+dd if=/dev/zero of="$PERSIST_IMG" bs=1M count="$PERSIST_MB" status=none
+# mke2fs -t ext4 (not the mkfs.ext4 symlink) so this doesn't depend on the host
+# alias being installed; -F: it's a plain file, not a block device.
+"$HOST_DIR/sbin/mke2fs" -F -q -t ext4 -L persistent "$PERSIST_IMG"
+echo "post-image: built persistent.ext4 (${PERSIST_MB}M empty ext4, pre-formatted)"
+
 echo "post-image: assembling $SOC image (genimage)…"
 # 1. Full .img via genimage using the board's layout.
 GENIMAGE_CFG="$BOARD_DIR/genimage.cfg"

@@ -4,11 +4,15 @@
 # Buildroot's generated fstab is replaced, so the /dev/root line must stay.
 /dev/root	/	auto	rw	0	1
 
-# Persistent state (node identity, role marker, api data dir). genimage leaves
-# this partition unformatted: x-systemd.makefs formats it on first boot
-# (systemd-makefs execs mkfs.ext4, from e2fsprogs — busybox's mke2fs can't answer
-# to that name) and x-systemd.growfs grows it to the full medium. nofail: a
-# wedged persistent partition skips provisioning (units RequiresMountsFor this
-# path) but the system still boots to something debuggable. fsck passno 0 — keep
-# it that way unless fsck.ext4 ships.
+# Persistent state (node identity, role marker, api data dir). The image ships
+# this partition PRE-FORMATTED as an empty ext4 (post-image.sh builds
+# persistent.ext4; genimage embeds it) so a reflash writes a correct superblock
+# over any stale fs left by a prior disk tenant — without that, makefs skips a
+# pre-existing (oversized) fs and the mount fails on geometry. x-systemd.makefs
+# stays as a belt-and-suspenders fallback (formats only if somehow blank);
+# x-systemd.growfs grows the fs to the partition, and rasputin-growpart first
+# extends the partition to fill the medium. nofail: a wedged persistent
+# partition skips provisioning (units RequiresMountsFor this path) but the system
+# still boots to something debuggable. fsck passno 0 — keep it that way unless
+# fsck.ext4 ships.
 PARTLABEL=persistent	/var/lib/rasputin	ext4	defaults,nofail,x-systemd.makefs,x-systemd.growfs	0	0

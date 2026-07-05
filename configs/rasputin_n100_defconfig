@@ -101,6 +101,9 @@ BR2_PACKAGE_CRYPTSETUP=y          # veritysetup for dm-verity at runtime
 BR2_PACKAGE_HOST_GENIMAGE=y
 BR2_PACKAGE_HOST_DOSFSTOOLS=y
 BR2_PACKAGE_HOST_MTOOLS=y
+# host mke2fs: post-image.sh pre-formats the persistent partition as an empty
+# ext4 so a reflash overwrites any stale fs from a prior disk tenant.
+BR2_PACKAGE_HOST_E2FSPROGS=y
 
 # --- app primitive ---
 # ca-certificates: public CA trust store (Mozilla NSS bundle → /etc/ssl/certs).
