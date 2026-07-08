@@ -114,6 +114,11 @@ BR2_PACKAGE_HOST_E2FSPROGS=y
 BR2_PACKAGE_CA_CERTIFICATES=y
 BR2_PACKAGE_DOCKER_ENGINE=y
 BR2_PACKAGE_DOCKER_CLI=y
+# docker compose v2 plugin — installs to /usr/lib/docker/cli-plugins so the
+# agent's `docker compose -f … up -d` resolves. The app catalog / apps feature
+# deploys Docker Compose stacks; without this the plugin is absent and every
+# deploy fails with "unknown shorthand flag: 'f' in -f" (bench 2026-07-08).
+BR2_PACKAGE_DOCKER_COMPOSE=y
 # tailscale: mesh / remote access (Headscale self-hosted control server). The
 # agent autodetects the binary via PATH and drives `tailscale up`; tailscaled
 # trusts the per-installation Mesh CA via SSL_CERT_FILE (see the tailscaled
