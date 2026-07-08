@@ -11,7 +11,7 @@ set -euo pipefail
 # next LTS (2027.02) as a deliberate maintenance step — update BR_TAG and
 # the cache key in .github/workflows/release.yml together.
 BR_REPO="https://gitlab.com/buildroot.org/buildroot.git"
-BR_TAG="2025.02.3"   # TODO: confirm the latest 2025.02.x point release
+BR_TAG="2025.02.15"  # latest 2025.02.x LTS point release (confirmed 2026-07-08)
 
 cd "$(dirname "$0")/.."
 
