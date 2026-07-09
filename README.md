@@ -63,8 +63,9 @@ this image — see
   key and the build pipeline cannot inject one** — you supply your own at
   flash time via `RASPUTIN_SSH_AUTHORIZED_KEY` in `rasputin-seed.env` (first
   boot writes it to the persistent partition, where dropbear reads it). Our
-  own bench clusters are provisioned exactly the same way. Releases published
-  before 2026-07-09 baked a disclosed geekdojo support key (see
+  own bench clusters are provisioned exactly the same way. Published
+  releases up to and including `2026.07.1-dev.91` baked a disclosed geekdojo
+  support key — the first no-vendor-key release is anything newer (see
   [`rasputin-releases`](https://github.com/geekdojo/rasputin-releases)).
   IPv6 is disabled across the stack by design.
 
