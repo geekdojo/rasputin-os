@@ -59,21 +59,18 @@ this image — see
   [`rasputin-control-plane`](https://github.com/geekdojo/rasputin-control-plane),
   verified by hash — so an OS build takes minutes, not hours.
 - **Key-only SSH** (dropbear, password auth disabled; no authorized key = no
-  network SSH at all), serial/HDMI console fallback. Supply your own key at
+  network SSH at all), serial/HDMI console fallback. **The image bakes no SSH
+  key and the build pipeline cannot inject one** — you supply your own at
   flash time via `RASPUTIN_SSH_AUTHORIZED_KEY` in `rasputin-seed.env` (first
-  boot writes it to the persistent partition, where dropbear reads it); a
-  build-time `RASPUTIN_SSH_AUTHORIZED_KEY` is also honored for bench builds —
-  and **CI release images currently still bake a geekdojo support key that
-  way** (disclosed in
-  [`rasputin-releases`](https://github.com/geekdojo/rasputin-releases));
-  dropping the vendor key from public images is a tracked pre-GA
-  requirement. IPv6 is disabled across the stack by design.
+  boot writes it to the persistent partition, where dropbear reads it). Our
+  own bench clusters are provisioned exactly the same way. Releases published
+  before 2026-07-09 baked a disclosed geekdojo support key (see
+  [`rasputin-releases`](https://github.com/geekdojo/rasputin-releases)).
+  IPv6 is disabled across the stack by design.
 
 Known gaps (tracked, not hidden): dm-verity rootfs integrity + initramfs is
 designed but not wired; the console root password is baked at build time and
-not yet operator-changeable at runtime; release images still carry the
-geekdojo support key baked at build time — seed-supplied keys landed, but
-the vendor key stays until the pre-GA flip removes it from public builds.
+not yet operator-changeable at runtime.
 
 ## Layout
 

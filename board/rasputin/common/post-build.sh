@@ -99,26 +99,15 @@ ln -sf /usr/lib/systemd/system/tailscaled.service \
 # dropbear: key-only SSH for support/debugging a headless controlplane. Enable
 # the overlay unit (etc/systemd/system/dropbear.service, runs with -s = no
 # password auth and -D pointing authorized_keys at the persistent partition).
-# The build-time RASPUTIN_SSH_AUTHORIZED_KEY (bench builds; same variable the
-# firewall image uses) is staged into the image at
-# /usr/share/rasputin/authorized_keys.build — NOT /root/.ssh, which is
-# read-only squashfs and can't take seed-supplied keys — and dropbear's
-# ExecStartPre merges it into /var/lib/rasputin/dropbear/authorized_keys at
-# runtime, alongside any seed-supplied key (rasputin-firstboot.sh). No key
-# from either source → no network SSH (console still works), never
+# NO key is baked at build time — deliberately (the pre-GA vendor-key removal,
+# 2026-07-09; there used to be a RASPUTIN_SSH_AUTHORIZED_KEY build hook here).
+# The ONLY way a key gets on a node is RASPUTIN_SSH_AUTHORIZED_KEY in
+# rasputin-seed.env, merged by firstboot into
+# /var/lib/rasputin/dropbear/authorized_keys — same path for us and for end
+# users. No seed key → no network SSH (console still works), never
 # passwordless root over the network.
 ln -sf /etc/systemd/system/dropbear.service \
 	"$TARGET_DIR/etc/systemd/system/multi-user.target.wants/dropbear.service"
-mkdir -p "$TARGET_DIR/usr/share/rasputin"
-if [ -n "${RASPUTIN_SSH_AUTHORIZED_KEY:-}" ]; then
-	printf '%s\n' "$RASPUTIN_SSH_AUTHORIZED_KEY" > "$TARGET_DIR/usr/share/rasputin/authorized_keys.build"
-	chmod 600 "$TARGET_DIR/usr/share/rasputin/authorized_keys.build"
-	echo "post-build: baked $(grep -c . "$TARGET_DIR/usr/share/rasputin/authorized_keys.build") authorized SSH key line(s) (build key) — image is key-only"
-else
-	: > "$TARGET_DIR/usr/share/rasputin/authorized_keys.build"
-	chmod 600 "$TARGET_DIR/usr/share/rasputin/authorized_keys.build"
-	echo "post-build: RASPUTIN_SSH_AUTHORIZED_KEY unset; no build key baked. Network SSH needs a seed-supplied key (RASPUTIN_SSH_AUTHORIZED_KEY in rasputin-seed.env) — console always works."
-fi
 
 # Bake mesh container images (self-hosted Headscale) into the rootfs so the
 # controlplane forms its mesh on FIRST BOOT WITHOUT INTERNET. CI's "Bake mesh

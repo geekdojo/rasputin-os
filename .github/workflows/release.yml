@@ -260,15 +260,10 @@ jobs:
         env:
           RASPUTIN_VERSION: ${{ steps.ver.outputs.version }}
           BR2_DL_DIR: ${{ github.workspace }}/dl
-          # Build-time support key, staged by post-build.sh at
-          # /usr/share/rasputin/authorized_keys.build and merged into the
-          # persistent authorized_keys at runtime (key-only SSH). Same
-          # org/repo variable the firewall image uses. Empty → no build key;
-          # operators can still seed their own via RASPUTIN_SSH_AUTHORIZED_KEY
-          # in rasputin-seed.env. PRE-GA: unset/blank this for public release
-          # builds so no vendor key ships (backlog: buildroot-os "seed-supplied
-          # SSH authorized key") — that flip is deliberate, not a drive-by.
-          RASPUTIN_SSH_AUTHORIZED_KEY: ${{ vars.RASPUTIN_SSH_AUTHORIZED_KEY }}
+          # NOTE: no SSH key is injected here — deliberately. The build CANNOT
+          # bake an authorized key (the pre-GA vendor-key removal, 2026-07-09);
+          # keys arrive exclusively via RASPUTIN_SSH_AUTHORIZED_KEY in
+          # rasputin-seed.env, for us and for end users alike.
           # Mesh image tarballs from the "Bake mesh container images" step;
           # post-build.sh copies them into /usr/share/rasputin/mesh-images.
           RASPUTIN_MESH_IMAGES_DIR: ${{ github.workspace }}/mesh-images
