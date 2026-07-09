@@ -59,12 +59,18 @@ this image — see
   [`rasputin-control-plane`](https://github.com/geekdojo/rasputin-control-plane),
   verified by hash — so an OS build takes minutes, not hours.
 - **Key-only SSH** (dropbear, password auth disabled; no baked key = no
-  network SSH at all), serial/HDMI console fallback. IPv6 is disabled across
-  the stack by design.
+  network SSH at all), serial/HDMI console fallback. The authorized key is
+  baked at build time from `RASPUTIN_SSH_AUTHORIZED_KEY` — **CI release
+  images currently bake a geekdojo support key** (disclosed in
+  [`rasputin-releases`](https://github.com/geekdojo/rasputin-releases));
+  seed-supplied user keys, with no vendor key in public images, are a
+  tracked pre-GA requirement. IPv6 is disabled across the stack by design.
 
 Known gaps (tracked, not hidden): dm-verity rootfs integrity + initramfs is
 designed but not wired; the console root password is baked at build time and
-not yet operator-changeable at runtime.
+not yet operator-changeable at runtime; SSH authorized keys are build-time
+only (no seed-supplied user key yet), so release images carry a geekdojo
+support key rather than yours.
 
 ## Layout
 
