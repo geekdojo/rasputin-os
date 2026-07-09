@@ -1,7 +1,21 @@
 # rasputin-os
 
-Buildroot external tree for the **Rasputin OS** image — the base OS that
-boots on every Rasputin **compute** and **controlplane** node. One tree, two
+[![Release](https://github.com/geekdojo/rasputin-os/actions/workflows/release.yml/badge.svg)](https://github.com/geekdojo/rasputin-os/actions/workflows/release.yml)
+[![Latest](https://img.shields.io/github/v/release/geekdojo/rasputin-os?include_prereleases&label=release)](https://github.com/geekdojo/rasputin-os/releases)
+[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-E8590C.svg)](LICENSE)
+
+The node OS of **Rasputin** — an open-source homelab cluster system: a small
+fleet of nodes (Raspberry Pi or Intel N100) plus a dedicated firewall node,
+managed from one web UI, with atomic A/B OS updates that roll back on
+failure. Opinionated where you want guidance, open where you want control,
+and built to work in the first hour.
+
+> **Want to run Rasputin, not build it?** Flashable images and a four-step
+> quickstart live in
+> [`rasputin-releases`](https://github.com/geekdojo/rasputin-releases).
+
+This repo is the Buildroot external tree that produces the image booting
+every Rasputin **compute** and **controlplane** node. One tree, two
 architectures (`rpi` arm64, `n100` amd64), one read-only rootfs whose role is
 chosen at provision time by a seed file — a compute node and a controlplane
 node run the same image.
