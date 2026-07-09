@@ -58,19 +58,22 @@ this image — see
   release binaries from
   [`rasputin-control-plane`](https://github.com/geekdojo/rasputin-control-plane),
   verified by hash — so an OS build takes minutes, not hours.
-- **Key-only SSH** (dropbear, password auth disabled; no baked key = no
-  network SSH at all), serial/HDMI console fallback. The authorized key is
-  baked at build time from `RASPUTIN_SSH_AUTHORIZED_KEY` — **CI release
-  images currently bake a geekdojo support key** (disclosed in
+- **Key-only SSH** (dropbear, password auth disabled; no authorized key = no
+  network SSH at all), serial/HDMI console fallback. Supply your own key at
+  flash time via `RASPUTIN_SSH_AUTHORIZED_KEY` in `rasputin-seed.env` (first
+  boot writes it to the persistent partition, where dropbear reads it); a
+  build-time `RASPUTIN_SSH_AUTHORIZED_KEY` is also honored for bench builds —
+  and **CI release images currently still bake a geekdojo support key that
+  way** (disclosed in
   [`rasputin-releases`](https://github.com/geekdojo/rasputin-releases));
-  seed-supplied user keys, with no vendor key in public images, are a
-  tracked pre-GA requirement. IPv6 is disabled across the stack by design.
+  dropping the vendor key from public images is a tracked pre-GA
+  requirement. IPv6 is disabled across the stack by design.
 
 Known gaps (tracked, not hidden): dm-verity rootfs integrity + initramfs is
 designed but not wired; the console root password is baked at build time and
-not yet operator-changeable at runtime; SSH authorized keys are build-time
-only (no seed-supplied user key yet), so release images carry a geekdojo
-support key rather than yours.
+not yet operator-changeable at runtime; release images still carry the
+geekdojo support key baked at build time — seed-supplied keys landed, but
+the vendor key stays until the pre-GA flip removes it from public builds.
 
 ## Layout
 
@@ -148,6 +151,7 @@ Mount the image's FAT seed partition and edit `rasputin-seed.env`:
 RASPUTIN_NODE_ROLE=compute            # required; or controlplane
 RASPUTIN_NATS_URL=nats://rasputin.local:4222
 RASPUTIN_CP_JOIN_TOKEN=...            # required for compute; minted by the controlplane
+RASPUTIN_SSH_AUTHORIZED_KEY="ssh-ed25519 AAAA... you@laptop"  # optional; quote it — your SSH key
 ```
 
 The first controlplane needs no token — it self-initializes against its own

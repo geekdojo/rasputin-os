@@ -1,28 +1,41 @@
 # Key-only SSH for support/debugging a headless controlplane. rasputin-os has
 # no display attached in normal operation, and until the mesh forms there's no
-# tailnet path in — so a baked-key dropbear is the supported remote shell.
+# tailnet path in — so dropbear is the supported remote shell.
 #
 # Posture: -s disables password auth entirely, so even though console root is
-# passwordless (bench), the NETWORK vector is key-only. The authorized key is
-# baked into /root/.ssh/authorized_keys at build time from
-# RASPUTIN_SSH_AUTHORIZED_KEY (post-build.sh); with no key baked, nobody can
-# SSH in (console still works) — never passwordless root over the network.
+# passwordless (bench), the NETWORK vector is key-only. With no authorized key
+# present, nobody can SSH in (console still works) — never passwordless root
+# over the network.
 #
-# Host keys live on the persistent partition (the rootfs is read-only
-# squashfs) so SSH host identity is stable across reboots and A/B updates;
-# they're generated on first boot if absent.
+# Authorized keys live on the PERSISTENT partition (the rootfs is read-only
+# squashfs, so /root/.ssh can't hold runtime-supplied keys): dropbear runs
+# with -D /var/lib/rasputin/dropbear and reads authorized_keys there. The
+# file is fed append-if-missing (merge-authorized-keys.sh) from two sources:
+#   - the build-baked key (/usr/share/rasputin/authorized_keys.build, from
+#     RASPUTIN_SSH_AUTHORIZED_KEY at build — bench builds; empty once public
+#     images drop the vendor key), merged here on every start;
+#   - the seed's RASPUTIN_SSH_AUTHORIZED_KEY, merged by rasputin-firstboot.
+# The file is operator-owned: manual additions survive, revocation is a
+# manual edit. Host keys live alongside for the same read-only-rootfs reason
+# (stable host identity across reboots and A/B updates); they're generated
+# on first boot if absent.
 [Unit]
 Description=Dropbear SSH server (key-only)
-After=network.target systemd-tmpfiles-setup.service
+After=network.target systemd-tmpfiles-setup.service rasputin-firstboot.service
 Wants=network.target
 RequiresMountsFor=/var/lib/rasputin
 
 [Service]
 Type=simple
 ExecStartPre=/bin/sh -c 'mkdir -p /var/lib/rasputin/dropbear && { test -s /var/lib/rasputin/dropbear/ed25519_host_key || /usr/bin/dropbearkey -t ed25519 -f /var/lib/rasputin/dropbear/ed25519_host_key; }'
+# Merge the build-baked key (if any) into the persistent authorized_keys.
+# dropbear re-reads that file on every auth attempt, so keys merged later
+# (e.g. firstboot's seed key) take effect without a restart.
+ExecStartPre=/bin/sh -c 'f=/usr/share/rasputin/authorized_keys.build; if [ -s "$f" ]; then /usr/lib/rasputin/dropbear/merge-authorized-keys.sh < "$f"; fi'
 # -F foreground (systemd-managed), -E log to the journal, -s NO password auth
-# (key-only). -r pins the persistent host key.
-ExecStart=/usr/sbin/dropbear -F -E -s -r /var/lib/rasputin/dropbear/ed25519_host_key
+# (key-only). -r pins the persistent host key; -D makes dropbear read
+# <dir>/authorized_keys instead of ~/.ssh/authorized_keys.
+ExecStart=/usr/sbin/dropbear -F -E -s -r /var/lib/rasputin/dropbear/ed25519_host_key -D /var/lib/rasputin/dropbear
 Restart=on-failure
 RestartSec=5
 

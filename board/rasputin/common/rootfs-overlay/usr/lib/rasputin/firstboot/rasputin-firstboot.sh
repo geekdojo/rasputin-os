@@ -46,6 +46,7 @@ NATS_URL=""
 JOIN_TOKEN=""
 BUS_AUTH=""
 RELEASE_CHANNEL=""
+SSH_KEY=""
 
 if [ -f "$SEED_FILE" ]; then
 	log "reading seed $SEED_FILE"
@@ -57,8 +58,23 @@ if [ -f "$SEED_FILE" ]; then
 	JOIN_TOKEN="${RASPUTIN_CP_JOIN_TOKEN:-}"
 	BUS_AUTH="${RASPUTIN_BUS_AUTH:-}"
 	RELEASE_CHANNEL="${RASPUTIN_RELEASE_CHANNEL:-}"
+	SSH_KEY="${RASPUTIN_SSH_AUTHORIZED_KEY:-}"
 else
 	log "no seed file at $SEED_FILE; using defaults"
+fi
+
+# --- seed-supplied SSH authorized key -----------------------------------------
+# Merge the operator's public key into the persistent authorized_keys — the
+# file dropbear reads (-D, see dropbear.service). Done BEFORE the fail-loud
+# provisioning checks below: a mis-provisioned seed that at least carries a
+# key still gives the operator SSH access to debug it. Public key, not a
+# secret — no scrub, and never let a merge hiccup fail provisioning.
+if [ -n "$SSH_KEY" ]; then
+	if printf '%s\n' "$SSH_KEY" | /usr/lib/rasputin/dropbear/merge-authorized-keys.sh; then
+		log "merged seed SSH authorized key into /var/lib/rasputin/dropbear/authorized_keys"
+	else
+		log "WARNING: failed to merge seed SSH authorized key (continuing)"
+	fi
 fi
 
 # --- kernel cmdline override (escape hatch) ----------------------------------

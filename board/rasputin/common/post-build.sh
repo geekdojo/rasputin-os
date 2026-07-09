@@ -98,22 +98,26 @@ ln -sf /usr/lib/systemd/system/tailscaled.service \
 
 # dropbear: key-only SSH for support/debugging a headless controlplane. Enable
 # the overlay unit (etc/systemd/system/dropbear.service, runs with -s = no
-# password auth). Bake root's authorized_keys from RASPUTIN_SSH_AUTHORIZED_KEY
-# so the image ships key-only — mirrors the firewall's RASPUTIN_SSH_AUTHORIZED_KEY
-# baking. No key → no network SSH (console still works), never passwordless
-# root over the network.
+# password auth and -D pointing authorized_keys at the persistent partition).
+# The build-time RASPUTIN_SSH_AUTHORIZED_KEY (bench builds; same variable the
+# firewall image uses) is staged into the image at
+# /usr/share/rasputin/authorized_keys.build — NOT /root/.ssh, which is
+# read-only squashfs and can't take seed-supplied keys — and dropbear's
+# ExecStartPre merges it into /var/lib/rasputin/dropbear/authorized_keys at
+# runtime, alongside any seed-supplied key (rasputin-firstboot.sh). No key
+# from either source → no network SSH (console still works), never
+# passwordless root over the network.
 ln -sf /etc/systemd/system/dropbear.service \
 	"$TARGET_DIR/etc/systemd/system/multi-user.target.wants/dropbear.service"
-mkdir -p "$TARGET_DIR/root/.ssh"
-chmod 700 "$TARGET_DIR/root/.ssh"
+mkdir -p "$TARGET_DIR/usr/share/rasputin"
 if [ -n "${RASPUTIN_SSH_AUTHORIZED_KEY:-}" ]; then
-	printf '%s\n' "$RASPUTIN_SSH_AUTHORIZED_KEY" > "$TARGET_DIR/root/.ssh/authorized_keys"
-	chmod 600 "$TARGET_DIR/root/.ssh/authorized_keys"
-	echo "post-build: baked $(grep -c . "$TARGET_DIR/root/.ssh/authorized_keys") authorized SSH key line(s) — image is key-only"
+	printf '%s\n' "$RASPUTIN_SSH_AUTHORIZED_KEY" > "$TARGET_DIR/usr/share/rasputin/authorized_keys.build"
+	chmod 600 "$TARGET_DIR/usr/share/rasputin/authorized_keys.build"
+	echo "post-build: baked $(grep -c . "$TARGET_DIR/usr/share/rasputin/authorized_keys.build") authorized SSH key line(s) (build key) — image is key-only"
 else
-	: > "$TARGET_DIR/root/.ssh/authorized_keys"
-	chmod 600 "$TARGET_DIR/root/.ssh/authorized_keys"
-	echo "post-build: WARNING — RASPUTIN_SSH_AUTHORIZED_KEY unset; no SSH key baked. Network SSH will be unusable (console only). Set the variable to enable key-only SSH."
+	: > "$TARGET_DIR/usr/share/rasputin/authorized_keys.build"
+	chmod 600 "$TARGET_DIR/usr/share/rasputin/authorized_keys.build"
+	echo "post-build: RASPUTIN_SSH_AUTHORIZED_KEY unset; no build key baked. Network SSH needs a seed-supplied key (RASPUTIN_SSH_AUTHORIZED_KEY in rasputin-seed.env) — console always works."
 fi
 
 # Bake mesh container images (self-hosted Headscale) into the rootfs so the

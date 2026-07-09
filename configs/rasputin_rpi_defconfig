@@ -143,12 +143,16 @@ BR2_PACKAGE_TAILSCALE=y
 
 # --- remote access (SSH) ---
 # dropbear: key-only SSH for support/debugging a headless controlplane. The
-# dropbear.service overlay runs it with -s (no password auth) and host keys on
-# the persistent partition; the authorized key is baked into /root/.ssh at
-# build time from RASPUTIN_SSH_AUTHORIZED_KEY (post-build.sh). With no baked
-# key, network SSH is simply unusable (console stays available) — never
-# passwordless root over the network. DISABLE_REVERSEDNS keeps logins snappy
-# on LANs without reverse DNS.
+# dropbear.service overlay runs it with -s (no password auth) and -D pointing
+# authorized_keys + host keys at the persistent partition. Keys arrive two
+# ways, both merged append-if-missing at runtime: a build-time key from
+# RASPUTIN_SSH_AUTHORIZED_KEY (post-build.sh stages it at
+# /usr/share/rasputin/authorized_keys.build — bench builds), and a
+# seed-supplied key (RASPUTIN_SSH_AUTHORIZED_KEY in rasputin-seed.env,
+# written by firstboot). With no key from either source, network SSH is
+# simply unusable (console stays available) — never passwordless root over
+# the network. DISABLE_REVERSEDNS keeps logins snappy on LANs without
+# reverse DNS.
 BR2_PACKAGE_DROPBEAR=y
 BR2_PACKAGE_DROPBEAR_DISABLE_REVERSEDNS=y
 
