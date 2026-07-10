@@ -11,8 +11,8 @@ failure. Opinionated where you want guidance, open where you want control,
 and built to work in the first hour.
 
 > **Want to run Rasputin, not build it?** Flashable images and a four-step
-> quickstart live in
-> [`rasputin-releases`](https://github.com/geekdojo/rasputin-releases).
+> quickstart live at
+> [rasputin.geekdojo.com/download](https://rasputin.geekdojo.com/download/).
 
 This repo is the Buildroot external tree that produces the image booting
 every Rasputin **compute** and **controlplane** node. One tree, two
@@ -66,7 +66,7 @@ this image — see
   own bench clusters are provisioned exactly the same way. Published
   releases up to and including `2026.07.1-dev.91` baked a disclosed geekdojo
   support key — the first no-vendor-key release is anything newer (see
-  [`rasputin-releases`](https://github.com/geekdojo/rasputin-releases)).
+  [the releases](https://github.com/geekdojo/rasputin-os/releases)).
   IPv6 is disabled across the stack by design.
 
 Known gaps (tracked, not hidden): dm-verity rootfs integrity + initramfs is
