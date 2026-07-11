@@ -199,16 +199,15 @@ jobs:
           sudo docker image prune --all --force 2>/dev/null || true
           df -h /
 
-      # The agent/api binaries live in a PRIVATE control-plane release, so
-      # Buildroot's anonymous downloader gets a 404. Pre-place the tarballs
-      # into Buildroot's dl/ cache here, authenticated with a fine-grained
-      # PAT (Contents:read on geekdojo/rasputin-control-plane). With no .hash
-      # file present, Buildroot's dl-wrapper finds the cached file and skips
-      # the network fetch entirely. See os-images/release-pipeline.md §1
-      # ("Fetching the vendored agent/api binaries").
-      - name: Fetch vendored binaries (private control-plane release)
+      # The agent/api binaries live in the (now-public) control-plane release.
+      # Pre-place the tarballs into Buildroot's dl/ cache here so, with no .hash
+      # file present, Buildroot's dl-wrapper finds the cached file and skips the
+      # network fetch entirely. github.token reads the public repo (this was a
+      # fine-grained PAT while control-plane was private — ADR-0002). See
+      # os-images/release-pipeline.md §1 ("Fetching the vendored agent/api binaries").
+      - name: Fetch vendored binaries (control-plane release)
         env:
-          GH_TOKEN: ${{ secrets.CONTROL_PLANE_RELEASE_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           arch='${{ matrix.arch }}'        # amd64 (n100) | arm64 (cm5)
