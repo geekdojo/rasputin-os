@@ -1,7 +1,7 @@
 # Mounts the boot FAT (the provisioning seed lives there) at /run/rasputin-seed
 # so rasputin-firstboot.sh can read rasputin-seed.env. os-images/provisioning.md §1.
 #
-# Mounted by FILESYSTEM LABEL, not PARTLABEL: the GPT partition is named "esp"
+# Mounted by FILESYSTEM LABEL, not PARTLABEL: the GPT partition is named "seed"
 # on n100 and "selector" on rpi (see each board's genimage.cfg), but both FATs
 # carry the same volume label RASPUTIN-OS — one unit serves both boards. On the
 # rpi this is the selector (p1), which holds autoboot.txt + the seed + the RAUC
@@ -9,7 +9,7 @@
 # boot-b=p3 RASPUTIN-B) hold the kernels and are deliberately NOT matched here.
 #
 # Read-write: the bootloader backend updates state on this FAT at runtime —
-# grubenv on the n100 (grub-editenv), autoboot.txt + slot-state files on the rpi
+# autoboot.txt + slot-state files on the rpi
 # (the tryboot backend) — so it must be writable. firstboot still only reads the
 # seed. (Was ro; widened for the n100 RAUC GRUB boot-counter — buildroot-os.md §3.)
 #
@@ -17,7 +17,7 @@
 # escaped dash, literal in the filename — do not "fix" it).
 
 [Unit]
-Description=Rasputin provisioning seed + grubenv (boot FAT)
+Description=Rasputin provisioning seed (RASPUTIN-OS FAT)
 DefaultDependencies=no
 Before=umount.target
 Conflicts=umount.target

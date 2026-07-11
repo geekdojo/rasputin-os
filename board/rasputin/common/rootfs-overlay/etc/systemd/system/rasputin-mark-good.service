@@ -25,7 +25,7 @@
 
 [Unit]
 Description=Mark the running RAUC slot good — reset GRUB boot-counter (n100 only)
-After=rasputin-agent.service run-rasputin\x2dseed.mount
+After=rasputin-agent.service run-rasputin\x2dseed.mount run-rasputin\x2desp.mount
 ConditionPathExists=/etc/rauc/system.conf
 # n100-only: skip on the Pi, whose selector FAT carries autoboot.txt (the Pi
 # commit is saga-driven, not auto-on-OS-up — see the header).
