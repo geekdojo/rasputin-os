@@ -37,7 +37,7 @@ log() {
 # --- locate + read the seed --------------------------------------------------
 # The seed FAT is mounted read-only at $SEED_MNT by run-rasputin\x2dseed.mount
 # (Wants'd by rasputin-firstboot.service), matched by filesystem label
-# RASPUTIN-FW — common to both boards even though the GPT partition name
+# RASPUTIN-OS — common to both boards even though the GPT partition name
 # differs (n100 "esp", cm5 "firmware"). If the mount failed we fall through
 # to the cmdline/defaults below.
 ROLE=""
@@ -97,10 +97,10 @@ done
 # with no error anywhere. Fail loud instead — exit non-zero so this unit shows
 # failed (rasputin-agent Requires= us, so it won't start on a junk identity), and
 # leave .provisioned unset so firstboot re-runs once a real seed is dropped on
-# the RASPUTIN-FW partition and the node is rebooted.
+# the RASPUTIN-OS partition and the node is rebooted.
 if [ -z "$ROLE" ]; then
 	log "ERROR: no provisioning seed — this node is un-provisioned."
-	log "Drop a rasputin-seed.env (control plane -> Add node) on the RASPUTIN-FW partition and reboot."
+	log "Drop a rasputin-seed.env (control plane -> Add node) on the RASPUTIN-OS partition and reboot."
 	exit 1
 fi
 
