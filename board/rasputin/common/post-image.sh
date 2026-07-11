@@ -59,7 +59,7 @@ case "$SOC" in
 		#
 		# A/B = the CANONICAL Pi tryboot mechanism: autoboot.txt `boot_partition`
 		# switching at the EEPROM stage (portable Pi 4 + Pi 5). THREE FATs:
-		#   - selector (p1, RASPUTIN-FW): autoboot.txt + the provisioning seed ONLY.
+		#   - selector (p1, RASPUTIN-OS): autoboot.txt + the provisioning seed ONLY.
 		#     No kernel/config — so the firmware MUST honor boot_partition + redirect
 		#     to a real boot slot. The RAUC backend edits autoboot.txt here at runtime
 		#     (mounted /run/rasputin-seed).
@@ -96,7 +96,7 @@ case "$SOC" in
 		rm -rf "$STAGE_SEL"; mkdir -p "$STAGE_SEL"
 		cp "$BOARD_DIR/autoboot.txt" "$STAGE_SEL/autoboot.txt"
 		cp "$COMMON_DIR/rasputin-seed.env.template" "$STAGE_SEL/rasputin-seed.env"
-		build_fat "$BINARIES_DIR/selector.vfat" RASPUTIN-FW 64 "$STAGE_SEL"
+		build_fat "$BINARIES_DIR/selector.vfat" RASPUTIN-OS 64 "$STAGE_SEL"
 
 		# boot-a (p2): common; cmdline.txt stays = slot A. No autoboot.txt/seed.
 		build_fat "$BINARIES_DIR/boot-a.vfat" RASPUTIN-A 256 "$COMMON_STAGE"

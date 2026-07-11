@@ -3,7 +3,7 @@
 #
 # Mounted by FILESYSTEM LABEL, not PARTLABEL: the GPT partition is named "esp"
 # on n100 and "selector" on rpi (see each board's genimage.cfg), but both FATs
-# carry the same volume label RASPUTIN-FW — one unit serves both boards. On the
+# carry the same volume label RASPUTIN-OS — one unit serves both boards. On the
 # rpi this is the selector (p1), which holds autoboot.txt + the seed + the RAUC
 # tryboot backend's slot state; the rpi's boot slots (boot-a=p2 RASPUTIN-A,
 # boot-b=p3 RASPUTIN-B) hold the kernels and are deliberately NOT matched here.
@@ -23,7 +23,7 @@ Before=umount.target
 Conflicts=umount.target
 
 [Mount]
-What=/dev/disk/by-label/RASPUTIN-FW
+What=/dev/disk/by-label/RASPUTIN-OS
 Where=/run/rasputin-seed
 Type=vfat
 Options=rw

@@ -7,7 +7,7 @@
 # BOOTLOADER stage via `autoboot.txt` `boot_partition` switching. The image has a
 # SEPARATE selector partition + two boot slots, each a complete boot env that
 # statically roots its own slot:
-#   partition 1 = selector (label RASPUTIN-FW) → autoboot.txt + seed + slot state
+#   partition 1 = selector (label RASPUTIN-OS) → autoboot.txt + seed + slot state
 #   partition 2 = boot-a   (label RASPUTIN-A)  → rootfs-0 → bootname A
 #   partition 3 = boot-b   (label RASPUTIN-B)  → rootfs-1 → bootname B
 # The firmware reads autoboot.txt from the selector (p1, mounted rw at
