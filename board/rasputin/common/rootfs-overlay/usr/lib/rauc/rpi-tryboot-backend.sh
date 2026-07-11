@@ -121,7 +121,12 @@ case "$cmd" in
 		put "$(state_file "$bn")" "$st"
 		# Commit-on-good: RAUC marking the slot we're TRIALLING good promotes it to
 		# the committed slot ([all] boot_partition), so the next normal boot stays
-		# here. (mark-good runs from rasputin-mark-good.service once userspace is up.)
+		# here. On the Pi this mark-good is HEALTH-GATED: the control-plane update
+		# saga sends it after a post-reboot health check (agent -> `rauc status
+		# mark-good`). It is deliberately NOT driven by the boot-time
+		# rasputin-mark-good.service, which is n100-only (gated off here via
+		# ConditionPathExists=!.../autoboot.txt) so an unhealthy trial can't
+		# self-commit at boot. See commit c55aa4d.
 		if [ "$st" = good ] && in_trial && [ "$(cat "$PENDING")" = "$bn" ]; then
 			set_section_partition all "$(part_for "$bn")"
 			rm -f "$PENDING"
