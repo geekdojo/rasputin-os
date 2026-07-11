@@ -79,9 +79,11 @@ ln -sf /etc/systemd/system/rasputin-rauc-reconcile.service \
 ln -sf /etc/systemd/system/rasputin-growpart.service \
 	"$TARGET_DIR/etc/systemd/system/multi-user.target.wants/rasputin-growpart.service"
 
-# Console login banner shows the node's IP (/etc/issue carries agetty's `\4`).
-# This oneshot re-renders agetty once the network is up so the IP isn't blank
-# when getty started before DHCP. See rasputin-issue-ip.service.
+# Surface the node's IP at boot: this oneshot writes the real routable IP into
+# /etc/issue (-> /run/issue) once the network is up and re-renders agetty, AND
+# echoes it to the boot console so a chatty boot can't bury it. Deliberately not
+# agetty's `\4` (which flashes loopback/link-local pre-DHCP). See
+# rasputin-issue-ip.service / usr/lib/rasputin/issue/rasputin-issue-ip.sh.
 ln -sf /etc/systemd/system/rasputin-issue-ip.service \
 	"$TARGET_DIR/etc/systemd/system/multi-user.target.wants/rasputin-issue-ip.service"
 

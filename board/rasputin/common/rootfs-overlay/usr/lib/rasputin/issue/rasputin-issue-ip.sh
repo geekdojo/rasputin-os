@@ -1,7 +1,10 @@
 #!/bin/sh
-# Write the node's REAL IP into the console login banner (/run/issue, which
-# /etc/issue symlinks to — /etc is read-only squashfs so the banner can't be a
-# static file with a live value).
+# Surface the node's REAL IP at boot in two places. Primary: the console login
+# banner — /run/issue (which /etc/issue symlinks to; /etc is read-only squashfs
+# so the banner can't be a static file with a live value). Secondary: a one-line
+# echo to /dev/console so the address also lands in the boot scroll (see tail) —
+# the login banner only shows at an idle prompt and a chatty x86 boot scrolls it
+# off, so on the n100 especially it was easy to miss.
 #
 # We deliberately do NOT use agetty's `\4` escape: agetty resolves `\4` every
 # time it renders the issue (getty start + each respawn), grabbing whatever
@@ -28,4 +31,9 @@ done
 
 banner "${ip:-(no network)}"
 agetty --reload 2>/dev/null
+
+# Also announce the address directly in the boot console scroll (serial OR HDMI,
+# whichever is attached), where a busy boot can't bury it like it buries the idle
+# login banner. Best-effort — never fail the unit if /dev/console isn't writable.
+printf '\n**** Rasputin OS  |  IP address: %s ****\n\n' "${ip:-(no network)}" > /dev/console 2>/dev/null || true
 exit 0
