@@ -337,14 +337,17 @@ jobs:
           set -x
           IMG=$(ls img/*.img | head -1)
           test -n "$IMG" || { echo "no n100 .img artifact"; exit 1; }
-          # Seed role=controlplane into the ESP so this boot also brings up
-          # rasputin-api and we can assert the API + bundled web UI actually
-          # serve (the shipped seed is blank → role-less boot would never
-          # start the api). mtools at the fixed genimage ESP offset (LBA 34
-          # = byte 17408); editing via a loop mount would also work on Linux
-          # but mtools keeps the recipe identical to the macOS bench one.
+          # Seed role=controlplane so this boot also brings up rasputin-api and
+          # we can assert the API + bundled web UI actually serve (the shipped
+          # seed is blank → role-less boot would never start the api). The seed
+          # lives on its own auto-mounting FAT partition now (Microsoft basic
+          # data — Win/macOS show it, unlike the hidden ESP), so find its byte
+          # offset from the GPT rather than the old fixed ESP offset (17408).
+          # mtools keeps the recipe identical to the macOS bench one.
           printf 'RASPUTIN_NODE_ROLE=controlplane\nRASPUTIN_NATS_URL=\nRASPUTIN_CP_JOIN_TOKEN=\n' > /tmp/seed-cp.env
-          mcopy -o -i "$IMG"@@17408 /tmp/seed-cp.env ::rasputin-seed.env
+          SEED_OFF=$(sfdisk -J "$IMG" | jq -r '.partitiontable.partitions[] | select((.type|ascii_upcase)=="EBD0A0A2-B9E5-4433-87C0-68B6B72699C7") | .start * 512')
+          test -n "$SEED_OFF" || { echo "::error::could not locate the seed partition in $IMG"; sfdisk -J "$IMG"; exit 1; }
+          mcopy -o -i "$IMG"@@${SEED_OFF} /tmp/seed-cp.env ::rasputin-seed.env
           # Ubuntu's ovmf package renamed the firmware files (the un-suffixed
           # OVMF_CODE.fd / OVMF_VARS.fd are gone on 24.04+; the 4M variants
           # are the modern names, and the secboot ones require signed

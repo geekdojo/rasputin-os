@@ -16,3 +16,10 @@
 # still boots to something debuggable. fsck passno 0 — keep it that way unless
 # fsck.ext4 ships.
 PARTLABEL=persistent	/var/lib/rasputin	ext4	defaults,nofail,x-systemd.makefs,x-systemd.growfs	0	0
+
+# The boot ESP (GRUB + kernel + grubenv), mounted rw so RAUC's grub-editenv can
+# update the A/B boot-counter (system.conf grubenv=/run/rasputin-esp/...); GRUB
+# reads the same grubenv at boot from its own prefix. By PARTLABEL "esp" — the
+# seed FAT is now its own auto-mounting RASPUTIN-OS partition (so it isn't hidden
+# in the Win/macOS GUI like an ESP). nofail: a wedged ESP must not block boot.
+PARTLABEL=esp	/run/rasputin-esp	vfat	rw,nofail	0	0
