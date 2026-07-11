@@ -118,13 +118,33 @@ fi
 # --- defaults for the remaining (optional) fields ----------------------------
 if [ -z "$NODE_ID" ]; then
 	# Derive a stable id from the SoC serial. Pi: /proc/cpuinfo Serial;
-	# x86: DMI board serial. Fall back to machine-id.
+	# x86: DMI board serial.
 	SERIAL=$(awk '/^Serial/ {print $3; exit}' /proc/cpuinfo 2>/dev/null || true)
 	if [ -z "$SERIAL" ] && [ -r /sys/class/dmi/id/board_serial ]; then
 		SERIAL=$(cat /sys/class/dmi/id/board_serial 2>/dev/null || true)
 	fi
-	[ -z "$SERIAL" ] && SERIAL=$(cat /etc/machine-id 2>/dev/null | cut -c1-12)
-	NODE_ID="node-$(echo "$SERIAL" | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9' | tail -c 8)"
+	SERIAL=$(echo "$SERIAL" | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9')
+	# Reject BIOS placeholder serials (unprogrammed on many mini-PCs) — they are
+	# NON-UNIQUE, so two such boards would collide on one node-id (the CWWK n100's
+	# board_serial "Default string" sanitizes to "defaultstring" -> "ltstring").
+	case "$SERIAL" in
+		defaultstring|tobefilledbyoem|none|na|null|unknown|serialnumber|systemserialnumber|oem|0|00000000|123456789) SERIAL="" ;;
+	esac
+	[ "${#SERIAL}" -lt 6 ] && SERIAL=""   # too short => not enough entropy to trust
+	if [ -n "$SERIAL" ]; then
+		NODE_ID="node-$(printf '%s' "$SERIAL" | tail -c 8)"
+	else
+		# No usable hardware serial: mint a RANDOM id, persisted so it is stable
+		# across reboots/OTA (a node's id must not change once enrolled). A reflash
+		# wipes $PERSIST and re-mints — correctly a new node. See #9.
+		IDFILE=$PERSIST/node-id.rand
+		if [ -r "$IDFILE" ]; then
+			NODE_ID=$(cat "$IDFILE")
+		else
+			NODE_ID="node-$(tr -d '-' < /proc/sys/kernel/random/uuid | cut -c1-8)"
+			(umask 077; printf '%s\n' "$NODE_ID" > "$IDFILE") 2>/dev/null || true
+		fi
+	fi
 fi
 
 # NATS URL fallback. A provisioned seed sets this explicitly; the fallback only
