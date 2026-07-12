@@ -344,7 +344,9 @@ jobs:
           # data — Win/macOS show it, unlike the hidden ESP), so find its byte
           # offset from the GPT rather than the old fixed ESP offset (17408).
           # mtools keeps the recipe identical to the macOS bench one.
-          printf 'RASPUTIN_NODE_ROLE=controlplane\nRASPUTIN_NATS_URL=\nRASPUTIN_CP_JOIN_TOKEN=\n' > /tmp/seed-cp.env
+          # RASPUTIN_NODE_ID is required for role=controlplane (firstboot fails
+          # loud without it — a real CP seed always carries one).
+          printf 'RASPUTIN_NODE_ROLE=controlplane\nRASPUTIN_NODE_ID=smoke-cp\nRASPUTIN_NATS_URL=\nRASPUTIN_CP_JOIN_TOKEN=\n' > /tmp/seed-cp.env
           SEED_OFF=$(sfdisk -J "$IMG" | jq -r '.partitiontable.partitions[] | select((.type|ascii_upcase)=="EBD0A0A2-B9E5-4433-87C0-68B6B72699C7") | .start * 512')
           test -n "$SEED_OFF" || { echo "::error::could not locate the seed partition in $IMG"; sfdisk -J "$IMG"; exit 1; }
           mcopy -o -i "$IMG"@@${SEED_OFF} /tmp/seed-cp.env ::rasputin-seed.env

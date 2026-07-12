@@ -117,6 +117,21 @@ if [ "$ROLE" != "controlplane" ] && [ -z "$JOIN_TOKEN" ]; then
 	exit 1
 fi
 
+# A controlplane seed must NAME the node. The serial fallback below is fine for
+# a compute/storage node (zero-touch adds), but the controlplane's id is the
+# cluster's identity anchor — its mesh hostname, the setup wizard's self-enroll
+# target, its inventory row — and every real provisioning path
+# (rasputin-provision, the Add-node wizard) always writes RASPUTIN_NODE_ID, so a
+# controlplane seed without one is by construction a hand-written/botched seed.
+# Fail loud like the role/token checks above rather than silently minting
+# node-<serial> (bit rasputin-local 2026-07-12: a leftover OTA-test hand-seed
+# left the CP named node-9bbaa24a — and, unnoticed alongside it, unenforced).
+if [ "$ROLE" = "controlplane" ] && [ -z "$NODE_ID" ]; then
+	log "ERROR: role=controlplane seed carries no RASPUTIN_NODE_ID — the controlplane must be named."
+	log "Re-generate the seed (rasputin-provision / Add node) or add RASPUTIN_NODE_ID, then reboot."
+	exit 1
+fi
+
 # --- defaults for the remaining (optional) fields ----------------------------
 if [ -z "$NODE_ID" ]; then
 	# Derive a stable id from the SoC serial. Pi: /proc/cpuinfo Serial;
