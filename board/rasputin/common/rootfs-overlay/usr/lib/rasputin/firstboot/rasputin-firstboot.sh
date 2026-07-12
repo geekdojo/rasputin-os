@@ -47,6 +47,7 @@ JOIN_TOKEN=""
 BUS_AUTH=""
 RELEASE_CHANNEL=""
 SSH_KEY=""
+NTP_SERVER=""
 
 if [ -f "$SEED_FILE" ]; then
 	log "reading seed $SEED_FILE"
@@ -59,6 +60,7 @@ if [ -f "$SEED_FILE" ]; then
 	BUS_AUTH="${RASPUTIN_BUS_AUTH:-}"
 	RELEASE_CHANNEL="${RASPUTIN_RELEASE_CHANNEL:-}"
 	SSH_KEY="${RASPUTIN_SSH_AUTHORIZED_KEY:-}"
+	NTP_SERVER="${RASPUTIN_NTP_SERVER:-}"
 else
 	log "no seed file at $SEED_FILE; using defaults"
 fi
@@ -170,6 +172,19 @@ RASPUTIN_NODE_ROLE=$ROLE
 RASPUTIN_NODE_ID=$NODE_ID
 RASPUTIN_NATS_URL=$NATS_URL
 EOF
+# Optional operator NTP server(s) — ALL roles: every node needs correct time to
+# mint/verify its mesh + API TLS (a no-RTC node with a bogus clock mints an
+# "expired" leaf). rasputin-timesync-apply.service renders this into a
+# timesyncd drop-in each boot; the image's numeric FallbackNTP is the safety
+# net when it's unset. provisioning.md "Time sync".
+if [ -n "$NTP_SERVER" ]; then
+	# node.env is SOURCED by sh (rasputin-hostname + rasputin-timesync-apply),
+	# so a space-separated value MUST be written double-quoted or the 2nd word
+	# executes as a command (same trap as the SSH key). Sanitize to host/IP/
+	# space chars first so the quoting can't be broken out of.
+	NTP_SERVER=$(printf '%s' "$NTP_SERVER" | tr -d '\n' | tr -cd 'A-Za-z0-9 .:_-')
+	[ -n "$NTP_SERVER" ] && echo "RASPUTIN_NTP_SERVER=\"$NTP_SERVER\"" >> "$NODE_ENV"
+fi
 # The controlplane needs to know its own id for the system.update self-skip
 # and the BMC host default (see control-plane/updates.md, bmc.md).
 if [ "$ROLE" = "controlplane" ]; then

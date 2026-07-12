@@ -1,0 +1,20 @@
+[Unit]
+Description=Apply the seed-provided NTP server(s) to systemd-timesyncd
+Documentation=https://github.com/geekdojo/rasputin-os
+# node.env is written by rasputin-firstboot; read it after (on later boots
+# firstboot is condition-skipped, which still satisfies the ordering). Ordered
+# before the agent/api so the operator's NTP is in effect before the api waits
+# for a synchronized clock to mint its HTTPS leaf. Every-boot oneshot, NOT part
+# of firstboot: firstboot is run-once, but /run is re-rendered each boot.
+After=rasputin-firstboot.service
+Before=rasputin-agent.service rasputin-api.service
+RequiresMountsFor=/var/lib/rasputin
+ConditionPathExists=/var/lib/rasputin/node.env
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/rasputin/timesync/rasputin-timesync-apply.sh
+
+[Install]
+WantedBy=multi-user.target

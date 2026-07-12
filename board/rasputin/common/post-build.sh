@@ -32,6 +32,12 @@ ln -sf /etc/systemd/system/rasputin-agent.service \
 # hostname isn't). Only the controlplane may answer rasputin.local via mDNS.
 ln -sf /etc/systemd/system/rasputin-hostname.service \
 	"$TARGET_DIR/etc/systemd/system/multi-user.target.wants/rasputin-hostname.service"
+# Apply the seed's RASPUTIN_NTP_SERVER (if any) to systemd-timesyncd, every boot
+# (/run drop-in; /etc is read-only). No-op when unset — the baked numeric
+# FallbackNTP (usr/lib/systemd/timesyncd.conf.d) still gets a no-RTC node correct
+# time on a DNS-less network so it doesn't mint an "expired" TLS leaf.
+ln -sf /etc/systemd/system/rasputin-timesync-apply.service \
+	"$TARGET_DIR/etc/systemd/system/multi-user.target.wants/rasputin-timesync-apply.service"
 
 # RAUC system config (A/B slots + GRUB backend + keyring). Per-SoC, so it's
 # copied from the board dir rather than the shared overlay. rauc errors without
