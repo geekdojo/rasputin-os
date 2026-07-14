@@ -12,7 +12,7 @@
 # release's published *.hash assets.
 ################################################################################
 
-RASPUTIN_AGENT_VERSION = 2026.07.3-dev.51
+RASPUTIN_AGENT_VERSION = 2026.07.4-dev.53
 RASPUTIN_AGENT_SITE = https://github.com/geekdojo/rasputin-control-plane/releases/download/v$(RASPUTIN_AGENT_VERSION)
 
 # Buildroot maps the target arch; the control-plane CI publishes one
