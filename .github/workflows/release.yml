@@ -586,7 +586,7 @@ jobs:
             || { echo "::error::leaf cert chain does not verify against root"; exit 1; }
           echo "tmpfs=/mnt/rasputin-sign" >> "$GITHUB_OUTPUT"
 
-      - name: Sign .raucb bundles + compress .img + collect metadata
+      - name: Sign .raucb bundles + compress .img + emit signed manifest
         id: sign
         run: |
           set -eu
@@ -644,6 +644,31 @@ jobs:
             --slurpfile artifacts /tmp/manifest-artifacts.jsonl \
             '{version:$version, channel:$channel, artifacts:$artifacts}' \
             > release-out/manifest.json
+
+          # Detached DER CMS signature over the manifest — the trust anchor
+          # for first-flash downloads. The .img.xz images aren't individually
+          # signed; their imageSha256 lives in manifest.json, so signing the
+          # manifest chains them to the root CA. Same recipe as the firewall
+          # repo's sign_file(); the signature embeds leaf + intermediate, so
+          # the public root CA alone verifies it:
+          #   openssl cms -verify -binary -inform DER \
+          #     -in manifest.json.sig -content manifest.json \
+          #     -CAfile rasputin-root-ca.pem
+          # (root CA: https://rasputin.geekdojo.com/rasputin-root-ca.pem)
+          openssl cms -sign -binary \
+            -in       release-out/manifest.json \
+            -signer   /mnt/rasputin-sign/leaf.pem \
+            -certfile /mnt/rasputin-sign/intermediate.pem \
+            -inkey    /mnt/rasputin-sign/leaf.key \
+            -outform DER \
+            -out      release-out/manifest.json.sig
+          # Prove the published verify command passes before shipping it.
+          openssl cms -verify -binary -inform DER \
+            -in release-out/manifest.json.sig \
+            -content release-out/manifest.json \
+            -CAfile /mnt/rasputin-sign/root-ca.pem -out /dev/null \
+            || { echo "::error::manifest.json.sig does not verify against the root CA"; exit 1; }
+
           echo "----- release-out/ -----" && ls -lh release-out/ && \
             echo "----- manifest.json -----" && cat release-out/manifest.json
 
@@ -662,6 +687,6 @@ jobs:
           fi
           gh release create "${{ steps.ver.outputs.version }}" \
             --title "Rasputin OS ${{ steps.ver.outputs.version }}" \
-            --notes "Channel: \`${{ steps.ver.outputs.channel }}\`. Verify the chain with the public root CA (\`vars.RASPUTIN_ROOT_CA_PEM\` on the geekdojo org); per-asset SHA-256 in \`manifest.json\`." \
+            --notes "Channel: \`${{ steps.ver.outputs.channel }}\`. Verify the chain with the public root CA (https://rasputin.geekdojo.com/rasputin-root-ca.pem): \`manifest.json.sig\` is a detached DER CMS signature over \`manifest.json\`, which carries per-asset SHA-256. Verify commands: https://rasputin.geekdojo.com/docs/agents/." \
             $PRERELEASE_FLAG \
             release-out/*
