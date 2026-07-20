@@ -20,3 +20,7 @@ Repo facts an agent should know:
 - The public root CA (trust anchor baked into images at
   `/etc/rasputin/trust/root-ca.pem`) is published at
   https://rasputin.geekdojo.com/rasputin-root-ca.pem.
+- A commit or PR that fixes a tracked issue must use a **closing keyword** —
+  `Fixes #N` / `Closes #N` — not a bare `(#N)` reference. Bare references leave the
+  issue open after the fix ships (audited 2026-07-20: four of six stale-open issues
+  across the rasputin repos were exactly this).
