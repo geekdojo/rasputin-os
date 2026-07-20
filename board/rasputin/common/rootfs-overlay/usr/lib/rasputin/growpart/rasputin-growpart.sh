@@ -32,6 +32,35 @@ set -eu
 log() { echo "rasputin-growpart: $*"; }
 GROWPART=/usr/lib/rasputin/growpart/growpart
 
+# Every run's outcome is also appended to a breadcrumb log on the persistent
+# partition itself — the journal is volatile, so the one boot where the grow
+# actually happens is unreadable after the post-grow reboot (#2). The first
+# token after the timestamp is a machine-readable outcome keyword:
+#   grown | already-full | deferred-trial | skipped | failed
+# Logging must never fail (or fail) the grow: the whole append is || true, and
+# timestamps may be pre-NTP fake time on a no-RTC first boot — post-mortems
+# should lean on the keyword and ordering, not the clock. Bounded by keeping
+# the newest 32 KiB once the file passes 64 KiB (steady state appends one
+# already-full line per boot).
+CRUMB_LOG=/var/lib/rasputin/growpart.log
+CRUMBED=""
+crumb() {
+	log "$*"
+	CRUMBED=1
+	{
+		if [ "$(wc -c <"$CRUMB_LOG" 2>/dev/null || echo 0)" -gt 65536 ]; then
+			tail -c 32768 "$CRUMB_LOG" >"$CRUMB_LOG.tmp" && mv "$CRUMB_LOG.tmp" "$CRUMB_LOG"
+		fi
+		echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $*" >>"$CRUMB_LOG"
+	} 2>/dev/null || true
+}
+# set -eu aborts leave no outcome line — catch them so a wedged grow is visible
+# in the breadcrumb, not just the (lost) journal. Non-zero exits only: the
+# not-a-mount path exits 0 without crumbing (nowhere durable to write), and
+# crumb sets CRUMBED, which disarms this for the post-reboot SIGTERM of the
+# sleep below.
+trap 'rc=$?; [ "$rc" -eq 0 ] || [ -n "$CRUMBED" ] || crumb "failed: exit=$rc — grow aborted, see journalctl -u rasputin-growpart on this boot"' EXIT
+
 # Resolve the persistent partition via its mount — works for GPT (PARTLABEL) and
 # MBR (PARTUUID) alike, since both mount at /var/lib/rasputin per the per-SoC fstab.
 PARTDEV="$(findmnt -no SOURCE /var/lib/rasputin 2>/dev/null || true)"
@@ -44,7 +73,7 @@ fi
 PARTBASE="${PARTDEV##*/}"                                      # nvme0n1p7 / sda4 / mmcblk0p7
 DISKBASE="$(lsblk -ndo pkname "$PARTDEV" 2>/dev/null || true)" # nvme0n1 / sda / mmcblk0
 if [ -z "$DISKBASE" ] || [ ! -b "/dev/$DISKBASE" ]; then
-	log "cannot resolve parent disk of $PARTDEV; nothing to do"
+	crumb "skipped: cannot resolve parent disk of $PARTDEV; nothing to do"
 	exit 0
 fi
 DISK="/dev/$DISKBASE"
@@ -58,7 +87,7 @@ TAIL=$(( DISK_SZ - (P_START + P_SZ) ))                        # unallocated sect
 # makes the unit safe every boot and prevents any reboot loop. Checked BEFORE the
 # trial guard below so an already-grown node never reboots, even mid-trial.
 if [ "$TAIL" -lt 65536 ]; then
-	log "$PARTDEV already fills $DISK ($((P_SZ / 2048)) MiB; $((TAIL / 2048)) MiB tail) — nothing to do"
+	crumb "already-full: $PARTDEV fills $DISK ($((P_SZ / 2048))MiB; $((TAIL / 2048))MiB tail) — nothing to do"
 	exit 0
 fi
 
@@ -73,7 +102,7 @@ RAUC_ST="$(rauc status 2>/dev/null)"
 BOOTED="$(printf '%s\n' "$RAUC_ST" | grep -i 'Booted from' | grep -oE 'rootfs\.[0-9]+' | head -1)"
 ACTIVE="$(printf '%s\n' "$RAUC_ST" | grep -i 'Activated'   | grep -oE 'rootfs\.[0-9]+' | head -1)"
 if [ -n "$BOOTED" ] && [ -n "$ACTIVE" ] && [ "$BOOTED" != "$ACTIVE" ]; then
-	log "in an uncommitted A/B trial (booted=$BOOTED, committed=$ACTIVE) — deferring grow+reboot to a committed boot"
+	crumb "deferred-trial: in an uncommitted A/B trial (booted=$BOOTED, committed=$ACTIVE) — deferring grow+reboot to a committed boot"
 	exit 0
 fi
 
@@ -101,19 +130,23 @@ dos)
 		| grep -iE 'type=0?[5f]([^0-9a-f]|$)' \
 		| sed -n 's#.*[^0-9]\([0-9][0-9]*\) :.*#\1#p' | head -1)"
 	if [ -z "$EXTNUM" ]; then
-		log "no extended partition found on $DISK (MBR) — cannot grow a logical; skipping"
+		crumb "skipped: no extended partition found on $DISK (MBR) — cannot grow a logical"
 		exit 0
 	fi
 	sh "$GROWPART" -u off "$DISK" "$EXTNUM"
 	sh "$GROWPART" -u off "$DISK" "$PARTNUM"
 	;;
 *)
-	log "unrecognized partition table '$PTTYPE' on $DISK; not growing"
+	crumb "skipped: unrecognized partition table '$PTTYPE' on $DISK; not growing"
 	exit 0
 	;;
 esac
 sync
 
+# The grown line must land (and sync) BEFORE the reboot — it's the one outcome
+# whose journal is guaranteed lost.
+crumb "grown: $PARTDEV $((P_SZ / 2048))MiB -> $(((P_SZ + TAIL) / 2048))MiB (table=$PTTYPE, part $PARTNUM); rebooting"
+sync
 log "table extended; rebooting so the kernel re-reads it and growfs expands the fs"
 systemctl reboot
 # Hold the oneshot open until the reboot lands so boot doesn't race ahead.
