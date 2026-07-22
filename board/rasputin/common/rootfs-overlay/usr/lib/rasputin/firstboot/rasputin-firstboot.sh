@@ -48,6 +48,7 @@ BUS_AUTH=""
 RELEASE_CHANNEL=""
 SSH_KEY=""
 NTP_SERVER=""
+BMC_HOST=""
 
 if [ -f "$SEED_FILE" ]; then
 	log "reading seed $SEED_FILE"
@@ -61,6 +62,7 @@ if [ -f "$SEED_FILE" ]; then
 	RELEASE_CHANNEL="${RASPUTIN_RELEASE_CHANNEL:-}"
 	SSH_KEY="${RASPUTIN_SSH_AUTHORIZED_KEY:-}"
 	NTP_SERVER="${RASPUTIN_NTP_SERVER:-}"
+	BMC_HOST="${RASPUTIN_BMC_HOST:-}"
 else
 	log "no seed file at $SEED_FILE; using defaults"
 fi
@@ -130,6 +132,41 @@ if [ "$ROLE" = "controlplane" ] && [ -z "$NODE_ID" ]; then
 	log "ERROR: role=controlplane seed carries no RASPUTIN_NODE_ID — the controlplane must be named."
 	log "Re-generate the seed (rasputin-provision / Add node) or add RASPUTIN_NODE_ID, then reboot."
 	exit 1
+fi
+
+# --- BMC-host serial-console policy (control-plane/bmc-bitscope.md §5) -------
+# On the node whose serial0 drives a BMC bus, that UART is the command
+# channel: no login getty (the baked serial-getty drop-in conditions on the
+# marker below) and no kernel serial console (stripped from both boot slots'
+# cmdline — printk onto an UNLOCKED bus is live power-command traffic). The
+# cmdline edit only takes effect on the next boot, so when it changes
+# anything we reboot ONCE, deliberately BEFORE .provisioned is stamped and
+# before the join token is consumed: this whole script re-runs cleanly on
+# the way back up and completes provisioning with the console already gone.
+# Runs before node.env so the danger window never overlaps an agent start
+# (rasputin-agent Requires= this unit).
+if [ "$BMC_HOST" = "1" ]; then
+	log "bmc-host node: suppressing serial console on serial0"
+	touch "$PERSIST/bmc-host"
+	/usr/lib/rasputin/bmc/strip-serial-console.sh
+	case $? in
+	10)
+		# Exit NON-zero on purpose: rasputin-agent Requires= this unit, and
+		# a zero exit would let it start in the seconds before the queued
+		# reboot lands. The "failed" status is transient and self-heals on
+		# the way back up (same fail-loud contract as the seed checks).
+		log "kernel serial console stripped from boot slots; rebooting once to apply"
+		sync
+		systemctl reboot
+		exit 1
+		;;
+	0) ;;
+	*)
+		log "WARNING: strip-serial-console failed (continuing; getty is still suppressed by the marker)"
+		;;
+	esac
+else
+	rm -f "$PERSIST/bmc-host"
 fi
 
 # --- defaults for the remaining (optional) fields ----------------------------
