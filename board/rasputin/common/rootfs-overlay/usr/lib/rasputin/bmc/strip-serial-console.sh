@@ -40,11 +40,13 @@ for dev in $BOOT_PARTS; do
 		umount "$MNT"
 		continue
 	fi
-	# Strip any ttyAMA console token (ttyAMA0 today; the Pi 5 may enumerate
-	# differently — config.txt carries the same caveat). Collapse the
-	# leftover double space; cmdline is one line.
-	if grep -q 'console=ttyAMA' "$CMDLINE"; then
-		sed -e 's/console=ttyAMA[0-9]*,[0-9]* *//g' -e 's/  */ /g' "$CMDLINE" > "$CMDLINE.tmp"
+	# Strip any serial console token — ttyS0 (the mini-UART = the header
+	# UART on this image, bench-verified 2026-07-23) and ttyAMA<n> (PL011,
+	# covered defensively; the Pi 5 may enumerate differently). The
+	# comma+baud requirement protects console=tty1. Collapse the leftover
+	# double space; cmdline is one line.
+	if grep -qE 'console=tty(S|AMA)[0-9]+,[0-9]+' "$CMDLINE"; then
+		sed -E -e 's/console=tty(S|AMA)[0-9]+,[0-9]+ *//g' -e 's/  */ /g' "$CMDLINE" > "$CMDLINE.tmp"
 		mv "$CMDLINE.tmp" "$CMDLINE"
 		sync
 		CHANGED=1
