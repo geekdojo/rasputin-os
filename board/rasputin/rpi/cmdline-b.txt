@@ -1,1 +1,1 @@
-root=PARTUUID=52415350-06 rootfstype=squashfs ro rootwait rauc.slot=B audit=0 cgroup_enable=memory cgroup_memory=1 console=ttyAMA0,115200 console=tty1
+root=PARTUUID=52415350-06 rootfstype=squashfs ro rootwait rauc.slot=B audit=0 cgroup_enable=memory cgroup_memory=1 console=ttyS0,115200 console=tty1
