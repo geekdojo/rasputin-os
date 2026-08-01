@@ -18,6 +18,15 @@ RequiresMountsFor=/var/lib/rasputin
 # uses this value verbatim (no per-node suffix; one agent per host).
 # node.env can still override it: EnvironmentFile beats Environment=.
 Environment=RASPUTIN_AGENT_STATE_DIR=/var/lib/rasputin/agent-state
+# How the controlplane's name guard repairs its own mDNS name. resolved probes
+# for the hostname once at boot and, if another host on the LAN already claims
+# it, backs off and NEVER re-probes — it neither renames nor reports, it just
+# silently stops publishing for the rest of the uptime (bench 2026-07-28: the
+# survivor couldn't resolve its own name even after the colliding host left,
+# until resolved was restarted by hand). The agent detects that and runs this.
+# Controlplane-only in effect — the guard doesn't start on other roles. Unset
+# it in node.env to make the guard detect-and-report without acting.
+Environment=RASPUTIN_MDNS_RECOVER_CMD=systemctl restart systemd-resolved
 # node.env is written by rasputin-firstboot onto the persistent partition.
 EnvironmentFile=-/var/lib/rasputin/node.env
 # Safety net for anything else that resolves paths relative to cwd (the
