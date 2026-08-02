@@ -26,7 +26,16 @@ Environment=RASPUTIN_AGENT_STATE_DIR=/var/lib/rasputin/agent-state
 # until resolved was restarted by hand). The agent detects that and runs this.
 # Controlplane-only in effect — the guard doesn't start on other roles. Unset
 # it in node.env to make the guard detect-and-report without acting.
-Environment=RASPUTIN_MDNS_RECOVER_CMD=systemctl restart systemd-resolved
+#
+# THE WHOLE ASSIGNMENT MUST BE QUOTED. systemd's Environment= splits on
+# whitespace, so the unquoted form set this to just "systemctl" and silently
+# discarded "restart systemd-resolved" as malformed assignments — the guard then
+# ran `sh -c "systemctl"`, which prints usage and repairs nothing. Detection
+# looked fine; recovery never once worked. Caught on the bench 2026-08-02, not
+# by CI: nothing tests that a unit file's env reaches the process intact. Same
+# trap the seed template already warns about for RASPUTIN_NTP_SERVER and the
+# SSH key — an unquoted space breaks the value, in sh and in systemd alike.
+Environment="RASPUTIN_MDNS_RECOVER_CMD=systemctl restart systemd-resolved"
 # node.env is written by rasputin-firstboot onto the persistent partition.
 EnvironmentFile=-/var/lib/rasputin/node.env
 # Safety net for anything else that resolves paths relative to cwd (the
