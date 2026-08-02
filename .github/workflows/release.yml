@@ -477,6 +477,31 @@ jobs:
           grep -q "rasputin-hostname: transient hostname set to rasputin (role=controlplane)" /tmp/console.log \
             || { echo "::error::rasputin-hostname.service did not set the controlplane hostname — mDNS rasputin.local would be broken; see console artifact"; exit 1; }
           echo "per-role hostname (rasputin) confirmed in boot output"
+          # No unit file may carry a malformed Environment= assignment.
+          #
+          # systemd's Environment= splits on whitespace, so an unquoted value
+          # containing a space is silently truncated and the remainder is
+          # dropped. That shipped: RASPUTIN_MDNS_RECOVER_CMD reached the agent
+          # as bare "systemctl", so the mDNS name guard's recovery ran
+          # `sh -c "systemctl"` and repaired nothing — for an entire release,
+          # past green CI, a clean security review, and a 93% mutation gate.
+          # Detection kept working, which is what made it invisible.
+          #
+          # systemd DID warn, on the console, on every boot:
+          #   /etc/systemd/system/rasputin-agent.service:29: Invalid
+          #   environment assignment, ignoring: restart
+          # Nobody was reading. This turns that warning into a build failure.
+          #
+          # Deliberately generic rather than asserting one expected value: it
+          # guards EVERY unit's Environment= lines, and it needs nothing from
+          # the guest beyond the console we already capture (the smoke has no
+          # shell in, and dumping the agent's env would leak
+          # RASPUTIN_CP_JOIN_TOKEN).
+          if grep -n "Invalid environment assignment" /tmp/console.log; then
+            echo "::error::a unit file has a malformed Environment= line (see the matches above) — systemd truncated the value at the first space, so the process is running with a silently wrong environment. Quote the whole assignment: Environment=\"VAR=value with spaces\""
+            exit 1
+          fi
+          echo "no malformed Environment= assignments in any unit"
           [ "$api" = 1 ] \
             || { echo "::error::rasputin-api never answered /healthz on :80 on the controlplane boot — unit failed to start, RASPUTIN_HTTP_ADDR regressed, or networking broke; see console artifact"; exit 1; }
           [ "$ui" = 1 ] \
