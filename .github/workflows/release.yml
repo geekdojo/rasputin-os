@@ -346,7 +346,13 @@ jobs:
           # mtools keeps the recipe identical to the macOS bench one.
           # RASPUTIN_NODE_ID is required for role=controlplane (firstboot fails
           # loud without it — a real CP seed always carries one).
-          printf 'RASPUTIN_NODE_ROLE=controlplane\nRASPUTIN_NODE_ID=smoke-cp\nRASPUTIN_NATS_URL=\nRASPUTIN_CP_JOIN_TOKEN=\n' > /tmp/seed-cp.env
+          # RASPUTIN_CLUSTER_ID is deliberately NOT the default "rasputin".
+          # Seeding a real cluster name is what makes this smoke exercise the
+          # ADR-0003 chain end to end — seed -> node.env -> hostname -> the
+          # api's derived RP ID. With the default, every assertion below would
+          # pass even if the whole naming chain were broken, because the
+          # fallback lands on exactly the values the old hardcodes carried.
+          printf 'RASPUTIN_NODE_ROLE=controlplane\nRASPUTIN_NODE_ID=smoke-cp\nRASPUTIN_CLUSTER_ID=smoke1\nRASPUTIN_NATS_URL=\nRASPUTIN_CP_JOIN_TOKEN=\n' > /tmp/seed-cp.env
           SEED_OFF=$(sfdisk -J "$IMG" | jq -r '.partitiontable.partitions[] | select((.type|ascii_upcase)=="EBD0A0A2-B9E5-4433-87C0-68B6B72699C7") | .start * 512')
           test -n "$SEED_OFF" || { echo "::error::could not locate the seed partition in $IMG"; sfdisk -J "$IMG"; exit 1; }
           mcopy -o -i "$IMG"@@${SEED_OFF} /tmp/seed-cp.env ::rasputin-seed.env
@@ -386,7 +392,7 @@ jobs:
               -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
               -drive if=pflash,format=raw,file=/tmp/vars.fd \
               -drive file="$IMG",format=raw,if=virtio \
-              -nic user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:18080-:80 \
+              -nic user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:18080-:80,hostfwd=tcp:127.0.0.1:18443-:443 \
               -serial mon:stdio > /tmp/console.log 2>&1 ) &
           QPID=$!
           ok=0
@@ -474,9 +480,35 @@ jobs:
           # baked "rasputin-node" placeholder to "rasputin" — that transient
           # hostname is what resolved announces as rasputin.local (mDNS
           # itself can't be asserted under user-mode networking).
-          grep -q "rasputin-hostname: transient hostname set to rasputin (role=controlplane)" /tmp/console.log \
-            || { echo "::error::rasputin-hostname.service did not set the controlplane hostname — mDNS rasputin.local would be broken; see console artifact"; exit 1; }
-          echo "per-role hostname (rasputin) confirmed in boot output"
+          grep -q "rasputin-hostname: transient hostname set to smoke1 (role=controlplane)" /tmp/console.log \
+            || { echo "::error::the controlplane hostname did not follow RASPUTIN_CLUSTER_ID — the seeded cluster name never reached the hostname (check firstboot node.env pass-through and rasputin-hostname.sh); the cluster would be unreachable at smoke1.local; see console artifact"; exit 1; }
+          echo "per-cluster hostname (smoke1) confirmed in boot output"
+          # The api must DERIVE its WebAuthn identity from the same cluster id.
+          # This is the assertion the naming work most needs: credentials bind
+          # to the RP ID, so a wrong derivation does not error — it produces a
+          # cluster whose passkeys silently cannot be used.
+          #
+          # Asked over HTTP rather than grepped from the console, for two
+          # reasons. The api logs to the journal and ONLY kmsg-mirrored lines
+          # (firstboot, rasputin-hostname) reach the serial console, so a
+          # console grep here could never match. And this is the stronger
+          # check anyway: register/begin returns the real
+          # PublicKeyCredentialCreationOptions, so it proves what WebAuthn will
+          # actually use rather than what something printed.
+          #
+          # Unauthenticated on purpose: first-user registration is open until a
+          # user exists, which is exactly this freshly-provisioned box. HTTPS
+          # because :80 is only the bootstrap/redirect surface; -k because the
+          # leaf is signed by the per-installation Mesh CA.
+          RPID=$(curl -sk --max-time 10 -X POST https://127.0.0.1:18443/api/auth/register/begin \
+            -H 'Content-Type: application/json' \
+            -d '{"name":"smoke","displayName":"Smoke Test"}' | jq -r '.publicKey.rp.id // empty')
+          if [ "$RPID" != "smoke1.local" ]; then
+            echo "::error::the api's WebAuthn RP ID is '${RPID:-<no response>}', expected 'smoke1.local' — it did not derive from RASPUTIN_CLUSTER_ID. Every passkey would bind to the wrong origin."
+            grep -o "rasputin-api: cluster identity:.*" /tmp/console.log || true
+            exit 1
+          fi
+          echo "api derived its WebAuthn RP ID from the cluster id ($RPID)"
           # No unit file may carry a malformed Environment= assignment.
           #
           # systemd's Environment= splits on whitespace, so an unquoted value
