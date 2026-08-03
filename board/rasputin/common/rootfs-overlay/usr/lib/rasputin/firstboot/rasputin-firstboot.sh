@@ -42,6 +42,13 @@ log() {
 # to the cmdline/defaults below.
 ROLE=""
 NODE_ID=""
+# The cluster's name. ADR-0003 makes this the source of the node's identity —
+# mDNS hostname, NATS URL, Headscale server_url, leaf SANs, WebAuthn RP ID —
+# and defaults it to "rasputin" so every installation that predates the change
+# is grandfathered untouched. Pre-set here (not just inside the seed branch)
+# because this script runs under `set -eu`: a node booting with NO seed must
+# still have a value, and that path is the bootstrap case.
+CLUSTER_ID="rasputin"
 NATS_URL=""
 JOIN_TOKEN=""
 BUS_AUTH=""
@@ -56,6 +63,7 @@ if [ -f "$SEED_FILE" ]; then
 	. "$SEED_FILE"
 	ROLE="${RASPUTIN_NODE_ROLE:-}"
 	NODE_ID="${RASPUTIN_NODE_ID:-}"
+	CLUSTER_ID="${RASPUTIN_CLUSTER_ID:-rasputin}"
 	NATS_URL="${RASPUTIN_NATS_URL:-}"
 	JOIN_TOKEN="${RASPUTIN_CP_JOIN_TOKEN:-}"
 	BUS_AUTH="${RASPUTIN_BUS_AUTH:-}"
@@ -222,6 +230,7 @@ umask 077
 cat > "$NODE_ENV" <<EOF
 RASPUTIN_NODE_ROLE=$ROLE
 RASPUTIN_NODE_ID=$NODE_ID
+RASPUTIN_CLUSTER_ID=$CLUSTER_ID
 RASPUTIN_NATS_URL=$NATS_URL
 EOF
 # Optional operator NTP server(s) — ALL roles: every node needs correct time to
