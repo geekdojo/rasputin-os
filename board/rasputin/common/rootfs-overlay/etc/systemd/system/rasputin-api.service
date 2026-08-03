@@ -21,13 +21,18 @@ Environment=RASPUTIN_DATA_DIR=/var/lib/rasputin
 # First-run surface: HTTP :80 is the bootstrap/redirect listener (and keeps
 # serving /healthz over plain HTTP — the QEMU smoke and the agent probe it);
 # HTTPS :443 carries the real UI/API. The unit runs as root, so low ports
-# need no extra capability grants. WebAuthn RP ID is the mDNS name the
-# image announces (rasputin-hostname.service + resolved): rasputin.local.
+# need no extra capability grants.
 Environment=RASPUTIN_HTTP_ADDR=:80
 Environment=RASPUTIN_HTTPS_ADDR=:443
-Environment=RASPUTIN_RP_ID=rasputin.local
-Environment=RASPUTIN_RP_ORIGINS=https://rasputin.local
-Environment=RASPUTIN_PUBLIC_BASE_URL=https://rasputin.local
+# RASPUTIN_RP_ID / _RP_ORIGINS / _PUBLIC_BASE_URL are deliberately NOT set here.
+# The api derives them from RASPUTIN_CLUSTER_ID (written into node.env by
+# firstboot) as "<cluster-id>.local" — ADR-0003, control-plane #63. Hardcoding
+# them here would win over the derivation, because Environment= is what the api
+# reads and an explicit value always beats a default: every cluster would keep
+# announcing rasputin.local no matter what it was named.
+# The cluster id defaults to "rasputin", so this derives exactly the values
+# these three lines used to carry — which is why removing them changes nothing
+# for any existing installation.
 # Embedded NATS must be reachable from the other nodes' agents (firewall,
 # compute) — they attach LAN-first, mesh-second (first-run-bootstrap.md
 # decision #6). The api's code default is 127.0.0.1 (dev posture).
@@ -41,11 +46,17 @@ Environment=RASPUTIN_NATS_HOST=0.0.0.0
 # DHCP IP: resolveServerHost() would otherwise bake the current lease into
 # Headscale + every node's tailscale state, so a lease change drops the whole
 # mesh (bench: .180→.181→.182 across reboots). The leaf cert already carries
-# rasputin.local in its SAN. URL-only (no RASPUTIN_HEADSCALE_API_KEY) keeps the
-# backend self-hosted — external mode needs BOTH (main.go wireMesh hasExternal).
-# Requires every node to resolve rasputin.local at the OS level (CP: resolved
-# mDNS via the stub resolv.conf below; firewall: its own mDNS resolver).
-Environment=RASPUTIN_HEADSCALE_URL=https://rasputin.local:18080
+# the cluster's name in its SAN. Requires every node to resolve that name at
+# the OS level (CP: resolved mDNS via the stub resolv.conf below; firewall: its
+# own mDNS resolver).
+#
+# Also NOT set here, and this one is subtler: the api reads
+# RASPUTIN_HEADSCALE_URL in TWO places. As the supervisor's server_url it now
+# derives "https://<cluster-id>.local:18080". But wireMesh also uses its
+# PRESENCE (with RASPUTIN_HEADSCALE_API_KEY) to select an EXTERNAL Headscale —
+# hasExternal needs BOTH, so setting the URL alone was always self-hosted, and
+# removing it keeps that branch identical while letting the name follow the
+# cluster id.
 EnvironmentFile=-/var/lib/rasputin/node.env
 ExecStart=/usr/bin/rasputin-api
 Restart=always
