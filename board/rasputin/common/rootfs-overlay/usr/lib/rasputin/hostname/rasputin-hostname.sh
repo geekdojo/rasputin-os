@@ -38,6 +38,10 @@ if [ -f "$NODE_ENV" ]; then
 	. "$NODE_ENV"
 	ROLE="${RASPUTIN_NODE_ROLE:-}"
 	NODE_ID="${RASPUTIN_NODE_ID:-}"
+	# ADR-0003: the controlplane answers to its CLUSTER's name, not a shared
+	# literal. Defaults to "rasputin", so a node whose node.env predates
+	# per-cluster naming keeps the exact hostname it has always had.
+	CLUSTER_ID="${RASPUTIN_CLUSTER_ID:-rasputin}"
 else
 	# RequiresMountsFor guarantees the partition is mounted; a missing
 	# node.env means firstboot never completed. Keep the baked placeholder
@@ -48,7 +52,35 @@ else
 fi
 
 if [ "$ROLE" = "controlplane" ]; then
-	NAME="rasputin"
+	# This value becomes a DNS label: the mDNS name the whole cluster is
+	# reached by, the CN/SAN of the api's TLS leaf, the WebAuthn RP ID, and the
+	# host every node's seeded NATS URL dials. Nothing upstream validates it —
+	# rasputin-provision accepts any --cluster-id string — so it is validated
+	# HERE, at the last point before it becomes the machine's identity.
+	#
+	# Lowercase first rather than reject: DNS labels are case-insensitive, and
+	# firstboot already lowercases the DMI serial when deriving a node id, so
+	# "Home1" becoming "home1" is consistent rather than surprising.
+	CLUSTER_ID=$(printf '%s' "$CLUSTER_ID" | tr 'A-Z' 'a-z')
+	case "$CLUSTER_ID" in
+		"" | -* | *- | *[!a-z0-9-]*) CLUSTER_VALID=no ;;
+		*) CLUSTER_VALID=yes ;;
+	esac
+	if [ "${#CLUSTER_ID}" -gt 63 ]; then
+		CLUSTER_VALID=no
+	fi
+
+	if [ "$CLUSTER_VALID" = yes ]; then
+		NAME="$CLUSTER_ID"
+	else
+		# Fall back rather than fail. This runs at boot on a HEADLESS box: an
+		# invalid hostname means no mDNS name at all, so the operator has no
+		# way in and nothing to read. "rasputin" at least keeps it reachable —
+		# the historical behaviour — and if that now collides with another
+		# cluster, the agent's name guard detects and reports it.
+		log "WARNING: cluster id '$CLUSTER_ID' is not a valid DNS label (a-z 0-9 -, no leading/trailing -, <=63 chars); falling back to 'rasputin'. This node will NOT answer to its cluster's name — re-provision with a valid --cluster-id."
+		NAME="rasputin"
+	fi
 else
 	NAME="$NODE_ID"
 fi
