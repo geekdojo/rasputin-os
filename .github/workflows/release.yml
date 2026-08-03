@@ -434,6 +434,18 @@ jobs:
               root=$(cat /tmp/root.body 2>/dev/null || true)
               case "$root" in *"<html"*|*"<!DOCTYPE"*) ui=1;; esac
               case "$rcode" in 301|302|307|308) ui=1;; esac
+              # Capture the api's WebAuthn RP ID while the VM is STILL RUNNING.
+              # It is asserted further down with the console checks, but it can
+              # only be COLLECTED here: everything below runs after the qemu
+              # kill, so an HTTP call there talks to a dead machine and returns
+              # nothing — which reads exactly like a failed derivation.
+              # HTTPS because :80 is only the bootstrap/redirect surface; -k
+              # because the leaf is signed by the per-installation Mesh CA.
+              # Unauthenticated on purpose: first-user registration is open
+              # until a user exists, which is this freshly-provisioned box.
+              RPID=$(curl -sk --max-time 10 -X POST https://127.0.0.1:18443/api/auth/register/begin \
+                -H 'Content-Type: application/json' \
+                -d '{"name":"smoke","displayName":"Smoke Test"}' | jq -r '.publicKey.rp.id // empty')
             fi
           fi
           # Uptime soak: retry-until-success probes are blind to a crash
@@ -500,9 +512,6 @@ jobs:
           # user exists, which is exactly this freshly-provisioned box. HTTPS
           # because :80 is only the bootstrap/redirect surface; -k because the
           # leaf is signed by the per-installation Mesh CA.
-          RPID=$(curl -sk --max-time 10 -X POST https://127.0.0.1:18443/api/auth/register/begin \
-            -H 'Content-Type: application/json' \
-            -d '{"name":"smoke","displayName":"Smoke Test"}' | jq -r '.publicKey.rp.id // empty')
           if [ "$RPID" != "smoke1.local" ]; then
             echo "::error::the api's WebAuthn RP ID is '${RPID:-<no response>}', expected 'smoke1.local' — it did not derive from RASPUTIN_CLUSTER_ID. Every passkey would bind to the wrong origin."
             grep -o "rasputin-api: cluster identity:.*" /tmp/console.log || true
@@ -559,10 +568,20 @@ jobs:
   # marked as prerelease.
   sign-and-release:
     needs: [build, smoke-amd64]
+    # A failing smoke must BLOCK publication. It did not: `!cancelled()` in the
+    # condition below meant the job ran on any non-cancelled outcome, so
+    # 2026.07.9-dev.136 published to the dev channel with a red smoke
+    # (2026-08-03). A gate that does not gate is worse than no gate — it reads
+    # as validation on the release page.
+    #
+    # Kept as an explicit result check rather than dropping !cancelled(),
+    # because that flag is doing separate work: it decouples this job from the
+    # cm5 build matrix, so an arm64 hardware-bring-up failure does not block an
+    # otherwise-good amd64 publish. Both concerns coexist.
     # Publishes on a tag (stable or legacy -dev tag) OR on a dispatch with
     # publish=true (a run-number-versioned dev release). Bench dispatches
     # (full_build only) skip this and just produce artifacts.
-    if: ${{ !cancelled() && (startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && (inputs.publish == true || inputs.publish == 'true'))) }}
+    if: ${{ !cancelled() && needs.smoke-amd64.result == 'success' && (startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && (inputs.publish == true || inputs.publish == 'true'))) }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
