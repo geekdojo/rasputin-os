@@ -38,6 +38,12 @@ ln -sf /etc/systemd/system/rasputin-hostname.service \
 # time on a DNS-less network so it doesn't mint an "expired" TLS leaf.
 ln -sf /etc/systemd/system/rasputin-timesync-apply.service \
 	"$TARGET_DIR/etc/systemd/system/multi-user.target.wants/rasputin-timesync-apply.service"
+# Backfill RASPUTIN_CLUSTER_ID into a pre-E2 node.env, every boot, before the
+# api derives its identity from it. No-op on fresh >=E2 installs (firstboot
+# already wrote the key) and on dev (no node.env). One-time migration for
+# clusters provisioned before per-cluster naming — control-plane #75.
+ln -sf /etc/systemd/system/rasputin-clusterid-backfill.service \
+	"$TARGET_DIR/etc/systemd/system/multi-user.target.wants/rasputin-clusterid-backfill.service"
 
 # RAUC system config (A/B slots + GRUB backend + keyring). Per-SoC, so it's
 # copied from the board dir rather than the shared overlay. rauc errors without
