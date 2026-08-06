@@ -1,0 +1,24 @@
+[Unit]
+Description=Backfill RASPUTIN_CLUSTER_ID into a pre-E2 node.env (one-time migration)
+Documentation=https://github.com/geekdojo/rasputin-control-plane/issues/75
+# node.env is written by rasputin-firstboot; read it after (on later boots
+# firstboot is condition-skipped, which still satisfies the ordering). Ordered
+# before hostname AND the agent/api so that whichever reads the cluster-id sees
+# the completed node.env — the api's identity derivation has no default of its
+# own and breaks on a missing id. Every-boot oneshot, NOT part of firstboot:
+# firstboot is run-once, but an OS update swaps the rootfs while keeping the old
+# persistent node.env, which is exactly the case this migration exists to fix.
+After=rasputin-firstboot.service
+Before=rasputin-hostname.service rasputin-agent.service rasputin-api.service
+RequiresMountsFor=/var/lib/rasputin
+# The appliance gate: a provisioned node has node.env; a dev box does not, so
+# this unit is condition-skipped there and never rewrites a developer's env.
+ConditionPathExists=/var/lib/rasputin/node.env
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/rasputin/clusterid/rasputin-clusterid-backfill.sh
+
+[Install]
+WantedBy=multi-user.target
