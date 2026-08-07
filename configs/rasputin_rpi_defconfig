@@ -55,6 +55,10 @@ BR2_TARGET_GENERIC_ROOT_PASSWD="rasputin"
 # functionally depends on them — see rasputin_n100_defconfig).
 BR2_PACKAGE_SYSTEMD_NETWORKD=y
 BR2_PACKAGE_SYSTEMD_RESOLVED=y
+# systemd-coredump — see rasputin_n100_defconfig. Capture the intermittent rauc
+# double-free (rasputin-os#8), which was seen on THIS arch (arm64/Pi); cores go
+# to the persistent partition, hard-capped (overlay coredump.conf.d + symlink).
+BR2_PACKAGE_SYSTEMD_COREDUMP=y
 
 # --- kernel: Raspberry Pi FORK (raspberrypi/linux), bcm2712 — Pi 5 / CM5 ---
 # Switched from mainline 2026-06-25: a brand-new (rev 1.1 / "D0" silicon) Pi 5
