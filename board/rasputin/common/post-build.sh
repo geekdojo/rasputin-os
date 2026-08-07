@@ -44,6 +44,13 @@ ln -sf /etc/systemd/system/rasputin-timesync-apply.service \
 # clusters provisioned before per-cluster naming — control-plane #75.
 ln -sf /etc/systemd/system/rasputin-clusterid-backfill.service \
 	"$TARGET_DIR/etc/systemd/system/multi-user.target.wants/rasputin-clusterid-backfill.service"
+# Bind the persistent coredump store over /var/lib/systemd/coredump so
+# systemd-coredump can write cores on the read-only rootfs (diagnostic for the
+# rauc double-free, rasputin-os#8). See the unit for why a bind mount and not a
+# baked symlink. Best-effort: ConditionPathIsMountPoint skips it if persistent
+# didn't mount, and it's a plain Wants — a failure never blocks boot.
+ln -sf /etc/systemd/system/rasputin-coredump-store.service \
+	"$TARGET_DIR/etc/systemd/system/multi-user.target.wants/rasputin-coredump-store.service"
 
 # RAUC system config (A/B slots + GRUB backend + keyring). Per-SoC, so it's
 # copied from the board dir rather than the shared overlay. rauc errors without

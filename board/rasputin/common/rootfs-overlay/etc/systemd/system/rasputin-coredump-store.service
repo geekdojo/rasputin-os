@@ -1,0 +1,30 @@
+# Back /var/lib/systemd/coredump with the persistent partition.
+#
+# systemd-coredump writes cores to the fixed path /var/lib/systemd/coredump,
+# which lives on the read-only squashfs rootfs — unwritable. A baked symlink
+# onto the persistent partition (the /var/lib/docker idiom) CANNOT be used here:
+# systemd-coredump's package device table creates /var/lib/systemd/coredump as a
+# real directory during image assembly, and a symlink at that path fails
+# `makedevs` at build time. So instead we bind-mount a persistent-partition dir
+# over the (baked, empty, read-only) mountpoint at runtime — the mountpoint
+# already exists, and a bind mount makes it writable.
+#
+# Cores are hard-capped by coredump.conf.d/rasputin.conf (KeepFree guards the
+# partition). Purpose: capture the intermittent rauc double-free (rasputin-os#8),
+# which is A/B-OTA-adjacent, so the store must survive a reboot — hence
+# persistent, not tmpfs.
+[Unit]
+Description=Persistent-partition backing store for systemd-coredump
+RequiresMountsFor=/var/lib/rasputin
+ConditionPathIsMountPoint=/var/lib/rasputin
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/mkdir -p /var/lib/rasputin/coredump
+# -o bind is understood by both busybox and util-linux mount.
+ExecStart=/bin/mount -o bind /var/lib/rasputin/coredump /var/lib/systemd/coredump
+ExecStop=/bin/umount /var/lib/systemd/coredump
+
+[Install]
+WantedBy=multi-user.target
