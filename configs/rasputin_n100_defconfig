@@ -55,6 +55,12 @@ BR2_TARGET_GENERIC_ROOT_PASSWD="rasputin"
 # (Buildroot 2025.02.3 ships systemd 256.7, built with default-mdns=yes.)
 BR2_PACKAGE_SYSTEMD_NETWORKD=y
 BR2_PACKAGE_SYSTEMD_RESOLVED=y
+# systemd-coredump: capture a backtrace on the next crash (esp. the intermittent
+# rauc double-free abort, rasputin-os#8 — deferred pending a repro/core). Cores
+# are routed to the persistent partition and hard-capped; see the overlay
+# (var/lib/systemd/coredump symlink, etc/systemd/coredump.conf.d/rasputin.conf,
+# tmpfiles.d/rasputin.conf). Pulls target elfutils (backtrace symbolisation).
+BR2_PACKAGE_SYSTEMD_COREDUMP=y
 
 # --- kernel: arch default config + Rasputin fragment ---
 # LATEST_VERSION tracks Buildroot's tested default for this release; pin a
