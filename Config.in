@@ -5,6 +5,7 @@
 
 menu "Rasputin"
 
+source "$BR2_EXTERNAL_RASPUTIN_PATH/package/caddy/Config.in"
 source "$BR2_EXTERNAL_RASPUTIN_PATH/package/rasputin-agent/Config.in"
 source "$BR2_EXTERNAL_RASPUTIN_PATH/package/rasputin-api/Config.in"
 

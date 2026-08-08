@@ -1,0 +1,14 @@
+config BR2_PACKAGE_CADDY
+	bool "caddy"
+	default y
+	help
+	  Stock Caddy web server (ADR-0004 §7) — the node-local reverse proxy
+	  the rasputin-agent runs to front apps: TLS-terminate each app's
+	  Mesh-CA leaf and Host-route to its loopback port. Driven entirely via
+	  the admin API by the agent; auto-HTTPS is off (Rasputin mints and
+	  ships the leaves, never Caddy's ACME).
+
+	  A pre-built pure-Go static release binary (CGO-free, so it runs on the
+	  musl userland with no extra deps). See package/caddy/caddy.mk.
+
+	  https://caddyserver.com
