@@ -326,7 +326,9 @@ jobs:
       - name: Install QEMU + OVMF (UEFI firmware) + mtools
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-system-x86 ovmf mtools
+          # bind9-dnsutils: dig, for the CP-nameserver assertion below (the
+          # api's DNS listener is queried through a hostfwd, not grepped).
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 ovmf mtools bind9-dnsutils
       - uses: actions/download-artifact@v4
         with:
           pattern: n100-*
@@ -392,7 +394,7 @@ jobs:
               -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
               -drive if=pflash,format=raw,file=/tmp/vars.fd \
               -drive file="$IMG",format=raw,if=virtio \
-              -nic user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:18080-:80,hostfwd=tcp:127.0.0.1:18443-:443 \
+              -nic user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:18080-:80,hostfwd=tcp:127.0.0.1:18443-:443,hostfwd=udp:127.0.0.1:15353-:53,hostfwd=tcp:127.0.0.1:15353-:53 \
               -serial mon:stdio > /tmp/console.log 2>&1 ) &
           QPID=$!
           ok=0
@@ -423,7 +425,7 @@ jobs:
           # doesn't break across the api's HTTPS rollout.
           # Validated locally 2026-06-11: api answers within ~30s of
           # multi-user under TCG; budget 240s for slower runners.
-          api=0 ui=0
+          api=0 ui=0 NSUDP="" NSTCP=""
           if [ "$fb" = 1 ]; then
             for _ in $(seq 1 48); do
               if [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 http://127.0.0.1:18080/healthz || true)" = "200" ]; then api=1; break; fi
@@ -446,6 +448,35 @@ jobs:
               RPID=$(curl -sk --max-time 10 -X POST https://127.0.0.1:18443/api/auth/register/begin \
                 -H 'Content-Type: application/json' \
                 -d '{"name":"smoke","displayName":"Smoke Test"}' | jq -r '.publicKey.rp.id // empty')
+              # CP nameserver (ADR-0004 §3/§8): ask the guest's own :53 for the
+              # cluster zone apex over BOTH transports, via the hostfwd on the
+              # qemu line. Collected here for the same reason as RPID —
+              # everything below runs after the qemu kill, so a query there
+              # talks to a dead machine and reads exactly like a real failure.
+              #
+              # Queried rather than grepped from the console because the api
+              # logs to the journal and only kmsg-mirrored lines reach the
+              # serial console (see the RP ID note below) — its "nameserver
+              # authoritative for ..." line is simply not in console.log. As
+              # with RPID, asking is the stronger check anyway: it proves the
+              # responder ANSWERS, not that something printed.
+              #
+              # UDP and TCP are asked SEPARATELY on purpose. The api binds the
+              # two transports independently (control-plane #126 — deriving the
+              # TCP port from the UDP bind was a TOCTOU that intermittently
+              # failed CI), so a UDP answer says nothing about TCP.
+              #
+              # This is worth a gate because the failure is SILENT: a
+              # nameserver bind error is deliberately non-fatal (the api logs
+              # it and serves on without DNS, on the reasoning that a control
+              # plane that won't start is worse than one that won't resolve).
+              # Nothing crashes, healthz stays 200, and no other assertion in
+              # this smoke would notice the cluster had lost name resolution.
+              # No poll needed: the api binds :53 long before it listens on
+              # :80, so healthz answering means the bind already succeeded or
+              # already failed.
+              NSUDP=$(dig +short +time=5 +tries=2 @127.0.0.1 -p 15353 smoke1.internal A 2>/dev/null | head -1)
+              NSTCP=$(dig +short +time=5 +tries=2 +tcp @127.0.0.1 -p 15353 smoke1.internal A 2>/dev/null | head -1)
             fi
           fi
           # Uptime soak: retry-until-success probes are blind to a crash
@@ -518,6 +549,25 @@ jobs:
             exit 1
           fi
           echo "api derived its WebAuthn RP ID from the cluster id ($RPID)"
+          # The cluster zone must resolve over UDP *and* TCP. Both answers are
+          # the CP's own LAN IP (the SLIRP guest address); the value is checked
+          # for shape rather than pinned to 10.0.2.15 so a qemu networking
+          # change doesn't false-fail this.
+          case "$NSUDP" in
+            ''|*[!0-9.]*)
+              echo "::error::the CP nameserver did not answer smoke1.internal over UDP on the guest's :53 (got '${NSUDP:-<no answer>}') — the responder failed to bind, or never started. This failure is SILENT on real hardware: the bind error is non-fatal, so the control plane serves on with no name resolution and healthz still returns 200. Check the api journal for 'nameserver not started'."
+              exit 1;;
+          esac
+          case "$NSTCP" in
+            ''|*[!0-9.]*)
+              echo "::error::the CP nameserver answered smoke1.internal over UDP but NOT TCP (got '${NSTCP:-<no answer>}') — the TCP listener failed to bind. Resolvers fall back to TCP for answers truncated past 512 bytes, so this breaks only large responses: precisely the regression that ships unnoticed. See control-plane #126 for why the two transports bind independently."
+              exit 1;;
+          esac
+          if [ "$NSUDP" != "$NSTCP" ]; then
+            echo "::error::the CP nameserver returned different addresses for smoke1.internal over UDP ($NSUDP) and TCP ($NSTCP) — the two listeners are not serving the same handler."
+            exit 1
+          fi
+          echo "CP nameserver answered smoke1.internal over UDP and TCP ($NSUDP)"
           # No unit file may carry a malformed Environment= assignment.
           #
           # systemd's Environment= splits on whitespace, so an unquoted value
