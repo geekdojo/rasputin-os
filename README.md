@@ -1,7 +1,7 @@
 # rasputin-os
 
 [![Release](https://github.com/geekdojo/rasputin-os/actions/workflows/release.yml/badge.svg)](https://github.com/geekdojo/rasputin-os/actions/workflows/release.yml)
-[![Latest](https://img.shields.io/github/v/release/geekdojo/rasputin-os?include_prereleases&label=release)](https://github.com/geekdojo/rasputin-os/releases)
+[![Latest](https://img.shields.io/github/v/release/geekdojo/rasputin-os?label=release)](https://github.com/geekdojo/rasputin-os/releases)
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-E8590C.svg)](LICENSE)
 
 The node OS of **Rasputin** — an open-source homelab cluster system: a small
