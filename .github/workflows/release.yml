@@ -718,24 +718,39 @@ jobs:
           # certificate purpose" (X509_V_ERR_INVALID_PURPOSE, error 26) after
           # both SKU builds and the QEMU smoke had already run.
           #
-          # Each purpose below is a real consumer, so name them when one fails:
-          #   smimesign  OpenSSL CMS_verify's DEFAULT. `rauc bundle` and EVERY
-          #              deployed board enforce it, because no rasputin-os
-          #              rauc-system.conf sets [keyring] check-purpose. This is
-          #              the one that decides whether the fleet can install.
-          #   codesign   what RAUC enforces once check-purpose=codesign is set,
-          #              and what the published `openssl cms -verify` guidance
-          #              in the release notes implies.
+          # 1. smimesign is OpenSSL CMS_verify's DEFAULT purpose. `rauc bundle`
+          #    and EVERY deployed board enforce it, because no rasputin-os
+          #    rauc-system.conf sets [keyring] check-purpose. This is the check
+          #    that decides whether the fleet can install an update at all.
+          #    Never redirect its stderr — see the note on (2).
+          openssl verify -CAfile /mnt/rasputin-sign/root-ca.pem \
+            -untrusted /mnt/rasputin-sign/intermediate.pem \
+            -purpose smimesign /mnt/rasputin-sign/leaf.pem \
+            || { echo "::error::signing leaf does not satisfy the 'smimesign' X509 purpose, which is what OpenSSL CMS_verify enforces by default — i.e. every deployed board. Artifacts this leaf signs cannot be installed by the fleet. Re-mint with scripts/pki-init.sh --rotate-leaf in rasputin-control-plane."; exit 1; }
+          echo "leaf satisfies X509 purpose: smimesign"
+
+          # 2. RAUC's codesign semantics, checked DIRECTLY on the extensions
+          #    rather than through OpenSSL's "codesign" purpose.
           #
-          # Checking both means a leaf that satisfies only one can never reach
-          # a published artifact again, in either direction.
-          for purpose in smimesign codesign; do
-            openssl verify -CAfile /mnt/rasputin-sign/root-ca.pem \
-              -untrusted /mnt/rasputin-sign/intermediate.pem \
-              -purpose "$purpose" /mnt/rasputin-sign/leaf.pem >/dev/null 2>&1 \
-              || { echo "::error::signing leaf does not satisfy the '$purpose' X509 purpose. Every consumer using it will refuse artifacts this leaf signs; for smimesign that is the whole deployed fleet. Re-mint with scripts/pki-init.sh --rotate-leaf (rasputin-control-plane), which now verifies both purposes before handing the leaf over."; exit 1; }
-            echo "leaf satisfies X509 purpose: $purpose"
-          done
+          #    Do not reintroduce `-purpose codesign` here. That purpose does
+          #    not exist in OpenSSL 3.0.13, which is what ubuntu-latest ships;
+          #    asking for it returns "Invalid purpose codesign" and the check
+          #    fails for a reason that has nothing to do with the certificate.
+          #    Run #172 died exactly that way, on a leaf that was correct, and
+          #    the first version of this gate hid the explanation by sending
+          #    stderr to /dev/null. Both mistakes are corrected here.
+          #
+          #    Checking the extensions is also the more faithful test: RAUC
+          #    does not use OpenSSL's purpose. It registers its OWN via
+          #    X509_PURPOSE_add ("codesign-rauc", src/signature.c), and that
+          #    callback requires precisely these two things of a leaf.
+          leaf_eku=$(openssl x509 -in /mnt/rasputin-sign/leaf.pem -noout -ext extendedKeyUsage 2>/dev/null || true)
+          leaf_ku=$(openssl x509 -in /mnt/rasputin-sign/leaf.pem -noout -ext keyUsage 2>/dev/null || true)
+          echo "$leaf_eku" | grep -q "Code Signing" \
+            || { echo "::error::signing leaf's extendedKeyUsage does not include Code Signing. RAUC's codesign-rauc purpose refuses such a leaf, so any board configured with [keyring] check-purpose=codesign will reject every artifact it signs. Got: $leaf_eku"; exit 1; }
+          echo "$leaf_ku" | grep -q "Digital Signature" \
+            || { echo "::error::signing leaf's keyUsage does not include Digital Signature; RAUC refuses it. Got: $leaf_ku"; exit 1; }
+          echo "leaf satisfies RAUC codesign semantics (EKU codeSigning + KU digitalSignature)"
           echo "tmpfs=/mnt/rasputin-sign" >> "$GITHUB_OUTPUT"
 
       - name: Sign .raucb bundles + compress .img + emit signed manifest
