@@ -710,6 +710,32 @@ jobs:
             -untrusted /mnt/rasputin-sign/intermediate.pem \
             /mnt/rasputin-sign/leaf.pem \
             || { echo "::error::leaf cert chain does not verify against root"; exit 1; }
+          # A valid chain is NOT a usable signing leaf, and the difference cost
+          # a full build. `openssl verify` with no -purpose skips purpose
+          # checking entirely, so the check above passed leaf-002 — which
+          # carried codeSigning + the release OID and no emailProtection —
+          # while `rauc bundle` three steps later died with "unsuitable
+          # certificate purpose" (X509_V_ERR_INVALID_PURPOSE, error 26) after
+          # both SKU builds and the QEMU smoke had already run.
+          #
+          # Each purpose below is a real consumer, so name them when one fails:
+          #   smimesign  OpenSSL CMS_verify's DEFAULT. `rauc bundle` and EVERY
+          #              deployed board enforce it, because no rasputin-os
+          #              rauc-system.conf sets [keyring] check-purpose. This is
+          #              the one that decides whether the fleet can install.
+          #   codesign   what RAUC enforces once check-purpose=codesign is set,
+          #              and what the published `openssl cms -verify` guidance
+          #              in the release notes implies.
+          #
+          # Checking both means a leaf that satisfies only one can never reach
+          # a published artifact again, in either direction.
+          for purpose in smimesign codesign; do
+            openssl verify -CAfile /mnt/rasputin-sign/root-ca.pem \
+              -untrusted /mnt/rasputin-sign/intermediate.pem \
+              -purpose "$purpose" /mnt/rasputin-sign/leaf.pem >/dev/null 2>&1 \
+              || { echo "::error::signing leaf does not satisfy the '$purpose' X509 purpose. Every consumer using it will refuse artifacts this leaf signs; for smimesign that is the whole deployed fleet. Re-mint with scripts/pki-init.sh --rotate-leaf (rasputin-control-plane), which now verifies both purposes before handing the leaf over."; exit 1; }
+            echo "leaf satisfies X509 purpose: $purpose"
+          done
           echo "tmpfs=/mnt/rasputin-sign" >> "$GITHUB_OUTPUT"
 
       - name: Sign .raucb bundles + compress .img + emit signed manifest
