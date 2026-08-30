@@ -20,7 +20,7 @@ architectures (`rpi` arm64, `n100` amd64), one read-only rootfs whose role is
 chosen at provision time by a seed file — a compute node and a controlplane
 node run the same image.
 
-> **Status: pre-alpha.** Rasputin is in its commodity-hardware proof phase.
+> **Status: alpha.** Rasputin is in its commodity-hardware proof phase.
 > Image layouts, partition schemes, and update formats change without notice.
 
 Rasputin is a modular, node-based homelab system; the system-level overview
