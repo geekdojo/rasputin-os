@@ -97,6 +97,20 @@ BR2_TARGET_GRUB2_INSTALL_TOOLS=y
 # needs the real tools (caught on 2026.06.0-dev.2).
 BR2_PACKAGE_E2FSPROGS=y
 
+# --- backup-target selection needs wipefs (E12 #394) ---
+# util-linux is pulled in as a dependency and never configured here, so its
+# sub-options take Buildroot defaults — and wipefs defaults OFF. lsblk, blkid,
+# sfdisk, mount and umount all shipped; wipefs did not.
+#
+# The agent's blockdev backup-target backend requires all seven, and when any
+# one is missing it silently falls back to its MOCK backend: a real controlplane
+# then answers storage.enumerate with ok:true and three fabricated disks. Caught
+# on e3bench 2026-09-01, where the operator would have been offered a
+# "CT500P3SSD8" that does not exist. wipefs -a is the first of the destructive
+# sequence (wipefs -> sfdisk -> mkfs.ext4); it clears the old filesystem
+# signature so blkid does not read the previous fs after the format.
+BR2_PACKAGE_UTIL_LINUX_WIPEFS=y
+
 # --- A/B + RAUC ---
 BR2_PACKAGE_RAUC=y
 BR2_PACKAGE_HOST_RAUC=y
