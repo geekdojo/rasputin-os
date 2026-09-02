@@ -1,3 +1,3 @@
-# From https://github.com/geekdojo/rasputin-control-plane/releases/tag/v2026.08.5-dev.133 (*.hash assets)
-sha256  413795c78977d08d20f97086733b60977529ff6f8ea06df56e3833922b943515  rasputin-agent-2026.08.5-dev.133-linux-amd64.tar.gz
-sha256  b28048ec26dc3c706af6e881797e0178dc3cb64ec0556a838d51b7e6ac5ecafb  rasputin-agent-2026.08.5-dev.133-linux-arm64.tar.gz
+# From https://github.com/geekdojo/rasputin-control-plane/releases/tag/v2026.08.5-dev.134 (*.hash assets)
+sha256  99e7038e6747a096d1ccfc54f93dbed160aa822c36d5d3cb5cde12d3acdca09e  rasputin-agent-2026.08.5-dev.134-linux-amd64.tar.gz
+sha256  64d531840dc37539ab277df9c0b6ff0984cc1d48720f2a8143e5449028775478  rasputin-agent-2026.08.5-dev.134-linux-arm64.tar.gz
