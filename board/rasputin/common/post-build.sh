@@ -98,6 +98,14 @@ ln -sf /etc/systemd/system/rasputin-rauc-reconcile.service \
 ln -sf /etc/systemd/system/rasputin-growpart.service \
 	"$TARGET_DIR/etc/systemd/system/multi-user.target.wants/rasputin-growpart.service"
 
+# Controlplane fallback address. Condition-gated inside the unit (controlplane
+# only, and only when networkd came up with no DHCPv4 lease), so enabling it on
+# every image is a no-op everywhere else. It exists for the bootstrap
+# chicken-and-egg: the firewall serves DHCP, but you configure the firewall
+# from the control plane. See rasputin-fallback-address.service.
+ln -sf /etc/systemd/system/rasputin-fallback-address.service \
+	"$TARGET_DIR/etc/systemd/system/multi-user.target.wants/rasputin-fallback-address.service"
+
 # Surface the node's IP at boot: this oneshot writes the real routable IP into
 # /etc/issue (-> /run/issue) once the network is up and re-renders agetty, AND
 # echoes it to the boot console so a chatty boot can't bury it. Deliberately not

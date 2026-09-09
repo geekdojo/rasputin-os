@@ -1,0 +1,48 @@
+[Unit]
+Description=Controlplane fallback address when the LAN has no DHCP server
+# The bootstrap chicken-and-egg: on a brand-new network the Rasputin firewall
+# is what serves DHCP, but the firewall is configured FROM the control plane,
+# which needs an address to be reachable. LinkLocalAddressing=ipv4 (see
+# etc/systemd/network/20-wired.network) only rescues this when the operator's
+# laptop also fell back to 169.254.x; a laptop with a lease from elsewhere, or
+# a static address, cannot route there. This unit takes 192.168.1.2/24 instead
+# -- the LAN the firewall will eventually serve, one above its .1 gateway and
+# below its .100-.249 pool. See usr/lib/rasputin/netfallback/.
+#
+# Ordering. After network-online.target so the decision is made on a FACT --
+# networkd has by then either acquired a DHCPv4 lease or exhausted its own
+# bounded attempt -- rather than on a timer of our own. After firstboot so
+# role.controlplane exists on the very first boot (on later boots firstboot is
+# condition-skipped, which still satisfies the ordering).
+#
+# Before rasputin-issue-ip so the console banner reports the fallback address
+# instead of "(no network)" -- an unreachable-looking banner on the one boot
+# where the address is the whole point would be worse than no banner at all.
+#
+# Deliberately NOT ordered before rasputin-api: the api binds :80/:443
+# (wildcard) and already waits on network-online.target, so it serves an
+# address added at any point without being held up by this unit.
+Wants=network-online.target
+After=network-online.target rasputin-firstboot.service
+Before=rasputin-issue-ip.service
+# Both the role gate below and the node.env override live on the persistent
+# partition, so the mount is a hard requirement, not something to inherit from
+# ordering. On the FIRST boot, After=rasputin-firstboot.service would supply it
+# transitively -- but on every later boot firstboot is condition-skipped, and a
+# skipped unit satisfies the ordering WITHOUT pulling in its mount dependency.
+# Without this line an unmounted /var/lib/rasputin makes ConditionPathExists
+# false and the unit skips silently on a controlplane that needed it. Same trap
+# that rasputin-mark-good.service was carrying (see the buildroot-os backlog).
+RequiresMountsFor=/var/lib/rasputin
+# Controlplane only. A compute node that cannot get DHCP has nothing to offer
+# an operator at a known address, and every node claiming .2 would be a
+# guaranteed collision.
+ConditionPathExists=/var/lib/rasputin/role.controlplane
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/rasputin/netfallback/rasputin-fallback-address.sh
+
+[Install]
+WantedBy=multi-user.target

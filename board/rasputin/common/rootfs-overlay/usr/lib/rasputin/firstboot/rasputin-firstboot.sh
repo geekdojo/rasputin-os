@@ -56,6 +56,12 @@ RELEASE_CHANNEL=""
 SSH_KEY=""
 NTP_SERVER=""
 BMC_HOST=""
+# Two variables, because "set but empty" is meaningful here: it is how an
+# operator turns the controlplane fallback address OFF, as distinct from never
+# having mentioned it (which takes the built-in default). See
+# usr/lib/rasputin/netfallback/.
+FALLBACK_ADDRESS=""
+FALLBACK_ADDRESS_SET=""
 
 if [ -f "$SEED_FILE" ]; then
 	log "reading seed $SEED_FILE"
@@ -71,6 +77,10 @@ if [ -f "$SEED_FILE" ]; then
 	SSH_KEY="${RASPUTIN_SSH_AUTHORIZED_KEY:-}"
 	NTP_SERVER="${RASPUTIN_NTP_SERVER:-}"
 	BMC_HOST="${RASPUTIN_BMC_HOST:-}"
+	if [ -n "${RASPUTIN_FALLBACK_ADDRESS+set}" ]; then
+		FALLBACK_ADDRESS_SET=1
+		FALLBACK_ADDRESS="$RASPUTIN_FALLBACK_ADDRESS"
+	fi
 else
 	log "no seed file at $SEED_FILE; using defaults"
 fi
@@ -245,6 +255,17 @@ if [ -n "$NTP_SERVER" ]; then
 	# space chars first so the quoting can't be broken out of.
 	NTP_SERVER=$(printf '%s' "$NTP_SERVER" | tr -d '\n' | tr -cd 'A-Za-z0-9 .:_-')
 	[ -n "$NTP_SERVER" ] && echo "RASPUTIN_NTP_SERVER=\"$NTP_SERVER\"" >> "$NODE_ENV"
+fi
+# Optional controlplane fallback address (CIDR) for a LAN with no DHCP server.
+# Written whenever the seed MENTIONED the key, empty value included -- an empty
+# value is the operator's explicit "do not take a fallback address", and
+# dropping the line would silently restore the default instead.
+# rasputin-fallback-address.service reads it; on a compute node the key is inert
+# (that unit is controlplane-gated). An older cluster that never gets this key
+# simply keeps the built-in default, so there is nothing to strand (#84).
+if [ -n "$FALLBACK_ADDRESS_SET" ]; then
+	FALLBACK_ADDRESS=$(printf '%s' "$FALLBACK_ADDRESS" | tr -cd '0-9./')
+	echo "RASPUTIN_FALLBACK_ADDRESS=$FALLBACK_ADDRESS" >> "$NODE_ENV"
 fi
 # The controlplane needs to know its own id for the system.update self-skip
 # and the BMC host default (see control-plane/updates.md, bmc.md).

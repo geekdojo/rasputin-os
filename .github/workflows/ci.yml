@@ -1,0 +1,39 @@
+name: ci
+
+# PR-time gate for the shell that runs on the node. The image build is long and
+# runs on release; nothing before this workflow checked the rootfs-overlay
+# scripts on a pull request, so a syntax error or a silently-inverted boot
+# decision could only be found by flashing hardware.
+#
+# Scope is deliberately narrow: POSIX-sh syntax on every overlay script, plus
+# the fallback-address suite, which fakes networkd's lease directory and
+# /sys/class/net so a boot-time decision is testable without a network, a root
+# shell, or a DHCP server to take away.
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax-check the rootfs-overlay scripts
+        # The image's /bin/sh is not bash; check with dash so a bashism fails
+        # here rather than at boot on the node.
+        run: |
+          fail=0
+          for f in $(find board -name '*.sh' -type f); do
+            dash -n "$f" || { echo "::error file=$f::sh syntax error"; fail=1; }
+          done
+          exit $fail
+      - name: Controlplane fallback-address tests
+        run: sh test/fallback-address-test.sh
