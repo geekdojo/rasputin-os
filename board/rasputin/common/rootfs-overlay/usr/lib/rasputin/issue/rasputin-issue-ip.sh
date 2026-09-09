@@ -29,6 +29,19 @@ while [ "$i" -lt 30 ]; do
 	i=$((i + 1))
 done
 
+# No default route can still mean a perfectly reachable node: on a LAN with no
+# DHCP server the controlplane takes a static fallback address and no gateway
+# (rasputin-fallback-address.service, which is ordered before this unit). Report
+# that address rather than "(no network)", which would be flatly wrong on the
+# one boot where the address is the entire point. Scope-global excludes both
+# things the default-route probe existed to avoid: loopback (host scope) and
+# IPv4 link-local 169.254.x (link scope).
+if [ -z "$ip" ]; then
+	ip=$(ip -4 -o addr show scope global up 2>/dev/null \
+		| grep -v ' lo ' \
+		| sed -n 's/.* inet \([0-9.][0-9.]*\).*/\1/p' | head -1)
+fi
+
 banner "${ip:-(no network)}"
 agetty --reload 2>/dev/null
 
