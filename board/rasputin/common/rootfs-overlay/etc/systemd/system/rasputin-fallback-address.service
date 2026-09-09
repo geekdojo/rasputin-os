@@ -25,6 +25,15 @@ Description=Controlplane fallback address when the LAN has no DHCP server
 Wants=network-online.target
 After=network-online.target rasputin-firstboot.service
 Before=rasputin-issue-ip.service
+# Both the role gate below and the node.env override live on the persistent
+# partition, so the mount is a hard requirement, not something to inherit from
+# ordering. On the FIRST boot, After=rasputin-firstboot.service would supply it
+# transitively -- but on every later boot firstboot is condition-skipped, and a
+# skipped unit satisfies the ordering WITHOUT pulling in its mount dependency.
+# Without this line an unmounted /var/lib/rasputin makes ConditionPathExists
+# false and the unit skips silently on a controlplane that needed it. Same trap
+# that rasputin-mark-good.service was carrying (see the buildroot-os backlog).
+RequiresMountsFor=/var/lib/rasputin
 # Controlplane only. A compute node that cannot get DHCP has nothing to offer
 # an operator at a known address, and every node claiming .2 would be a
 # guaranteed collision.

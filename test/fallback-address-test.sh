@@ -132,6 +132,8 @@ check "ConditionPathExists=/var/lib/rasputin/role.controlplane" \
 	"$(grep -q '^ConditionPathExists=/var/lib/rasputin/role\.controlplane$' "$UNIT" && echo 0 || echo 1)"
 check "runs after network-online.target" \
 	"$(grep -q '^After=.*network-online\.target' "$UNIT" && echo 0 || echo 1)"
+check "requires the persistent mount the role gate lives on" \
+	"$(grep -q '^RequiresMountsFor=/var/lib/rasputin$' "$UNIT" && echo 0 || echo 1)"
 check "runs before the console IP banner" \
 	"$(grep -q '^Before=.*rasputin-issue-ip\.service' "$UNIT" && echo 0 || echo 1)"
 check "enabled in post-build.sh" \
