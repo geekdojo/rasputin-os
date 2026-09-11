@@ -6,8 +6,11 @@
 # image. If that name were "rasputin", every compute node would fight the
 # controlplane for rasputin.local via mDNS. Policy:
 #
-#   role == controlplane  ->  "rasputin"        (answers rasputin.local;
-#                                                 WebAuthn RP ID + cert CN)
+#   role == controlplane  ->  the cluster id     (RASPUTIN_CLUSTER_ID from
+#                                                 node.env, default "rasputin";
+#                                                 answers <cluster-id>.local —
+#                                                 WebAuthn RP ID + cert SAN;
+#                                                 ADR-0003)
 #   any other role        ->  the node id        (e.g. node-1a2b3c4d from
 #                                                 the DMI/SoC serial, via
 #                                                 firstboot's node.env)
