@@ -200,9 +200,11 @@ jobs:
           df -h /
 
       # The agent/api binaries live in the (now-public) control-plane release.
-      # Pre-place the tarballs into Buildroot's dl/ cache here so, with no .hash
-      # file present, Buildroot's dl-wrapper finds the cached file and skips the
-      # network fetch entirely. github.token reads the public repo (this was a
+      # Pre-place the tarballs into Buildroot's dl/ cache here. Each package
+      # carries a .hash file (copied from the release's *.hash assets), so
+      # Buildroot's dl-wrapper checks the cached tarball against it: a match
+      # skips the network fetch, a mismatch forces a re-download from the .mk's
+      # _SITE. github.token reads the public repo (this was a
       # fine-grained PAT while control-plane was private — ADR-0002). See
       # os-images/release-pipeline.md §1 ("Fetching the vendored agent/api binaries").
       - name: Fetch vendored binaries (control-plane release)
