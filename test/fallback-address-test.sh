@@ -29,32 +29,93 @@ check() {
 
 # --- a disposable world -------------------------------------------------
 # link: name, carrier (1/0), ifindex; lease: "yes" writes networkd's lease file
+#
+# The stubs model just enough of networkd and the kernel to check the property
+# #427 is about -- how many addresses the link ends up with:
+#   $ADDRS            one "dev address" line per address the kernel holds
+#   networkctl reload applies the drop-in's Address= to the link, or, when the
+#                     drop-in is gone, drops the address it last applied (what
+#                     networkd does when a reload finds the config changed)
+#   ip                answers `-4 -o addr show dev X` and `addr del A dev X`
+#   systemctl, flock  record / no-op, so nothing touches the host's systemd
 setup() {
 	WORK=$(mktemp -d)
 	SYS="$WORK/sys"; LEASES="$WORK/leases"; DROPIN="$WORK/run/20-wired.network.d"
 	CALLS="$WORK/networkctl.calls"; NODE_ENV="$WORK/node.env"
+	STATE="$WORK/run/rasputin/fallback-address"; ADDRS="$WORK/addrs"
+	SYSTEMCTL_CALLS="$WORK/systemctl.calls"; IP_CALLS="$WORK/ip.calls"
 	mkdir -p "$SYS/$1" "$LEASES"
 	printf '%s\n' "$2" > "$SYS/$1/carrier"
 	printf '%s\n' "$3" > "$SYS/$1/ifindex"
-	[ "${4:-no}" = "yes" ] && printf 'ADDRESS=192.168.1.117\n' > "$LEASES/$3"
+	FAKE_LINK="$1"
+	: > "$ADDRS"
+	[ "${4:-no}" = "yes" ] && lease "$3"
 	cat > "$WORK/networkctl" <<'STUB'
 #!/bin/sh
 printf '%s\n' "$*" >> "$NETWORKCTL_CALLS"
+[ "${NETWORKCTL_FAIL:-}" = "$1" ] && exit 1
+if [ "$1" = reload ]; then
+	f="$FAKE_DROPIN/50-rasputin-fallback.conf"
+	if [ -f "$f" ]; then
+		a=$(sed -n 's/^Address=//p' "$f")
+		grep -qxF "$FAKE_LINK $a" "$FAKE_ADDRS" || printf '%s %s\n' "$FAKE_LINK" "$a" >> "$FAKE_ADDRS"
+		printf '%s\n' "$a" > "$FAKE_ADDRS.applied"
+	elif [ -f "$FAKE_ADDRS.applied" ]; then
+		a=$(cat "$FAKE_ADDRS.applied")
+		grep -vxF "$FAKE_LINK $a" "$FAKE_ADDRS" > "$FAKE_ADDRS.tmp"; mv "$FAKE_ADDRS.tmp" "$FAKE_ADDRS"
+		rm -f "$FAKE_ADDRS.applied"
+	fi
+fi
+exit 0
 STUB
-	chmod +x "$WORK/networkctl"
-	: > "$CALLS"
+	cat > "$WORK/ip" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >> "$IP_CALLS"
+case "$*" in
+	"-4 -o addr show dev "*)
+		dev=$6
+		grep "^$dev " "$FAKE_ADDRS" | while read -r d a; do
+			printf '2: %s    inet %s scope global %s\\       valid_lft forever preferred_lft forever\n' "$d" "$a" "$d"
+		done ;;
+	"addr del "*)
+		a=$3; dev=$5
+		grep -qxF "$dev $a" "$FAKE_ADDRS" || { echo "RTNETLINK answers: Cannot assign requested address" >&2; exit 2; }
+		grep -vxF "$dev $a" "$FAKE_ADDRS" > "$FAKE_ADDRS.tmp"; mv "$FAKE_ADDRS.tmp" "$FAKE_ADDRS" ;;
+	*) echo "ip stub: unexpected: $*" >&2; exit 99 ;;
+esac
+STUB
+	cat > "$WORK/systemctl" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >> "$SYSTEMCTL_CALLS"
+STUB
+	printf '#!/bin/sh\nexit 0\n' > "$WORK/flock"
+	chmod +x "$WORK/networkctl" "$WORK/ip" "$WORK/systemctl" "$WORK/flock"
+	: > "$CALLS"; : > "$SYSTEMCTL_CALLS"; : > "$IP_CALLS"
 	: > "$NODE_ENV"
 }
 teardown() { rm -rf "$WORK"; }
 
+# networkd acquires a DHCPv4 lease on ifindex $1: the lease file, and (when a
+# second arg is given) the address it brings on the fake link.
+lease() {
+	printf 'ADDRESS=%s\n' "${2:-192.168.1.117}" > "$LEASES/$1"
+	[ -n "${2:-}" ] && printf '%s %s/24\n' "$FAKE_LINK" "$2" >> "$ADDRS"
+	return 0
+}
+
 run() {
-	NETWORKCTL_CALLS="$CALLS" \
+	NETWORKCTL_CALLS="$CALLS" SYSTEMCTL_CALLS="$SYSTEMCTL_CALLS" IP_CALLS="$IP_CALLS" \
+	FAKE_DROPIN="$DROPIN" FAKE_ADDRS="$ADDRS" FAKE_LINK="$FAKE_LINK" \
 	RASPUTIN_FALLBACK_SYSCLASS="$SYS" \
 	RASPUTIN_FALLBACK_LEASE_DIR="$LEASES" \
 	RASPUTIN_FALLBACK_DROPIN_DIR="$DROPIN" \
+	RASPUTIN_FALLBACK_STATE_DIR="$STATE" \
 	RASPUTIN_FALLBACK_NODE_ENV="$NODE_ENV" \
 	RASPUTIN_FALLBACK_NETWORKCTL="$WORK/networkctl" \
-	sh "$SCRIPT" 2>&1
+	RASPUTIN_FALLBACK_IP="$WORK/ip" \
+	RASPUTIN_FALLBACK_SYSTEMCTL="$WORK/systemctl" \
+	RASPUTIN_FALLBACK_FLOCK="$WORK/flock" \
+	sh "$SCRIPT" "$@" 2>&1
 }
 
 conf() { cat "$DROPIN/50-rasputin-fallback.conf" 2>/dev/null; }
@@ -152,6 +213,123 @@ check "writes it into node.env" \
 	"$(grep -q 'echo "RASPUTIN_FALLBACK_ADDRESS=' "$FB" && echo 0 || echo 1)"
 check "distinguishes set-but-empty from unset (opt-out survives)" \
 	"$(grep -q 'FALLBACK_ADDRESS_SET' "$FB" && echo 0 || echo 1)"
+
+# --- 9. the release: a lease makes the fallback go (geekdojo-brain#427) ---
+count() { grep -c . "$ADDRS"; }
+has_addr() { grep -qxF "$FAKE_LINK $1" "$ADDRS"; }
+
+echo "9. the #427 race: a lease that arrives after the boot decision"
+setup end0 1 2 no
+out=$(run)
+check "no lease at boot: the fallback is applied" "$(has_addr 192.168.1.2/24 && echo 0 || echo 1)" "$out"
+check "boot decision re-arms the release unit" \
+	"$(grep -qxF -- '--no-block stop rasputin-fallback-address-release.service' "$SYSTEMCTL_CALLS" && echo 0 || echo 1)" "$(cat "$SYSTEMCTL_CALLS")"
+# 0.4 s later networkd gets its lease -- the order the bench saw, twice.
+lease 2 192.168.1.224
+check "precondition: both addresses up, as observed on the bench" "$([ "$(count)" = 2 ] && echo 0 || echo 1)" "$(cat "$ADDRS")"
+run lease-held >/dev/null; r=$?
+check "lease-held says yes (ExecCondition passes)" "$r"
+: > "$CALLS"
+out=$(run release); r=$?
+check "release succeeds" "$r" "$out"
+check "exactly one address remains" "$([ "$(count)" = 1 ] && echo 0 || echo 1)" "$(cat "$ADDRS")"
+check "and it is the DHCP one" "$(has_addr 192.168.1.224/24 && echo 0 || echo 1)" "$(cat "$ADDRS")"
+check "the drop-in is gone, so networkd cannot re-add it" "$(applied && echo 1 || echo 0)" "$(conf)"
+check "removes the address from the link directly" \
+	"$(grep -qxF 'addr del 192.168.1.2/24 dev end0' "$IP_CALLS" && echo 0 || echo 1)" "$(cat "$IP_CALLS")"
+check "reloads networkd so its in-memory config drops it too" "$(grep -qx 'reload' "$CALLS" && echo 0 || echo 1)" "$(cat "$CALLS")"
+check "does NOT reconfigure the link (the reload already does)" "$(grep -q '^reconfigure' "$CALLS" && echo 1 || echo 0)" "$(cat "$CALLS")"
+check "leaves no reload-pending marker" "$([ ! -e "$STATE/reload-pending" ] && echo 0 || echo 1)"
+out=$(run release); r=$?
+check "a second release is a quiet no-op" "$([ $r -eq 0 ] && [ "$(count)" = 1 ] && echo 0 || echo 1)" "$out"
+teardown
+
+echo "10. a box that never applied the fallback is left alone by the release"
+setup end0 1 2 yes
+lease 2 192.168.1.224
+out=$(run release); r=$?
+check "exits 0" "$r" "$out"
+check "does not touch networkd" "$([ ! -s "$CALLS" ] && echo 0 || echo 1)" "$(cat "$CALLS")"
+check "does not touch addresses" "$([ ! -s "$IP_CALLS" ] && [ "$(count)" = 1 ] && echo 0 || echo 1)" "$(cat "$IP_CALLS")"
+teardown
+
+echo "11. lease-held: the fact, and only the fact"
+setup end0 1 2 no
+run lease-held >/dev/null; r=$?
+check "no lease file -> 1 (the release unit is skipped, not latched)" "$([ $r -eq 1 ] && echo 0 || echo 1)"
+# networkd writes a lease as a dot-prefixed temp file renamed into place.
+printf 'ADDRESS=192.168.1.224\n' > "$LEASES/.#2AbCdEf"
+run lease-held >/dev/null; r=$?
+check "networkd's in-flight temp file is not a lease" "$([ $r -eq 1 ] && echo 0 || echo 1)"
+out=$(run)
+check "...and does not stop the fallback being applied" "$(applied && echo 0 || echo 1)" "$out"
+teardown
+
+echo "12. a lease on another wired link also counts"
+setup end0 1 2 no
+mkdir -p "$SYS/end1"; echo 1 > "$SYS/end1/carrier"; echo 3 > "$SYS/end1/ifindex"
+lease 3
+out=$(run)
+check "apply refuses" "$(applied && echo 1 || echo 0)" "$out"
+check "and does not touch networkd" "$([ ! -s "$CALLS" ] && echo 0 || echo 1)" "$(cat "$CALLS")"
+teardown
+
+echo "13. a release interrupted before its reload finishes the job next time"
+setup end0 1 2 no
+run >/dev/null
+lease 2 192.168.1.224
+out=$(NETWORKCTL_FAIL=reload run release); r=$?
+check "a failed reload fails the unit" "$([ $r -ne 0 ] && echo 0 || echo 1)" "$out"
+check "the address is already off the link" "$(has_addr 192.168.1.2/24 && echo 1 || echo 0)" "$(cat "$ADDRS")"
+check "and a reload is recorded as pending" "$([ -e "$STATE/reload-pending" ] && echo 0 || echo 1)"
+: > "$CALLS"
+out=$(run release); r=$?
+check "the next run reloads even though the drop-in is gone" \
+	"$([ $r -eq 0 ] && grep -qx 'reload' "$CALLS" && [ ! -e "$STATE/reload-pending" ] && echo 0 || echo 1)" "$out"
+teardown
+
+echo "14. no DHCP at all: the fallback stays (the case #53 exists for)"
+setup end0 1 2 no
+run >/dev/null
+run lease-held >/dev/null; r=$?
+check "no lease -> the release unit is skipped" "$([ $r -eq 1 ] && echo 0 || echo 1)"
+check "the controlplane ends on 192.168.1.2/24, and only that" \
+	"$([ "$(count)" = 1 ] && has_addr 192.168.1.2/24 && echo 0 || echo 1)" "$(cat "$ADDRS")"
+teardown
+
+echo "15. an unknown mode is refused"
+setup end0 1 2 no
+out=$(run bogus); r=$?
+check "exits non-zero and writes nothing" "$([ $r -ne 0 ] && ! applied && echo 0 || echo 1)" "$out"
+teardown
+
+# --- 16. the release wiring -----------------------------------------------
+# The script can only remove what systemd asks it to. These guard the unit
+# properties the fix turns on; each comment says what breaks without it.
+echo "16. the release is wired to the lease fact, level-triggered"
+U="$ROOT/board/rasputin/common/rootfs-overlay/etc/systemd/system"
+RP="$U/rasputin-fallback-address-release.path"; RS="$U/rasputin-fallback-address-release.service"
+# PathChanged= would miss a lease that appears while the service runs.
+check "path unit fires on a lease file (PathExistsGlob, not PathChanged)" \
+	"$(grep -qx 'PathExistsGlob=/run/systemd/netif/leases/\*' "$RP" && ! grep -q '^PathChanged=' "$RP" && echo 0 || echo 1)"
+check "path unit triggers the release service" \
+	"$(grep -qx 'Unit=rasputin-fallback-address-release.service' "$RP" && echo 0 || echo 1)"
+# Without RemainAfterExit=yes the level trigger re-runs the service forever.
+check "release service stays active while the lease stands" "$(grep -qx 'RemainAfterExit=yes' "$RS" && echo 0 || echo 1)"
+# A Condition*= that fails leaves the glob true and the service inactive: a trigger loop.
+check "release service has no Condition*= (ExecCondition only)" \
+	"$(grep -q '^Condition' "$RS" && echo 1 || echo 0)"
+check "ExecCondition is the lease fact" \
+	"$(grep -qx 'ExecCondition=/usr/lib/rasputin/netfallback/rasputin-fallback-address.sh lease-held' "$RS" && echo 0 || echo 1)"
+check "ExecStart releases" \
+	"$(grep -qx 'ExecStart=/usr/lib/rasputin/netfallback/rasputin-fallback-address.sh release' "$RS" && echo 0 || echo 1)"
+check "release is ordered after the apply" \
+	"$(grep -q '^After=.*rasputin-fallback-address\.service' "$RS" && echo 0 || echo 1)"
+check "path unit enabled in post-build.sh" \
+	"$(grep -q 'multi-user.target.wants/rasputin-fallback-address-release\.path' "$ROOT/board/rasputin/common/post-build.sh" && echo 0 || echo 1)"
+# Standing rule: state changes follow checkable facts, never a timer.
+check "no sleep or timeout in the script" \
+	"$(grep -Eq '(^|[^a-z_])(sleep|timeout)[[:space:]]' "$SCRIPT" && echo 1 || echo 0)"
 
 echo
 if [ "$fails" -ne 0 ]; then echo "FAILED: $fails check(s)"; exit 1; fi
