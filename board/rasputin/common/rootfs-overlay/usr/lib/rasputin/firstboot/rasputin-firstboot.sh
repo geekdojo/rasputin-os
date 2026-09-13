@@ -110,10 +110,9 @@ done
 
 # --- require a real provisioning signal --------------------------------------
 # ROLE must come from the seed or the kernel cmdline. A blank/absent role means
-# the node was never provisioned — the seed template ships every field empty and
-# documents "firstboot waits until these are set". Do NOT invent an identity and
-# half-join: that strands the node as a zombie that never reaches the bus — it
-# looks "up" but never appears in inventory. Found 2026-06-22 on the bench, when
+# the node was never provisioned — the seed template ships every field empty.
+# Do NOT invent an identity and half-join: that strands the node as a zombie
+# that never reaches the bus — it looks "up" but never appears in inventory. Found 2026-06-22 on the bench, when
 # a seed write silently failed to land on the ESP: the node booted the blank
 # template and defaulted to compute + node-<dmi> + an unresolvable NATS fallback,
 # with no error anywhere. Fail loud instead — exit non-zero so this unit shows

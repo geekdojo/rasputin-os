@@ -44,10 +44,11 @@ this image — see
   - `n100` (amd64, UEFI): GRUB with a real boot counter — bootloader-level
     rollback even for a committed slot. Hardware-validated end-to-end
     (install → auto-boot new slot → commit, and mark-bad → auto-revert).
-  - `rpi` (arm64): one unified image boots **Pi 4 / Pi 5 / CM5** (two-kernel
+  - `rpi` (arm64): one unified image boots **Pi 4 / Pi 5** (two-kernel
     FAT, firmware picks per board; Raspberry Pi kernel fork — mainline can't
-    boot current Pi 5 steppings). A/B uses the Pi firmware's one-shot
-    `tryboot` flag via a custom RAUC backend. The firmware **cannot count
+    boot current Pi 5 steppings). CM5 is not validated: no CM5 has booted
+    this image, and the build carries no CM5 device tree. A/B uses the Pi
+    firmware's one-shot `tryboot` flag via a custom RAUC backend. The firmware **cannot count
     boot attempts and won't auto-fall-back from a committed slot**, so the Pi
     relies on defense-in-depth: the one-shot trial, a systemd watchdog on the
     agent, and the update saga's post-reboot health check. Boot, A/B commit,
