@@ -1,0 +1,31 @@
+[Unit]
+Description=Watch for a DHCPv4 lease that makes the controlplane fallback address redundant
+# The controlplane fallback address (rasputin-fallback-address.service) exists
+# only while no DHCP server answers. The moment networkd holds a DHCPv4 lease,
+# the fallback has to go: two LAN addresses split the cluster, because the
+# nameserver answers on only one of them (geekdojo-brain#427).
+#
+# The fact: networkd writes /run/systemd/netif/leases/<ifindex> while it holds a
+# lease and unlinks it when the lease goes (systemd 256.17, link_save() in
+# networkd-state-file.c). It writes a dot-prefixed temp file and renames it
+# into place, and the glob below ignores dot files, so it matches only a real
+# lease.
+#
+# Why PathExistsGlob= and not PathChanged=. PathChanged= is edge-triggered, and
+# systemd drops the watch while the triggered service is running: a lease that
+# appears during that window is never seen. PathExistsGlob= is level-triggered:
+# systemd re-checks it every time the service stops, so "a lease exists" can
+# never be missed. The release service keeps RemainAfterExit=yes so that check
+# does not spin while the lease stays.
+#
+# Deliberately NOT gated to the controlplane. A condition that fails on the
+# service would leave the glob true with the service inactive, and systemd would
+# re-trigger it until the trigger limit. The release script does nothing on a
+# box that never applied the fallback.
+
+[Path]
+PathExistsGlob=/run/systemd/netif/leases/*
+Unit=rasputin-fallback-address-release.service
+
+[Install]
+WantedBy=multi-user.target

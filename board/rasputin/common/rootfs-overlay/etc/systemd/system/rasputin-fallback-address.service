@@ -9,11 +9,18 @@ Description=Controlplane fallback address when the LAN has no DHCP server
 # -- the LAN the firewall will eventually serve, one above its .1 gateway and
 # below its .100-.249 pool. See usr/lib/rasputin/netfallback/.
 #
-# Ordering. After network-online.target so the decision is made on a FACT --
-# networkd has by then either acquired a DHCPv4 lease or exhausted its own
-# bounded attempt -- rather than on a timer of our own. After firstboot so
-# role.controlplane exists on the very first boot (on later boots firstboot is
-# condition-skipped, which still satisfies the ordering).
+# This unit only ADDS the address, and only when no DHCPv4 lease exists yet.
+# network-online.target is NOT proof that DHCP has finished: wait-online runs
+# with --any and a 169.254.x link-local address satisfies it, so a lease can
+# (and on the bench routinely did) arrive 0.4-2 s after this runs
+# (geekdojo-brain#427). Removing the address once a lease exists is the job of
+# rasputin-fallback-address-release.path, which fires on the lease file itself.
+#
+# Ordering. After network-online.target so the link is up and networkd has
+# had its first go at DHCP. After firstboot so role.controlplane exists on the
+# very first boot (on later boots firstboot is condition-skipped, which still
+# satisfies the ordering). The release unit is ordered After= this one, so a
+# lease that shows up while this runs is handled once this has finished.
 #
 # Before rasputin-issue-ip so the console banner reports the fallback address
 # instead of "(no network)" -- an unreachable-looking banner on the one boot

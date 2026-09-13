@@ -1,0 +1,38 @@
+[Unit]
+Description=Remove the controlplane fallback address once a DHCPv4 lease exists
+# Started by rasputin-fallback-address-release.path when networkd holds a
+# DHCPv4 lease. It deletes the fallback drop-in, removes the address from the
+# link, and reloads networkd so its in-memory config drops it too. See
+# usr/lib/rasputin/netfallback/rasputin-fallback-address.sh for the removal
+# order and for why the reload renews the DHCP lease once.
+#
+# Ordering. After the apply unit, so a lease that arrives while the apply is
+# still writing its drop-in is handled once the apply has finished, never
+# halfway through it. The script also takes a lock for manual restarts.
+#
+# ExecCondition, not Condition*=. If the lease has already gone by the time this
+# runs, the unit is skipped (inactive, not failed) and the path unit goes back
+# to waiting for the next lease. A plain RemainAfterExit=yes run with no lease
+# would latch the unit active and blind the path unit to the next lease.
+#
+# A lease LOST later does not bring the fallback back. That is a deliberate
+# choice:
+#   - The fallback exists for first contact on a LAN that has never had DHCP.
+#     A box that has held a lease was reachable at a DHCP address, and on
+#     losing it networkd already falls back to 169.254.x link-local by itself.
+#   - "No lease" is not a stable fact at runtime. networkd unlinks the lease file
+#     every time it reconfigures the link, and this unit's own reload is one of
+#     those times. Re-adding on that signal would put .2 back during the
+#     release's own reload and loop.
+#   - A reboot makes the decision again from scratch, since the drop-in is on /run.
+# If a no-DHCP-after-all case turns up in the field, it needs its own fact,
+# not the lease file's absence.
+After=rasputin-fallback-address.service systemd-networkd.service
+
+[Service]
+Type=oneshot
+# Stay active while the lease stands, so the level-triggered path unit does not
+# re-run the release in a loop. The apply script stops this unit to re-arm it.
+RemainAfterExit=yes
+ExecCondition=/usr/lib/rasputin/netfallback/rasputin-fallback-address.sh lease-held
+ExecStart=/usr/lib/rasputin/netfallback/rasputin-fallback-address.sh release

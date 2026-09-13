@@ -9,6 +9,11 @@ name: ci
 # the fallback-address suite, which fakes networkd's lease directory and
 # /sys/class/net so a boot-time decision is testable without a network, a root
 # shell, or a DHCP server to take away.
+#
+# The fallback address also gets a functional test against real
+# systemd-networkd 256.17 (the image's version) in a privileged container,
+# because what went wrong in geekdojo-brain#427 lives between networkd, the
+# kernel and systemd's path units, and no stub can show it.
 
 on:
   pull_request:
@@ -37,3 +42,10 @@ jobs:
           exit $fail
       - name: Controlplane fallback-address tests
         run: sh test/fallback-address-test.sh
+
+  fallback-address-functional:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fallback address against real networkd (no DHCP, DHCP, late lease, carrier flap)
+        run: sh test/fallback-address-functional.sh

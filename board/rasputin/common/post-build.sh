@@ -105,6 +105,12 @@ ln -sf /etc/systemd/system/rasputin-growpart.service \
 # from the control plane. See rasputin-fallback-address.service.
 ln -sf /etc/systemd/system/rasputin-fallback-address.service \
 	"$TARGET_DIR/etc/systemd/system/multi-user.target.wants/rasputin-fallback-address.service"
+# ...and its other half: the path unit that removes the fallback the moment a
+# DHCPv4 lease exists, so a lease that arrives after the boot-time decision
+# never leaves the controlplane with two LAN addresses (geekdojo-brain#427).
+# Not role-gated. It acts only where the fallback drop-in was written.
+ln -sf /etc/systemd/system/rasputin-fallback-address-release.path \
+	"$TARGET_DIR/etc/systemd/system/multi-user.target.wants/rasputin-fallback-address-release.path"
 
 # Surface the node's IP at boot: this oneshot writes the real routable IP into
 # /etc/issue (-> /run/issue) once the network is up and re-renders agetty, AND
