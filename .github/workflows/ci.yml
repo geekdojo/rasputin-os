@@ -5,8 +5,8 @@ name: ci
 # scripts on a pull request, so a syntax error or a silently-inverted boot
 # decision could only be found by flashing hardware.
 #
-# Scope is deliberately narrow: POSIX-sh syntax on every overlay script, plus
-# the fallback-address suite, which fakes networkd's lease directory and
+# Scope is deliberately narrow: POSIX-sh syntax on every overlay script, the
+# node-id helper table tests, plus the fallback-address suite, which fakes networkd's lease directory and
 # /sys/class/net so a boot-time decision is testable without a network, a root
 # shell, or a DHCP server to take away.
 #
@@ -42,6 +42,15 @@ jobs:
           exit $fail
       - name: Controlplane fallback-address tests
         run: sh test/fallback-address-test.sh
+      # The node id becomes the hostname and the username the agent presents to
+      # the bus, which accepts only a DNS label; an id that breaks the rule
+      # boots fine and never joins. Table tests for the shared helpers under
+      # dash, bash and busybox ash (Buildroot's default /bin/sh; REQUIRE_BUSYBOX fails
+      # the step if the runner ever stops shipping it). (geekdojo/geekdojo-brain#441)
+      - name: Node-id helper tests
+        env:
+          REQUIRE_BUSYBOX: "1"
+        run: sh test/node-id-test.sh
 
   fallback-address-functional:
     runs-on: ubuntu-latest

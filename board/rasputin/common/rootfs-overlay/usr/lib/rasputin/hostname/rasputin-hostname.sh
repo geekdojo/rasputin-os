@@ -34,6 +34,10 @@ log() {
 	echo "rasputin-hostname: $*" > /dev/kmsg 2>/dev/null || true
 }
 
+# DNS-label helpers shared with rasputin-firstboot.sh.
+# shellcheck source=/dev/null
+. /usr/lib/rasputin/node-id/node-id.sh
+
 ROLE=""
 NODE_ID=""
 if [ -f "$NODE_ENV" ]; then
@@ -57,23 +61,18 @@ fi
 if [ "$ROLE" = "controlplane" ]; then
 	# This value becomes a DNS label: the mDNS name the whole cluster is
 	# reached by, the CN/SAN of the api's TLS leaf, the WebAuthn RP ID, and the
-	# host every node's seeded NATS URL dials. Nothing upstream validates it —
-	# rasputin-provision accepts any --cluster-id string — so it is validated
-	# HERE, at the last point before it becomes the machine's identity.
+	# host every node's seeded NATS URL dials. rasputin-provision validates it,
+	# but a hand-written seed never passes through that tool — so it is
+	# validated HERE too, at the last point before it becomes the machine's
+	# identity.
 	#
-	# Lowercase first rather than reject: DNS labels are case-insensitive, and
-	# firstboot already lowercases the DMI serial when deriving a node id, so
-	# "Home1" becoming "home1" is consistent rather than surprising.
-	CLUSTER_ID=$(printf '%s' "$CLUSTER_ID" | tr 'A-Z' 'a-z')
-	case "$CLUSTER_ID" in
-		"" | -* | *- | *[!a-z0-9-]*) CLUSTER_VALID=no ;;
-		*) CLUSTER_VALID=yes ;;
-	esac
-	if [ "${#CLUSTER_ID}" -gt 63 ]; then
-		CLUSTER_VALID=no
-	fi
+	# Lowercase (and trim) first rather than reject: DNS labels are
+	# case-insensitive, and firstboot already lowercases the DMI serial when
+	# deriving a node id, so "Home1" becoming "home1" is consistent rather than
+	# surprising. Same helpers, same rule as the node id.
+	CLUSTER_ID=$(rasputin_label_canon "$CLUSTER_ID")
 
-	if [ "$CLUSTER_VALID" = yes ]; then
+	if rasputin_label_valid "$CLUSTER_ID"; then
 		NAME="$CLUSTER_ID"
 	else
 		# Fall back rather than fail. This runs at boot on a HEADLESS box: an
@@ -85,7 +84,22 @@ if [ "$ROLE" = "controlplane" ]; then
 		NAME="rasputin"
 	fi
 else
-	NAME="$NODE_ID"
+	# Lowercased and trimmed like the cluster id (DNS names are
+	# case-insensitive, so an older node.env with "Kitchen-Pi" stays reachable
+	# as kitchen-pi.local). firstboot refuses to write an id that is invalid
+	# beyond that, but a node.env written before it checked survives an OTA
+	# update (firstboot does not re-run). Never hand such a value to the kernel
+	# as a hostname: keep the baked placeholder — it collides with nothing — and
+	# say why. Not replaced with a generated name: the agent still presents
+	# node.env's id to the bus, so a hostname that disagreed would mislead.
+	NAME=$(rasputin_label_canon "$NODE_ID")
+	if [ -n "$NAME" ] && ! rasputin_label_valid "$NAME"; then
+		log "WARNING: node id '$NODE_ID' in $NODE_ENV is not a valid DNS label (a-z 0-9 -, no leading/trailing -, <=63 chars); keeping baked hostname $(cat /proc/sys/kernel/hostname). This node cannot join the bus with that id — re-provision it with a valid RASPUTIN_NODE_ID."
+		exit 0
+	fi
+	if [ "$NAME" != "$NODE_ID" ]; then
+		log "WARNING: node id '$NODE_ID' in $NODE_ENV is not in canonical form; using hostname '$NAME'. The bus accepts only the lowercase id — re-provision this node with RASPUTIN_NODE_ID=$NAME."
+	fi
 fi
 
 if [ -z "$NAME" ]; then
