@@ -34,6 +34,10 @@ log() {
 	echo "rasputin-firstboot: $*" > /dev/kmsg 2>/dev/null || true
 }
 
+# DNS-label helpers shared with rasputin-hostname.sh (node id rules, below).
+# shellcheck source=/dev/null
+. /usr/lib/rasputin/node-id/node-id.sh
+
 # --- locate + read the seed --------------------------------------------------
 # The seed FAT is mounted read-only at $SEED_MNT by run-rasputin\x2dseed.mount
 # (Wants'd by rasputin-firstboot.service), matched by filesystem label
@@ -42,6 +46,9 @@ log() {
 # to the cmdline/defaults below.
 ROLE=""
 NODE_ID=""
+# Where an operator-supplied node id came from, for the error message if it is
+# not a valid DNS label. Empty = the id is derived on this node below.
+NODE_ID_FROM=""
 # The cluster's name. ADR-0003 makes this the source of the node's identity —
 # mDNS hostname, NATS URL, Headscale server_url, leaf SANs, WebAuthn RP ID —
 # and defaults it to "rasputin" so every installation that predates the change
@@ -69,6 +76,7 @@ if [ -f "$SEED_FILE" ]; then
 	. "$SEED_FILE"
 	ROLE="${RASPUTIN_NODE_ROLE:-}"
 	NODE_ID="${RASPUTIN_NODE_ID:-}"
+	[ -n "$NODE_ID" ] && NODE_ID_FROM="RASPUTIN_NODE_ID in $SEED_FILE"
 	CLUSTER_ID="${RASPUTIN_CLUSTER_ID:-rasputin}"
 	NATS_URL="${RASPUTIN_NATS_URL:-}"
 	JOIN_TOKEN="${RASPUTIN_CP_JOIN_TOKEN:-}"
@@ -103,10 +111,17 @@ fi
 for tok in $(cat /proc/cmdline); do
 	case "$tok" in
 		rasputin.role=*) ROLE="${tok#rasputin.role=}" ;;
-		rasputin.id=*)   NODE_ID="${tok#rasputin.id=}" ;;
+		rasputin.id=*)   NODE_ID="${tok#rasputin.id=}"; NODE_ID_FROM="rasputin.id= on the kernel command line" ;;
 		rasputin.nats=*) NATS_URL="${tok#rasputin.nats=}" ;;
 	esac
 done
+
+# Lowercase + trim an operator-supplied id, exactly as rasputin-provision does;
+# a value that is only whitespace (or a bare CR from a Windows-saved seed)
+# counts as blank. Validity is checked below, with the other fail-loud checks.
+NODE_ID_RAW=$NODE_ID
+NODE_ID=$(rasputin_label_canon "$NODE_ID")
+[ -n "$NODE_ID" ] || NODE_ID_FROM=""
 
 # --- require a real provisioning signal --------------------------------------
 # ROLE must come from the seed or the kernel cmdline. A blank/absent role means
@@ -148,6 +163,20 @@ fi
 if [ "$ROLE" = "controlplane" ] && [ -z "$NODE_ID" ]; then
 	log "ERROR: role=controlplane seed carries no RASPUTIN_NODE_ID — the controlplane must be named."
 	log "Re-generate the seed (rasputin-provision / Add node) or add RASPUTIN_NODE_ID, then reboot."
+	exit 1
+fi
+
+# An operator-supplied node id must be a DNS label: it becomes this node's mDNS
+# hostname and the username the agent presents to the bus, which accepts
+# nothing else. It is deliberately NOT rewritten into a valid one — the join
+# token is bound to the id the operator chose, so a substituted id could never
+# join and would hide why. Fail loud like the checks above: the unit shows
+# failed, rasputin-agent (Requires= this unit) does not start, and .provisioned
+# stays unset so firstboot re-runs after the seed is fixed and the node rebooted.
+if [ -n "$NODE_ID_FROM" ] && ! rasputin_label_valid "$NODE_ID"; then
+	log "ERROR: node id '$NODE_ID_RAW' ($NODE_ID_FROM) is not a valid node id."
+	log "A node id must be 1-63 characters of a-z, 0-9 and -, and must not start or end with -."
+	log "Fix it to match the id the join token was issued for (or re-generate the seed with rasputin-provision / Add node), then reboot."
 	exit 1
 fi
 
@@ -210,11 +239,19 @@ if [ -z "$NODE_ID" ]; then
 		# wipes $PERSIST and re-mints — correctly a new node. See #9.
 		IDFILE=$PERSIST/node-id.rand
 		if [ -r "$IDFILE" ]; then
-			NODE_ID=$(cat "$IDFILE")
+			NODE_ID=$(rasputin_label_normalize "$(cat "$IDFILE")")
 		else
 			NODE_ID="node-$(tr -d '-' < /proc/sys/kernel/random/uuid | cut -c1-8)"
 			(umask 077; printf '%s\n' "$NODE_ID" > "$IDFILE") 2>/dev/null || true
 		fi
+	fi
+	# Valid by construction (node- + lowercase alphanumerics), so this can only
+	# trip on a damaged $PERSIST/node-id.rand. Checked anyway: an invalid id
+	# would reach node.env and the node would never join, with nothing logged.
+	if ! rasputin_label_valid "$NODE_ID"; then
+		log "ERROR: derived node id '$NODE_ID' is not a valid node id (1-63 characters of a-z, 0-9 and -)."
+		log "Set RASPUTIN_NODE_ID in the seed, or remove $PERSIST/node-id.rand to mint a new id, then reboot."
+		exit 1
 	fi
 fi
 
