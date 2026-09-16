@@ -60,12 +60,7 @@ expect() {
 	fi
 }
 
-long70=abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghij
 first63=abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabc
-# 62 chars then a space: normalizing turns the space into '-' at position 63,
-# which the cut leaves trailing and the final trim must remove.
-hyphen_at_63="abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijab cd"
-first62=abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijab
 tab=$(printf '\t')
 cr=$(printf '\r')
 nl='
@@ -73,27 +68,6 @@ nl='
 
 for sh in $TEST_SHELLS; do
 	echo "== $sh"
-
-	# ---- rasputin_label_normalize: derived ids --------------------------
-	f=rasputin_label_normalize
-	expect "$sh" "mixed case"            "kitchen-pi|rc=0"   $f "Kitchen-Pi"
-	expect "$sh" "spaces"                "abc-123-xyz|rc=0"  $f "ABC 123 XYZ"
-	expect "$sh" "hyphens trimmed"       "x|rc=0"            $f "--x--"
-	expect "$sh" "70 chars cut to 63"    "$first63|rc=0"     $f "$long70"
-	expect "$sh" "hyphen at 63 trimmed"  "$first62|rc=0"     $f "$hyphen_at_63"
-	expect "$sh" "wildcard only"         "|rc=0"             $f "*"
-	expect "$sh" "gt only"               "|rc=0"             $f ">"
-	expect "$sh" "dot"                   "a-b|rc=0"          $f "a.b"
-	expect "$sh" "empty"                 "|rc=0"             $f ""
-	expect "$sh" "only separators"       "|rc=0"             $f " .-_ "
-	expect "$sh" "already valid"         "node-1a2b3c4d|rc=0" $f "node-1a2b3c4d"
-	expect "$sh" "uuid unchanged"        "3f2b9c1e-8d4a-4c5b-9e6f-0a1b2c3d4e5f|rc=0" $f "3f2b9c1e-8d4a-4c5b-9e6f-0a1b2c3d4e5f"
-	expect "$sh" "runs collapse"         "a-b|rc=0"          $f "a  ..__  b"
-	expect "$sh" "tab, CR, newline"      "a-b-c-d|rc=0"      $f "a${tab}b${cr}c${nl}d"
-	expect "$sh" "non-ASCII"             "caf-1|rc=0"        $f "café 1"
-	expect "$sh" "shell metacharacters"  "a-b-c|rc=0"        $f 'a;$(b)`c`'
-	expect "$sh" "leading dash option"   "n|rc=0"            $f "-n"
-	expect "$sh" "node-id.rand newline"  "node-1a2b3c4d|rc=0" $f "node-1a2b3c4d${nl}"
 
 	# ---- rasputin_label_canon: operator ids (lowercase + trim only) ------
 	f=rasputin_label_canon
@@ -111,7 +85,7 @@ for sh in $TEST_SHELLS; do
 	expect "$sh" "valid simple"          "|rc=0"  $f "kitchen-pi"
 	expect "$sh" "valid one char"        "|rc=0"  $f "a"
 	expect "$sh" "valid digits"          "|rc=0"  $f "0123"
-	expect "$sh" "valid derived shape"   "|rc=0"  $f "node-9bbaa24a"
+	expect "$sh" "valid node-hex shape"  "|rc=0"  $f "node-9bbaa24a"
 	expect "$sh" "valid 63"              "|rc=0"  $f "$first63"
 	expect "$sh" "invalid 64"            "|rc=1"  $f "${first63}d"
 	expect "$sh" "invalid empty"         "|rc=1"  $f ""

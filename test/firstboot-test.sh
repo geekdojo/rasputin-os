@@ -318,6 +318,59 @@ cases() {
 	ok "unwritable bus dir: says why" "$(yes_if out_has "could not create")" "$OUT"
 	ok "unwritable bus dir: nothing stamped" "$(yes_if not provisioned)"
 	ok "unwritable bus dir: seed not scrubbed" "$(yes_if has_line "$SEED" "RASPUTIN_BUS_KEY=$KEY")"
+
+	# 13. A join token without a node id fails loudly: the token is bound to a
+	#     node id and the bus refuses it under any other, so the node must not
+	#     derive one (geekdojo/geekdojo-brain#423). Nothing is written, nothing
+	#     stamped, no id minted, and the token stays in the seed for the re-run.
+	#     A blank line, a whitespace-only value and a bare CR all count as none.
+	for idcase in absent empty spaces cr; do
+		case "$idcase" in
+			absent) idline="" ;;
+			empty)  idline="RASPUTIN_NODE_ID=" ;;
+			spaces) idline="RASPUTIN_NODE_ID=\"   \"" ;;
+			cr)     idline="RASPUTIN_NODE_ID=$cr" ;;
+		esac
+		setup
+		seed "RASPUTIN_NODE_ROLE=compute" "RASPUTIN_CLUSTER_ID=bench" \
+			"RASPUTIN_NATS_URL=nats://bench.local:4222" "RASPUTIN_CP_JOIN_TOKEN=tok-w1" \
+			"RASPUTIN_BUS_PIN=$PIN" "$idline"
+		cp "$SEED" "$W/seed.before"; fb
+		label="token, no node id ($idcase)"
+		ok "$label: fails" "$(yes_if test "$RC" != 0)" "$OUT"
+		ok "$label: says why" "$(yes_if out_has "carries a join token but no RASPUTIN_NODE_ID")" "$OUT"
+		ok "$label: nothing stamped" "$(yes_if not provisioned)"
+		ok "$label: no node.env" "$(yes_if not test -e "$P/node.env")"
+		ok "$label: no id minted" "$(yes_if not test -e "$P/node-id.rand")" "$(ls -A "$P")"
+		ok "$label: seed untouched (token not scrubbed)" "$(yes_if cmp -s "$W/seed.before" "$SEED")" "$(cat "$SEED")"
+		ok "$label: no mount calls" "$(yes_if test ! -s "$W/mount.calls")" "$(cat "$W/mount.calls")"
+	done
+
+	# 14. The same seed with its node id: provisions exactly as before, with the
+	#     seed's id and token in node.env and the token scrubbed.
+	setup; compute_seed; fb
+	ok "token + node id: provisions" "$RC" "$OUT"
+	ok "token + node id: stamped" "$(yes_if provisioned)"
+	ok "token + node id: node.env carries the seed's id" "$(yes_if has_line "$P/node.env" "RASPUTIN_NODE_ID=w1")" "$(cat "$P/node.env")"
+	ok "token + node id: node.env carries the token" "$(yes_if has_line "$P/node.env" "RASPUTIN_CP_JOIN_TOKEN=tok-w1")" "$(cat "$P/node.env")"
+	ok "token + node id: no id minted" "$(yes_if not test -e "$P/node-id.rand")"
+
+	# 15. rasputin.id= on the kernel command line still names a node whose seed
+	#     has a token and no id.
+	setup
+	seed "RASPUTIN_NODE_ROLE=compute" "RASPUTIN_NATS_URL=nats://bench.local:4222" "RASPUTIN_CP_JOIN_TOKEN=tok-w2"
+	printf 'quiet rasputin.id=w2\n' > "$W/cmdline"; fb
+	ok "cmdline id + token: provisions" "$RC" "$OUT"
+	ok "cmdline id + token: node.env carries the cmdline id" "$(yes_if has_line "$P/node.env" "RASPUTIN_NODE_ID=w2")" "$(cat "$P/node.env" 2>&1)"
+
+	# 16. A controlplane seed with no node id still fails, with its own message.
+	setup
+	seed "RASPUTIN_NODE_ROLE=controlplane" "RASPUTIN_CLUSTER_ID=bench" "RASPUTIN_BUS_AUTH=enforce"
+	fb
+	ok "cp, no node id: fails" "$(yes_if test "$RC" != 0)" "$OUT"
+	ok "cp, no node id: says why" "$(yes_if out_has "the controlplane must be named")" "$OUT"
+	ok "cp, no node id: nothing stamped" "$(yes_if not provisioned)"
+	ok "cp, no node id: no role marker" "$(yes_if not test -e "$P/role.controlplane")"
 }
 
 for SH in $TEST_SHELLS; do

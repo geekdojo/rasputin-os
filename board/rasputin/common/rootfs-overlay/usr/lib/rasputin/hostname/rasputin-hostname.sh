@@ -11,9 +11,8 @@
 #                                                 answers <cluster-id>.local —
 #                                                 WebAuthn RP ID + cert SAN;
 #                                                 ADR-0003)
-#   any other role        ->  the node id        (e.g. node-1a2b3c4d from
-#                                                 the DMI/SoC serial, via
-#                                                 firstboot's node.env)
+#   any other role        ->  the node id        (the seed's RASPUTIN_NODE_ID,
+#                                                 via firstboot's node.env)
 #
 # Why transient (kernel hostname, not /etc/hostname): the rootfs is
 # read-only squashfs, so the static hostname cannot be rewritten at runtime.
@@ -67,8 +66,8 @@ if [ "$ROLE" = "controlplane" ]; then
 	# identity.
 	#
 	# Lowercase (and trim) first rather than reject: DNS labels are
-	# case-insensitive, and firstboot already lowercases the DMI serial when
-	# deriving a node id, so "Home1" becoming "home1" is consistent rather than
+	# case-insensitive, and firstboot already lowercases a seeded node id the
+	# same way, so "Home1" becoming "home1" is consistent rather than
 	# surprising. Same helpers, same rule as the node id.
 	CLUSTER_ID=$(rasputin_label_canon "$CLUSTER_ID")
 

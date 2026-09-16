@@ -148,6 +148,7 @@ Mount the image's FAT seed partition and edit `rasputin-seed.env`:
 
 ```sh
 RASPUTIN_NODE_ROLE=compute            # required; or controlplane
+RASPUTIN_NODE_ID=w1                   # required; for compute, the id the join token was issued for
 RASPUTIN_NATS_URL=nats://rasputin.local:4222
 RASPUTIN_CP_JOIN_TOKEN=...            # required for compute; minted by the controlplane
 RASPUTIN_BUS_PIN=sha256/...           # optional; the controlplane's bus key pin — the bus is then TLS
@@ -156,6 +157,8 @@ RASPUTIN_SSH_AUTHORIZED_KEY="ssh-ed25519 AAAA... you@laptop"  # optional; quote 
 
 The first controlplane needs no token — it self-initializes against its own
 embedded NATS and becomes the authority that mints tokens for everyone else.
+Every node needs `RASPUTIN_NODE_ID`: a join token is bound to one node id, so
+first boot fails rather than derive an id the token would not match.
 A matched set from `rasputin-provision` also gives the controlplane seed
 `RASPUTIN_BUS_KEY`, the bus private key: first boot writes it to
 `/var/lib/rasputin/bus/bus.key` and blanks it in the seed. Without one the
