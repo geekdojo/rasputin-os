@@ -36,10 +36,15 @@ Environment=RASPUTIN_HTTPS_ADDR=:443
 # Embedded NATS must be reachable from the other nodes' agents (firewall,
 # compute) — they attach LAN-first, mesh-second (first-run-bootstrap.md
 # decision #6). The api's code default is 127.0.0.1 (dev posture).
-# ⚠ MVS trust posture: the bus is currently TOFU/unauthenticated
-# (architecture.md decision #14 — production NKey/JWT via the seed join
-# token is the gating item before design partners). LAN exposure here is
-# the documented interim; override to 127.0.0.1 via node.env to close it.
+# Trust on :4222: nodes authenticate with their seed join token (bus auth
+# callout, on unless RASPUTIN_BUS_AUTH=off). From the control-plane release
+# carrying bus TLS (rasputin-control-plane#317) the api also serves TLS with the
+# dedicated bus key at /var/lib/rasputin/bus/bus.key, which nodes trust by pin
+# (RASPUTIN_BUS_PIN; geekdojo-brain#448). A controlplane seed's RASPUTIN_BUS_KEY
+# is written there by firstboot; without one the api generates the key.
+# RASPUTIN_BUS_TLS is deliberately NOT set here: setting it pins the
+# offer/migrate/require ladder and the api then refuses to move it. Unset, the
+# api starts in its default, `offer` (TLS beside plaintext, no pin delivery).
 Environment=RASPUTIN_NATS_HOST=0.0.0.0
 # Self-hosted Headscale advertises THIS as its server_url — the address every
 # node's tailscaled connects to. Pin the stable mDNS name, not the controlplane's

@@ -21,22 +21,134 @@ set -eu
 # The rootfs is read-only
 # squashfs, so EVERYTHING this script writes must land under PERSIST.
 # /etc/rasputin/node.env is a baked-in symlink to $NODE_ENV for operators.
-PERSIST=/var/lib/rasputin
+#
+# The RASPUTIN_FIRSTBOOT_* overrides exist for test/firstboot-test.sh, which runs
+# this script against a scratch directory; the unit sets none of them, so on a
+# node every path is the real one below.
+PERSIST="${RASPUTIN_FIRSTBOOT_PERSIST:-/var/lib/rasputin}"
 NODE_ENV=$PERSIST/node.env
-SEED_MNT=/run/rasputin-seed
+SEED_MNT="${RASPUTIN_FIRSTBOOT_SEED_MNT:-/run/rasputin-seed}"
 SEED_FILE="$SEED_MNT/rasputin-seed.env"
+LIBDIR="${RASPUTIN_FIRSTBOOT_LIBDIR:-/usr/lib/rasputin}"
+CMDLINE="${RASPUTIN_FIRSTBOOT_CMDLINE:-/proc/cmdline}"
+KMSG="${RASPUTIN_FIRSTBOOT_KMSG:-/dev/kmsg}"
+# Indirected rather than stubbed on PATH: under the CI runner's (Ubuntu)
+# busybox sh, a PATH stub named mount was bypassed for busybox's own applet.
+MOUNT="${RASPUTIN_FIRSTBOOT_MOUNT:-mount}"
 
 # Also log to /dev/kmsg: systemd stops mirroring unit output to the console
 # once journald is up, but printk always reaches every console= device —
 # so these lines show on serial/HDMI and the CI smoke can assert on them.
 log() {
 	echo "rasputin-firstboot: $*"
-	echo "rasputin-firstboot: $*" > /dev/kmsg 2>/dev/null || true
+	echo "rasputin-firstboot: $*" > "$KMSG" 2>/dev/null || true
 }
 
 # DNS-label helpers shared with rasputin-hostname.sh (node id rules, below).
 # shellcheck source=/dev/null
-. /usr/lib/rasputin/node-id/node-id.sh
+. "$LIBDIR/node-id/node-id.sh"
+
+# --- bus TLS seed values (geekdojo/geekdojo-brain#448) -------------------------
+# The contract is docs/bus-tls-contract.md in rasputin-control-plane:
+#   RASPUTIN_BUS_PIN  every seed. "sha256/" + the standard padded base64 of the
+#                     SHA-256 of the bus key's DER SubjectPublicKeyInfo. Public.
+#   RASPUTIN_BUS_KEY  controlplane seed only. The bus private key as one line of
+#                     standard base64 of its PKCS#8 DER. SECRET: never logged,
+#                     never put in node.env, scrubbed from the seed once written.
+# Both use only A-Z a-z 0-9 + / =, so they are written unquoted.
+
+# bus_trim VALUE — print VALUE without surrounding whitespace (a CR from a seed
+# saved on Windows included). The agent and the api trim exactly this much and
+# nothing else, so an inner space or a stray quote is still refused below.
+bus_trim() {
+	_bt_ws=$(printf ' \t\n\r\v\f')
+	_bt_v=$1
+	_bt_v=${_bt_v#"${_bt_v%%[!$_bt_ws]*}"}
+	_bt_v=${_bt_v%"${_bt_v##*[!$_bt_ws]}"}
+	printf '%s' "$_bt_v"
+}
+
+# The base64 alphabet, spelled out: range expressions in shell patterns follow
+# the locale's collation, which is not ASCII everywhere.
+B64="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+
+# bus_b64_strict VALUE — exit 0 when VALUE is canonical standard base64, as Go's
+# base64.StdEncoding.Strict() demands: whole quanta, "=" padding only at the
+# end, and the unused low bits of the last data character zero (so one byte
+# string has exactly one encoding, and a pin compares byte for byte).
+bus_b64_strict() {
+	_bs=$1
+	[ -n "$_bs" ] && [ "$(( ${#_bs} % 4 ))" -eq 0 ] || return 1
+	case "$_bs" in *[!"$B64"=]*) return 1 ;; esac
+	case "$_bs" in
+		*==) _bs_body=${_bs%==}; _bs_last="AQgw" ;;
+		*=)  _bs_body=${_bs%=};  _bs_last="AEIMQUYcgkosw048" ;;
+		*)   _bs_body=$_bs;      _bs_last="$B64" ;;
+	esac
+	case "$_bs_body" in *=*) return 1 ;; esac
+	case "$_bs_body" in *[!"$_bs_last"]) return 1 ;; esac
+	return 0
+}
+
+# bus_pin_valid PIN — exit 0 for exactly the form the agent accepts
+# (proto.ParseBusPin): "sha256/" then 44 characters of strict base64, which is
+# 32 bytes. Hex, URL-safe base64, a missing "=", "SHA256/" and curl's
+# "sha256//" are all refused, as they are by the agent.
+bus_pin_valid() {
+	case "$1" in sha256/*) ;; *) return 1 ;; esac
+	_bp=${1#sha256/}
+	[ "${#_bp}" -eq 44 ] || return 1
+	case "$_bp" in *=) ;; *) return 1 ;; esac
+	case "$_bp" in *==) return 1 ;; esac
+	bus_b64_strict "$_bp"
+}
+
+# bus_b64_val CHAR — print the 6-bit value of one base64 character.
+bus_b64_val() {
+	_bv=${B64%%"$1"*}
+	printf '%s' "${#_bv}"
+}
+
+# bus_key_valid KEY — exit 0 when KEY is strict base64 whose decoded length is
+# exactly the length its outer DER SEQUENCE header declares. firstboot has no
+# openssl or base64 binary it can count on, so it cannot parse the key; this is
+# the check that catches the realistic damage — a value truncated or joined in
+# transit — before it is written and scrubbed. The api parses the key properly
+# at start; one that passes here and still fails there leaves the bus
+# plaintext-only, logged, and the api never replaces the file.
+bus_key_valid() {
+	bus_b64_strict "$1" || return 1
+	[ "${#1}" -ge 8 ] || return 1
+	# Decode the first two quanta (6 bytes) — enough for any header up to
+	# 30 82 HH LL — into two 24-bit numbers.
+	_bk_rest=$1
+	_bk_n1=0
+	_bk_n2=0
+	for _bk_i in 1 2 3 4 5 6 7 8; do
+		_bk_c=${_bk_rest%"${_bk_rest#?}"}
+		_bk_rest=${_bk_rest#?}
+		[ "$_bk_c" = "=" ] && return 1
+		_bk_v=$(bus_b64_val "$_bk_c")
+		if [ "$_bk_i" -le 4 ]; then
+			_bk_n1=$(( (_bk_n1 << 6) | _bk_v ))
+		else
+			_bk_n2=$(( (_bk_n2 << 6) | _bk_v ))
+		fi
+	done
+	_bk_tag=$(( (_bk_n1 >> 16) & 255 ))
+	_bk_len=$(( (_bk_n1 >> 8) & 255 ))
+	_bk_b2=$(( _bk_n1 & 255 ))
+	_bk_b3=$(( (_bk_n2 >> 16) & 255 ))
+	[ "$_bk_tag" -eq 48 ] || return 1                 # 0x30: SEQUENCE
+	if [ "$_bk_len" -lt 128 ]; then _bk_total=$(( 2 + _bk_len ))
+	elif [ "$_bk_len" -eq 129 ]; then _bk_total=$(( 3 + _bk_b2 ))
+	elif [ "$_bk_len" -eq 130 ]; then _bk_total=$(( 4 + (_bk_b2 << 8) + _bk_b3 ))
+	else return 1
+	fi
+	_bk_pad=0
+	case "$1" in *==) _bk_pad=2 ;; *=) _bk_pad=1 ;; esac
+	[ "$(( ${#1} / 4 * 3 - _bk_pad ))" -eq "$_bk_total" ]
+}
 
 # --- locate + read the seed --------------------------------------------------
 # The seed FAT is mounted read-only at $SEED_MNT by run-rasputin\x2dseed.mount
@@ -69,6 +181,8 @@ BMC_HOST=""
 # usr/lib/rasputin/netfallback/.
 FALLBACK_ADDRESS=""
 FALLBACK_ADDRESS_SET=""
+BUS_PIN=""
+BUS_KEY=""
 
 if [ -f "$SEED_FILE" ]; then
 	log "reading seed $SEED_FILE"
@@ -85,6 +199,8 @@ if [ -f "$SEED_FILE" ]; then
 	SSH_KEY="${RASPUTIN_SSH_AUTHORIZED_KEY:-}"
 	NTP_SERVER="${RASPUTIN_NTP_SERVER:-}"
 	BMC_HOST="${RASPUTIN_BMC_HOST:-}"
+	BUS_PIN="${RASPUTIN_BUS_PIN:-}"
+	BUS_KEY="${RASPUTIN_BUS_KEY:-}"
 	if [ -n "${RASPUTIN_FALLBACK_ADDRESS+set}" ]; then
 		FALLBACK_ADDRESS_SET=1
 		FALLBACK_ADDRESS="$RASPUTIN_FALLBACK_ADDRESS"
@@ -100,7 +216,7 @@ fi
 # key still gives the operator SSH access to debug it. Public key, not a
 # secret — no scrub, and never let a merge hiccup fail provisioning.
 if [ -n "$SSH_KEY" ]; then
-	if printf '%s\n' "$SSH_KEY" | /usr/lib/rasputin/dropbear/merge-authorized-keys.sh; then
+	if printf '%s\n' "$SSH_KEY" | "$LIBDIR/dropbear/merge-authorized-keys.sh"; then
 		log "merged seed SSH authorized key into /var/lib/rasputin/dropbear/authorized_keys"
 	else
 		log "WARNING: failed to merge seed SSH authorized key (continuing)"
@@ -108,7 +224,7 @@ if [ -n "$SSH_KEY" ]; then
 fi
 
 # --- kernel cmdline override (escape hatch) ----------------------------------
-for tok in $(cat /proc/cmdline); do
+for tok in $(cat "$CMDLINE"); do
 	case "$tok" in
 		rasputin.role=*) ROLE="${tok#rasputin.role=}" ;;
 		rasputin.id=*)   NODE_ID="${tok#rasputin.id=}"; NODE_ID_FROM="rasputin.id= on the kernel command line" ;;
@@ -180,6 +296,32 @@ if [ -n "$NODE_ID_FROM" ] && ! rasputin_label_valid "$NODE_ID"; then
 	exit 1
 fi
 
+# --- bus TLS values must be exactly right, or nothing is written ---------------
+# Checked with the other fail-loud checks, BEFORE anything reaches node.env or
+# the bus directory, and before the BMC reboot below. Both failures would
+# otherwise be stamped in: .provisioned stops firstboot re-running, so a bad
+# pin could no longer be fixed by editing the seed, and a bad key would be
+# written and then scrubbed from the seed. A bad key is the worse of the two —
+# the api would run the bus plaintext-only and refuse to replace the file, and
+# every node in the matched set pins the key the seed was meant to carry.
+# The key's value is never logged.
+BUS_PIN=$(bus_trim "$BUS_PIN")
+if [ -n "$BUS_PIN" ] && ! bus_pin_valid "$BUS_PIN"; then
+	log "ERROR: RASPUTIN_BUS_PIN '$BUS_PIN' is not a valid bus pin."
+	log "It must be sha256/ followed by 44 characters of standard base64 (51 characters in all), exactly as rasputin-provision / Add node wrote it."
+	log "Fix it (or remove the line to join without TLS until the controlplane delivers the pin), then reboot."
+	exit 1
+fi
+BUS_KEY_IN_SEED=""
+[ -n "$BUS_KEY" ] && BUS_KEY_IN_SEED=1
+BUS_KEY=$(bus_trim "$BUS_KEY")
+if [ "$ROLE" = "controlplane" ] && [ -n "$BUS_KEY_IN_SEED" ] && ! bus_key_valid "$BUS_KEY"; then
+	log "ERROR: RASPUTIN_BUS_KEY in the seed is not a usable bus key (value not shown: it is secret)."
+	log "It must be the one-line base64 PKCS#8 key rasputin-provision wrote, complete and unwrapped. Nothing was written."
+	log "Copy the controlplane seed from the matched set again, then reboot."
+	exit 1
+fi
+
 # --- BMC-host serial-console policy (control-plane/bmc-bitscope.md §5) -------
 # On the node whose serial0 drives a BMC bus, that UART is the command
 # channel: no login getty (the baked serial-getty drop-in conditions on the
@@ -194,7 +336,7 @@ fi
 if [ "$BMC_HOST" = "1" ]; then
 	log "bmc-host node: suppressing serial console on serial0"
 	touch "$PERSIST/bmc-host"
-	/usr/lib/rasputin/bmc/strip-serial-console.sh
+	"$LIBDIR/bmc/strip-serial-console.sh"
 	case $? in
 	10)
 		# Exit NON-zero on purpose: rasputin-agent Requires= this unit, and
@@ -279,6 +421,14 @@ RASPUTIN_NODE_ID=$NODE_ID
 RASPUTIN_CLUSTER_ID=$CLUSTER_ID
 RASPUTIN_NATS_URL=$NATS_URL
 EOF
+# The bus pin — ALL roles, the controlplane included: its own agent dials
+# 127.0.0.1 and pins the key too. Public, so it stays in the seed. Validated
+# above, so its alphabet is A-Z a-z 0-9 + / = and it needs no quoting. No pin
+# line means the agent dials in plaintext until the controlplane delivers one
+# into its state dir (/var/lib/rasputin/agent-state/bus/pin, persistent).
+if [ -n "$BUS_PIN" ]; then
+	echo "RASPUTIN_BUS_PIN=$BUS_PIN" >> "$NODE_ENV"
+fi
 # Optional operator NTP server(s) — ALL roles: every node needs correct time to
 # mint/verify its mesh + API TLS (a no-RTC node with a bogus clock mints an
 # "expired" leaf). rasputin-timesync-apply.service renders this into a
@@ -309,7 +459,7 @@ if [ "$ROLE" = "controlplane" ]; then
 	echo "RASPUTIN_SELF_NODE_ID=$NODE_ID" >> "$NODE_ENV"
 	# A provisioned matched set ships enforce on (bus auth required), carried in
 	# the seed so a pre-paired cluster comes up enforced with no manual flip.
-	# Absent → the api's default (off). Only the controlplane's api reads this.
+	# Absent → the api's default (enforce). Only the controlplane's api reads this.
 	# token-provisioning-pipeline.md §4.
 	if [ -n "$BUS_AUTH" ]; then
 		echo "RASPUTIN_BUS_AUTH=$BUS_AUTH" >> "$NODE_ENV"
@@ -364,26 +514,83 @@ if [ "$ROLE" = "controlplane" ]; then
 		cp "$SEED_MNT/rasputin-bus-tokens.json" "$PERSIST/bus/preseed.json"
 		log "staged bus-token preseed for the api to preload"
 	fi
+	# The bus key from a matched set (geekdojo/geekdojo-brain#448). Written
+	# verbatim, one line, to the file the api serves TLS on :4222 with
+	# (<RASPUTIN_DATA_DIR>/bus/bus.key). Never into node.env: the api does not
+	# read it from the environment, and node.env is sourced by other units.
+	#
+	# NEVER over an existing bus.key: every node pins that key, and replacing it
+	# strands the fleet. `ln` refuses to replace an existing name, so the check
+	# and the write are one atomic step. A write that fails for any other
+	# reason fails provisioning — carrying on would let the api generate a
+	# different key than the one this matched set's nodes pin.
+	if [ -n "$BUS_KEY" ]; then
+		BUS_DIR="$PERSIST/bus"
+		BUS_KEY_FILE="$BUS_DIR/bus.key"
+		if ! { mkdir -p "$BUS_DIR" && chmod 700 "$BUS_DIR"; }; then
+			log "ERROR: could not create $BUS_DIR for the bus key — provisioning stopped so the api does not generate a key the nodes do not pin."
+			exit 1
+		fi
+		if [ -e "$BUS_KEY_FILE" ] || [ -L "$BUS_KEY_FILE" ]; then
+			if [ "$(bus_trim "$(cat "$BUS_KEY_FILE" 2>/dev/null || true)")" = "$BUS_KEY" ]; then
+				log "bus key already in place at $BUS_KEY_FILE (same key as the seed)"
+			else
+				log "WARNING: $BUS_KEY_FILE already exists and differs from the seed's RASPUTIN_BUS_KEY; keeping the existing key (nodes pin it). The seed's key was NOT written."
+			fi
+		else
+			bus_tmp="$BUS_DIR/.bus.key.$$"
+			rm -f "$bus_tmp"
+			if (umask 077 && printf '%s\n' "$BUS_KEY" > "$bus_tmp") \
+				&& chmod 600 "$bus_tmp" \
+				&& ln "$bus_tmp" "$BUS_KEY_FILE" 2>/dev/null; then
+				rm -f "$bus_tmp"
+				# Flush before .provisioned is stamped and the seed scrubbed: a
+				# power cut that left an empty bus.key would be a file the api
+				# refuses to use and never replaces.
+				sync
+				log "wrote the bus key from the seed to $BUS_KEY_FILE"
+			else
+				rm -f "$bus_tmp"
+				log "ERROR: could not write the bus key to $BUS_KEY_FILE — provisioning stopped so the api does not generate a key the nodes do not pin."
+				exit 1
+			fi
+		fi
+	elif [ -n "$BUS_PIN" ] && [ ! -e "$PERSIST/bus/bus.key" ]; then
+		# Legitimate on a controlplane that will be restored from an identity
+		# backup (which puts bus/bus.key back); otherwise the api generates a
+		# key whose pin is not this one, and nothing pinned can join.
+		log "WARNING: controlplane seed carries RASPUTIN_BUS_PIN but no RASPUTIN_BUS_KEY, and there is no bus key yet; unless an identity backup is restored, the api will generate a key this pin does not match."
+	fi
 else
 	rm -f "$PERSIST/role.controlplane"
+	# The bus private key belongs in the controlplane seed only. On any other
+	# role it is a seed rendered wrong: never written, and scrubbed below like
+	# a consumed secret — the fleet's key must not sit on this node's FAT. Not a
+	# provisioning failure: this node needs nothing from the key.
+	if [ -n "$BUS_KEY_IN_SEED" ]; then
+		log "WARNING: role=$ROLE seed carries RASPUTIN_BUS_KEY, which belongs only in the controlplane seed; ignored and scrubbed. Treat that key as exposed."
+	fi
 fi
 
 # --- stamp provisioned -------------------------------------------------------
 date -u +%Y-%m-%dT%H:%M:%SZ > "$PERSIST/.provisioned"
 
-# Scrub the consumed one-time join token from the seed FAT so it isn't left in
-# plaintext at rest. Best-effort, and only on this successful path: we've already
-# stamped .provisioned (firstboot won't re-run and re-need it) and the token now
-# lives in node.env on the root-only persistent partition for the agent. A
-# read-only/degraded seed mount just leaves it — the token is node-bound +
+# Scrub the consumed secrets — the one-time join token and the bus private key —
+# from the seed FAT so they aren't left in plaintext at rest. Best-effort, and
+# only on this successful path: we've already stamped .provisioned (firstboot
+# won't re-run and re-need them), the token now lives in node.env on the
+# root-only persistent partition for the agent, and the key in bus/bus.key. A
+# read-only/degraded seed mount just leaves them — the token is node-bound +
 # single-use. Never let a scrub hiccup fail an otherwise-successful provision.
-if [ -n "$JOIN_TOKEN" ] && [ -f "$SEED_FILE" ] && mount -o remount,rw "$SEED_MNT" 2>/dev/null; then
+# The bus pin is public and stays.
+if { [ -n "$JOIN_TOKEN" ] || [ -n "$BUS_KEY_IN_SEED" ]; } && [ -f "$SEED_FILE" ] && "$MOUNT" -o remount,rw "$SEED_MNT" 2>/dev/null; then
 	scrub="$PERSIST/.seed-scrub.$$"
-	if sed 's#^RASPUTIN_CP_JOIN_TOKEN=.*#RASPUTIN_CP_JOIN_TOKEN=#' "$SEED_FILE" > "$scrub" 2>/dev/null; then
-		cat "$scrub" > "$SEED_FILE" 2>/dev/null && sync && log "scrubbed consumed join token from seed FAT" || true
+	if sed -e 's#^RASPUTIN_CP_JOIN_TOKEN=.*#RASPUTIN_CP_JOIN_TOKEN=#' \
+		-e 's#^RASPUTIN_BUS_KEY=.*#RASPUTIN_BUS_KEY=#' "$SEED_FILE" > "$scrub" 2>/dev/null; then
+		cat "$scrub" > "$SEED_FILE" 2>/dev/null && sync && log "scrubbed consumed secrets (join token, bus key) from seed FAT" || true
 	fi
 	rm -f "$scrub"
-	mount -o remount,ro "$SEED_MNT" 2>/dev/null || true
+	"$MOUNT" -o remount,ro "$SEED_MNT" 2>/dev/null || true
 fi
 
 log "provisioning complete"
