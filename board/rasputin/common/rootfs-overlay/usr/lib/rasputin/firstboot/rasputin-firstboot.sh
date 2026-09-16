@@ -32,6 +32,9 @@ SEED_FILE="$SEED_MNT/rasputin-seed.env"
 LIBDIR="${RASPUTIN_FIRSTBOOT_LIBDIR:-/usr/lib/rasputin}"
 CMDLINE="${RASPUTIN_FIRSTBOOT_CMDLINE:-/proc/cmdline}"
 KMSG="${RASPUTIN_FIRSTBOOT_KMSG:-/dev/kmsg}"
+# Indirected rather than stubbed on PATH: under the CI runner's (Ubuntu)
+# busybox sh, a PATH stub named mount was bypassed for busybox's own applet.
+MOUNT="${RASPUTIN_FIRSTBOOT_MOUNT:-mount}"
 
 # Also log to /dev/kmsg: systemd stops mirroring unit output to the console
 # once journald is up, but printk always reaches every console= device —
@@ -580,14 +583,14 @@ date -u +%Y-%m-%dT%H:%M:%SZ > "$PERSIST/.provisioned"
 # read-only/degraded seed mount just leaves them — the token is node-bound +
 # single-use. Never let a scrub hiccup fail an otherwise-successful provision.
 # The bus pin is public and stays.
-if { [ -n "$JOIN_TOKEN" ] || [ -n "$BUS_KEY_IN_SEED" ]; } && [ -f "$SEED_FILE" ] && mount -o remount,rw "$SEED_MNT" 2>/dev/null; then
+if { [ -n "$JOIN_TOKEN" ] || [ -n "$BUS_KEY_IN_SEED" ]; } && [ -f "$SEED_FILE" ] && "$MOUNT" -o remount,rw "$SEED_MNT" 2>/dev/null; then
 	scrub="$PERSIST/.seed-scrub.$$"
 	if sed -e 's#^RASPUTIN_CP_JOIN_TOKEN=.*#RASPUTIN_CP_JOIN_TOKEN=#' \
 		-e 's#^RASPUTIN_BUS_KEY=.*#RASPUTIN_BUS_KEY=#' "$SEED_FILE" > "$scrub" 2>/dev/null; then
 		cat "$scrub" > "$SEED_FILE" 2>/dev/null && sync && log "scrubbed consumed secrets (join token, bus key) from seed FAT" || true
 	fi
 	rm -f "$scrub"
-	mount -o remount,ro "$SEED_MNT" 2>/dev/null || true
+	"$MOUNT" -o remount,ro "$SEED_MNT" 2>/dev/null || true
 fi
 
 log "provisioning complete"

@@ -15,7 +15,8 @@
 #
 # How. The real script runs against a scratch directory: its RASPUTIN_FIRSTBOOT_*
 # overrides point the persistent partition, the seed mount, /proc/cmdline and
-# /dev/kmsg into it, and stubs on PATH stand in for mount, systemctl and sync.
+# /dev/kmsg into it and swap mount for a recording stub, and stubs on PATH stand
+# in for systemctl and sync.
 # No root, no partitions, no systemd.
 #
 # Keys. The bus key and pin are generated per run with openssl, and the pin with
@@ -142,6 +143,7 @@ fb() {
 		RASPUTIN_FIRSTBOOT_LIBDIR="$LIBDIR" \
 		RASPUTIN_FIRSTBOOT_CMDLINE="$W/cmdline" \
 		RASPUTIN_FIRSTBOOT_KMSG="$W/kmsg" \
+		RASPUTIN_FIRSTBOOT_MOUNT="$BIN/mount" \
 		"$@" 2>&1)
 	RC=$?
 }
