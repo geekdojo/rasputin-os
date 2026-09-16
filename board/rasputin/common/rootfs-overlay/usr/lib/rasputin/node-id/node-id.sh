@@ -10,15 +10,12 @@
 # rasputin-provision's normalizeDNSLabel applies when it assigns an id (and to
 # the cluster id, which rasputin-hostname.sh checks with the same helpers).
 #
-# Two kinds of value, two behaviours:
-#   - DERIVED on the node: rasputin_label_normalize bends a raw string into a
-#     valid label, deterministically.
-#   - SUPPLIED by an operator (seed RASPUTIN_NODE_ID, rasputin.id= on the kernel
-#     cmdline): the join token is bound to the id they chose, so it is only
-#     lowercased and trimmed (rasputin_label_canon, as rasputin-provision does)
-#     and then CHECKED with rasputin_label_valid. Rewriting it any further would
-#     produce an id the token does not match — a node that can never join, with
-#     no hint why.
+# A node id is always SUPPLIED (seed RASPUTIN_NODE_ID, or rasputin.id= on the
+# kernel cmdline) — the node never derives one, because the join token is bound
+# to the id it was issued for (geekdojo/geekdojo-brain#423). So it is only
+# lowercased and trimmed (rasputin_label_canon, as rasputin-provision does) and
+# then CHECKED with rasputin_label_valid. Rewriting it any further would produce
+# an id the token does not match — a node that can never join, with no hint why.
 #
 # Plain POSIX sh (the image's /bin/sh is not bash): no `local`; helper
 # variables carry an _rl_ prefix instead. Tested by test/node-id-test.sh.
@@ -44,19 +41,4 @@ rasputin_label_canon() {
 	_rl_v=${_rl_v#"${_rl_v%%[!$_rl_ws]*}"}
 	_rl_v=${_rl_v%"${_rl_v##*[!$_rl_ws]}"}
 	printf '%s' "$_rl_v" | LC_ALL=C tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz'
-}
-
-# rasputin_label_normalize VALUE
-#   Print a valid node id derived from VALUE, or nothing when VALUE holds no
-#   usable character: lowercase, map every character outside a-z 0-9 - to '-'
-#   (each byte of a multi-byte character counts as one), collapse runs of '-',
-#   trim '-' from both ends, cut to 63 characters, trim a trailing '-' again.
-#   An empty result means "fall through to the next id source".
-rasputin_label_normalize() {
-	_rl_v=$(printf '%s' "$1" \
-		| LC_ALL=C tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz' \
-		| LC_ALL=C tr '\n' ' ' \
-		| LC_ALL=C sed 's/[^abcdefghijklmnopqrstuvwxyz0123456789-]/-/g; s/--*/-/g; s/^-//; s/-$//')
-	_rl_v=$(printf '%s\n' "$_rl_v" | LC_ALL=C cut -c1-63)
-	printf '%s' "${_rl_v%-}"
 }

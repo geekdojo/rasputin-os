@@ -11,8 +11,10 @@
 #   1. /run/rasputin-seed/rasputin-seed.env   (mounted seed partition)
 #   2. kernel cmdline rasputin.role=… rasputin.nats=… (override/escape hatch)
 # ROLE is REQUIRED (from 1 or 2) — a blank/absent role is an un-provisioned node
-# and firstboot fails loud rather than inventing one. Optional fields default:
-# id from the SoC/DMI serial, nats to the controlplane mDNS name (rasputin.local).
+# and firstboot fails loud rather than inventing one. The node id is REQUIRED
+# too (seed RASPUTIN_NODE_ID, or rasputin.id= on the cmdline): the join token is
+# bound to it, so the node never derives one. Optional fields default: nats to
+# the controlplane mDNS name (rasputin.local).
 #
 set -eu
 
@@ -158,8 +160,8 @@ bus_key_valid() {
 # to the cmdline/defaults below.
 ROLE=""
 NODE_ID=""
-# Where an operator-supplied node id came from, for the error message if it is
-# not a valid DNS label. Empty = the id is derived on this node below.
+# Where the node id came from, for the error message if it is not a valid DNS
+# label. Empty = no node id was supplied, which fails provisioning below.
 NODE_ID_FROM=""
 # The cluster's name. ADR-0003 makes this the source of the node's identity —
 # mDNS hostname, NATS URL, Headscale server_url, leaf SANs, WebAuthn RP ID —
@@ -267,29 +269,39 @@ if [ "$ROLE" != "controlplane" ] && [ -z "$JOIN_TOKEN" ]; then
 	exit 1
 fi
 
-# A controlplane seed must NAME the node. The serial fallback below is fine for
-# a compute/storage node (zero-touch adds), but the controlplane's id is the
-# cluster's identity anchor — its mesh hostname, the setup wizard's self-enroll
-# target, its inventory row — and every real provisioning path
-# (rasputin-provision, the Add-node wizard) always writes RASPUTIN_NODE_ID, so a
-# controlplane seed without one is by construction a hand-written/botched seed.
-# Fail loud like the role/token checks above rather than silently minting
-# node-<serial> (bit rasputin-local 2026-07-12: a leftover OTA-test hand-seed
-# left the CP named node-9bbaa24a — and, unnoticed alongside it, unenforced).
-if [ "$ROLE" = "controlplane" ] && [ -z "$NODE_ID" ]; then
-	log "ERROR: role=controlplane seed carries no RASPUTIN_NODE_ID — the controlplane must be named."
+# Every seed must NAME the node; nothing derives an id on the node any more.
+# Every real provisioning path (rasputin-provision, the Add-node wizard) always
+# writes RASPUTIN_NODE_ID, so a seed without one is a hand-written/botched seed.
+#   - Any node with a join token: the token is bound to a node id, and the bus
+#     refuses a token presented under any other id (an unbound token no longer
+#     exists — rasputin-control-plane #318, geekdojo/geekdojo-brain#423). An id
+#     derived here from the SoC/DMI serial could never match, so the node would
+#     boot "up" and never join. Every non-controlplane role carries a token
+#     (checked above), so this covers them all.
+#   - The controlplane: its id is the cluster's identity anchor — its mesh
+#     hostname, the setup wizard's self-enroll target, its inventory row (bit
+#     rasputin-local 2026-07-12: a leftover OTA-test hand-seed left the CP named
+#     node-9bbaa24a — and, unnoticed alongside it, unenforced).
+# Fail loud like the role/token checks above, before anything is written or
+# stamped, so firstboot re-runs once the seed is fixed and the node rebooted.
+if [ -z "$NODE_ID" ]; then
+	if [ "$ROLE" = "controlplane" ]; then
+		log "ERROR: role=controlplane seed carries no RASPUTIN_NODE_ID — the controlplane must be named."
+	else
+		log "ERROR: role=$ROLE seed carries a join token but no RASPUTIN_NODE_ID — the token is bound to a node id, so this node cannot join without it."
+	fi
 	log "Re-generate the seed (rasputin-provision / Add node) or add RASPUTIN_NODE_ID, then reboot."
 	exit 1
 fi
 
-# An operator-supplied node id must be a DNS label: it becomes this node's mDNS
+# The node id must be a DNS label: it becomes this node's mDNS
 # hostname and the username the agent presents to the bus, which accepts
 # nothing else. It is deliberately NOT rewritten into a valid one — the join
 # token is bound to the id the operator chose, so a substituted id could never
 # join and would hide why. Fail loud like the checks above: the unit shows
 # failed, rasputin-agent (Requires= this unit) does not start, and .provisioned
 # stays unset so firstboot re-runs after the seed is fixed and the node rebooted.
-if [ -n "$NODE_ID_FROM" ] && ! rasputin_label_valid "$NODE_ID"; then
+if ! rasputin_label_valid "$NODE_ID"; then
 	log "ERROR: node id '$NODE_ID_RAW' ($NODE_ID_FROM) is not a valid node id."
 	log "A node id must be 1-63 characters of a-z, 0-9 and -, and must not start or end with -."
 	log "Fix it to match the id the join token was issued for (or re-generate the seed with rasputin-provision / Add node), then reboot."
@@ -358,45 +370,6 @@ else
 fi
 
 # --- defaults for the remaining (optional) fields ----------------------------
-if [ -z "$NODE_ID" ]; then
-	# Derive a stable id from the SoC serial. Pi: /proc/cpuinfo Serial;
-	# x86: DMI board serial.
-	SERIAL=$(awk '/^Serial/ {print $3; exit}' /proc/cpuinfo 2>/dev/null || true)
-	if [ -z "$SERIAL" ] && [ -r /sys/class/dmi/id/board_serial ]; then
-		SERIAL=$(cat /sys/class/dmi/id/board_serial 2>/dev/null || true)
-	fi
-	SERIAL=$(echo "$SERIAL" | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9')
-	# Reject BIOS placeholder serials (unprogrammed on many mini-PCs) — they are
-	# NON-UNIQUE, so two such boards would collide on one node-id (the CWWK n100's
-	# board_serial "Default string" sanitizes to "defaultstring" -> "ltstring").
-	case "$SERIAL" in
-		defaultstring|tobefilledbyoem|none|na|null|unknown|serialnumber|systemserialnumber|oem|0|00000000|123456789) SERIAL="" ;;
-	esac
-	[ "${#SERIAL}" -lt 6 ] && SERIAL=""   # too short => not enough entropy to trust
-	if [ -n "$SERIAL" ]; then
-		NODE_ID="node-$(printf '%s' "$SERIAL" | tail -c 8)"
-	else
-		# No usable hardware serial: mint a RANDOM id, persisted so it is stable
-		# across reboots/OTA (a node's id must not change once enrolled). A reflash
-		# wipes $PERSIST and re-mints — correctly a new node. See #9.
-		IDFILE=$PERSIST/node-id.rand
-		if [ -r "$IDFILE" ]; then
-			NODE_ID=$(rasputin_label_normalize "$(cat "$IDFILE")")
-		else
-			NODE_ID="node-$(tr -d '-' < /proc/sys/kernel/random/uuid | cut -c1-8)"
-			(umask 077; printf '%s\n' "$NODE_ID" > "$IDFILE") 2>/dev/null || true
-		fi
-	fi
-	# Valid by construction (node- + lowercase alphanumerics), so this can only
-	# trip on a damaged $PERSIST/node-id.rand. Checked anyway: an invalid id
-	# would reach node.env and the node would never join, with nothing logged.
-	if ! rasputin_label_valid "$NODE_ID"; then
-		log "ERROR: derived node id '$NODE_ID' is not a valid node id (1-63 characters of a-z, 0-9 and -)."
-		log "Set RASPUTIN_NODE_ID in the seed, or remove $PERSIST/node-id.rand to mint a new id, then reboot."
-		exit 1
-	fi
-fi
-
 # NATS URL fallback. A provisioned seed sets this explicitly; the fallback only
 # matters for a self-initing controlplane or a partial seed. The controlplane
 # dials its own embedded broker; every other node defaults to the control
