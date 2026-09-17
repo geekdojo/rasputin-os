@@ -64,6 +64,13 @@ jobs:
         env:
           REQUIRE_BUSYBOX: "1"
         run: sh test/firstboot-test.sh
+      # release.yml's publish step runs scripts/release-target-guard.sh before
+      # and after `gh release create` to prove the tag is on the commit the
+      # images were built from. Every exit status, against a throwaway git
+      # remote with lightweight, annotated and nested tags. CI-side bash, not
+      # the image's shell.
+      - name: Release target guard tests
+        run: bash test/release-target-guard-test.sh
 
   fallback-address-functional:
     runs-on: ubuntu-latest

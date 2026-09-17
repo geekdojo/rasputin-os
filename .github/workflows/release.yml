@@ -640,6 +640,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The exact commit this run built. Every job's checkout (build included)
+      # takes the run's github.sha, so this HEAD is the tree the images came
+      # from. The release tag must land HERE, not on whatever main points at
+      # when the publish step runs an hour later: with no explicit target,
+      # GitHub creates a new tag from the default branch at publish time, so a
+      # PR merged mid-run tags a commit the image was never built from
+      # (2026.09.4-dev.220: built from 8d53577, tagged 4ff4746 after #75 merged).
+      - name: Record built commit
+        id: src
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
       - name: Compute version (CalVer, same logic as build)
         id: ver
         env:
@@ -848,14 +859,55 @@ jobs:
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.ver.outputs.version }}
+          # --target pins a NEW tag (dispatch-publish) to the built commit. On a
+          # tag push the tag already exists and GitHub ignores target_commitish,
+          # so that path is unchanged — and there the checked-out commit is the
+          # tagged commit anyway.
+          TARGET_SHA: ${{ steps.src.outputs.sha }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}.git
         run: |
           set -eu
           PRERELEASE_FLAG=""
           if [ "${{ steps.ver.outputs.prerelease }}" = "true" ]; then
             PRERELEASE_FLAG="--prerelease"
           fi
-          gh release create "${{ steps.ver.outputs.version }}" \
+
+          # Before publishing: a tag already on ANOTHER commit would make
+          # gh ignore --target and publish these images under it. Refuse
+          # (status 1), and refuse if the remote cannot be read (2). Status 0
+          # is the tag-push path (the tag is the checked-out commit); 3 means
+          # this run creates the tag.
+          created_tag=false
+          rc=0
+          ./scripts/release-target-guard.sh "$REPO_URL" "$TAG" "$TARGET_SHA" || rc=$?
+          case "$rc" in
+            0) ;;
+            3) created_tag=true ;;
+            *) echo "::error::refusing to publish $TAG: see release-target-guard above"; exit 1 ;;
+          esac
+
+          gh release create "$TAG" \
+            --target "$TARGET_SHA" \
             --title "Rasputin OS ${{ steps.ver.outputs.version }}" \
             --notes "Channel: \`${{ steps.ver.outputs.channel }}\`. Verify the chain with the public root CA (https://rasputin.geekdojo.com/rasputin-root-ca.pem): \`manifest.json.sig\` is a detached DER CMS signature over \`manifest.json\`, which carries per-asset SHA-256. Verify commands: https://rasputin.geekdojo.com/docs/agents/." \
             $PRERELEASE_FLAG \
             release-out/*
+
+          # After publishing: prove the tag landed on the built commit. A tag
+          # this run created on the wrong commit is deleted with its release so
+          # nothing mis-tagged stays published (releases here are immutable, so
+          # the dev.N name is burned; the next dispatch gets a new run number).
+          # A tag that existed before this step was pushed by a person and is
+          # never deleted. Only a proven mismatch (1) deletes; an unreadable
+          # remote fails without touching the release.
+          rc=0
+          ./scripts/release-target-guard.sh "$REPO_URL" "$TAG" "$TARGET_SHA" || rc=$?
+          if [ "$rc" != 0 ]; then
+            if [ "$rc" = 1 ] && [ "$created_tag" = true ]; then
+              echo "::error::deleting release $TAG and its tag: this run created them on the wrong commit"
+              gh release delete "$TAG" --cleanup-tag --yes \
+                || echo "::error::could not delete release $TAG; delete it and its tag by hand"
+            fi
+            exit 1
+          fi
