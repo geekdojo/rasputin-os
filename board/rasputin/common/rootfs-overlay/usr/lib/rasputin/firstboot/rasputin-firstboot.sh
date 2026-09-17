@@ -262,7 +262,8 @@ fi
 # plane and bound to their node id; without it they cannot pass the bus auth
 # callout. A provisioned compute/storage seed always carries one, so an empty
 # token here is a botched/partial seed — fail loud rather than half-join. The
-# controlplane is loopback-trusted and carries no token (handled below).
+# controlplane's seed carries no token: its api mints one for its own agent at
+# start (handled below).
 if [ "$ROLE" != "controlplane" ] && [ -z "$JOIN_TOKEN" ]; then
 	log "ERROR: role=$ROLE seed carries no join token (RASPUTIN_CP_JOIN_TOKEN) — cannot enroll."
 	log "Re-generate the enrollment file from the control plane (Add node) and re-seed."
@@ -430,6 +431,15 @@ fi
 # and the BMC host default (see control-plane/updates.md, bmc.md).
 if [ "$ROLE" = "controlplane" ]; then
 	echo "RASPUTIN_SELF_NODE_ID=$NODE_ID" >> "$NODE_ENV"
+	# The controlplane's own agent authenticates to the bus with a join token
+	# like every other node: the bus trusts nothing for coming from loopback
+	# (geekdojo-brain#140). Nobody provisions it — the api mints a token bound
+	# to RASPUTIN_SELF_NODE_ID into this file at every start, before it reports
+	# ready, and the agent (ordered after the api) reads it on every connect.
+	# The path is the api's <RASPUTIN_DATA_DIR>/bus/agent.token, beside bus.key.
+	# An agent new enough to read this line also defaults to this path on a
+	# controlplane, so a controlplane provisioned before this line keeps working.
+	echo "RASPUTIN_CP_JOIN_TOKEN_FILE=$PERSIST/bus/agent.token" >> "$NODE_ENV"
 	# A provisioned matched set ships enforce on (bus auth required), carried in
 	# the seed so a pre-paired cluster comes up enforced with no manual flip.
 	# Absent → the api's default (enforce). Only the controlplane's api reads this.
@@ -448,7 +458,8 @@ fi
 # Non-controlplane nodes present the join token to the bus auth callout: the
 # agent sends NATS username=node-id, password=token, and the controlplane
 # validates it (token-provisioning-pipeline.md). The controlplane's own
-# co-located agent is loopback-trusted and carries no token.
+# co-located agent presents the token its api mints (RASPUTIN_CP_JOIN_TOKEN_FILE,
+# above), so its seed carries none.
 if [ -n "$JOIN_TOKEN" ] && [ "$ROLE" != "controlplane" ]; then
 	echo "RASPUTIN_CP_JOIN_TOKEN=$JOIN_TOKEN" >> "$NODE_ENV"
 fi

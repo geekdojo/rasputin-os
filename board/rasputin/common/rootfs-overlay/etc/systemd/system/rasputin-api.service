@@ -36,8 +36,11 @@ Environment=RASPUTIN_HTTPS_ADDR=:443
 # Embedded NATS must be reachable from the other nodes' agents (firewall,
 # compute) — they attach LAN-first, mesh-second (first-run-bootstrap.md
 # decision #6). The api's code default is 127.0.0.1 (dev posture).
-# Trust on :4222: nodes authenticate with their seed join token (bus auth
-# callout, on unless RASPUTIN_BUS_AUTH=off). From the control-plane release
+# Trust on :4222: every connection authenticates with a join token bound to its
+# node id (bus auth callout, on unless RASPUTIN_BUS_AUTH=off) — a node with its
+# seed token, and this controlplane's own agent with the token the api mints at
+# start into /var/lib/rasputin/bus/agent.token. A connection from 127.0.0.1
+# earns nothing by it (geekdojo-brain#140). From the control-plane release
 # carrying bus TLS (rasputin-control-plane#317) the api also serves TLS with the
 # dedicated bus key at /var/lib/rasputin/bus/bus.key, which nodes trust by pin
 # (RASPUTIN_BUS_PIN; geekdojo-brain#448). A controlplane seed's RASPUTIN_BUS_KEY

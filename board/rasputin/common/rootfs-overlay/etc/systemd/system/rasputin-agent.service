@@ -4,8 +4,11 @@ Description=Rasputin node agent
 # the embedded NATS broker on a simultaneous (re)start — found 2026-06-13 during
 # the bus-auth cutover: `systemctl restart rasputin-api rasputin-agent` started
 # the agent before NATS was ready, so its first start failed (it self-healed via
-# Restart=always). After= is ordering only and inert on non-controlplane nodes,
-# where rasputin-api condition-skips (no role marker) and is never in the
+# Restart=always). The api (Type=notify) also mints this agent's bus token file
+# before it reports ready (geekdojo-brain#140), so the agent's first connect
+# finds it; an agent that starts first anyway retries and joins once it exists.
+# After= is ordering only and inert on non-controlplane nodes, where
+# rasputin-api condition-skips (no role marker) and is never in the
 # transaction.
 After=network-online.target rasputin-firstboot.service rasputin-api.service
 Wants=network-online.target
