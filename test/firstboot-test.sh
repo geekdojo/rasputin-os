@@ -40,6 +40,7 @@ OVERLAY="$ROOT/board/rasputin/common/rootfs-overlay"
 SCRIPT="$OVERLAY/usr/lib/rasputin/firstboot/rasputin-firstboot.sh"
 LIBDIR="$OVERLAY/usr/lib/rasputin"
 API_UNIT="$OVERLAY/etc/systemd/system/rasputin-api.service"
+AGENT_UNIT="$OVERLAY/etc/systemd/system/rasputin-agent.service"
 [ -f "$SCRIPT" ] || { echo "missing: $SCRIPT" >&2; exit 2; }
 
 if [ -z "${TEST_SHELLS:-}" ]; then
@@ -171,6 +172,7 @@ cases() {
 	ok "no bus lines: provisions" "$RC" "$OUT"
 	ok "no bus lines: no RASPUTIN_BUS_PIN in node.env" "$(yes_if not contains "$P/node.env" RASPUTIN_BUS_PIN)" "$(cat "$P/node.env")"
 	ok "no bus lines: no bus dir" "$(yes_if not test -e "$P/bus")"
+	ok "no bus lines: compute node.env names no agent token file" "$(yes_if not contains "$P/node.env" RASPUTIN_CP_JOIN_TOKEN_FILE)" "$(cat "$P/node.env")"
 	ok "no bus lines: join token still scrubbed" "$(yes_if has_line "$SEED" "RASPUTIN_CP_JOIN_TOKEN=")" "$(cat "$SEED")"
 
 	# 2. Compute: the pin goes into node.env verbatim and stays in the seed.
@@ -188,6 +190,8 @@ cases() {
 	ok "cp key: bus.key is 0600" "$(yes_if test "$(perms "$P/bus/bus.key")" = "-rw-------")" "$(perms "$P/bus/bus.key")"
 	ok "cp key: bus dir is 0700" "$(yes_if test "$(perms "$P/bus")" = "drwx------")" "$(perms "$P/bus")"
 	ok "cp key: no temp file left beside it" "$(yes_if test "$(ls -A "$P/bus")" = "bus.key")" "$(ls -A "$P/bus")"
+	ok "cp key: node.env names the agent token file the api mints" "$(yes_if has_line "$P/node.env" "RASPUTIN_CP_JOIN_TOKEN_FILE=$P/bus/agent.token")" "$(cat "$P/node.env")"
+	ok "cp key: node.env carries no join token of its own" "$(yes_if not contains "$P/node.env" "RASPUTIN_CP_JOIN_TOKEN=")" "$(cat "$P/node.env")"
 	ok "cp key: pin in node.env (the CP's own agent pins too)" "$(yes_if has_line "$P/node.env" "RASPUTIN_BUS_PIN=$PIN")" "$(cat "$P/node.env")"
 	ok "cp key: key NOT in node.env (name)" "$(yes_if not contains "$P/node.env" RASPUTIN_BUS_KEY)" "$(cat "$P/node.env")"
 	ok "cp key: key NOT in node.env (value)" "$(yes_if not contains "$P/node.env" "$KEY")"
@@ -386,6 +390,11 @@ ok "rasputin-api.service does not set RASPUTIN_BUS_TLS" \
 	"$(yes_if not grep -Eq '^[[:space:]]*Environment=.*RASPUTIN_BUS_TLS' "$API_UNIT")"
 ok "rasputin-api.service data dir is where bus.key is written" \
 	"$(yes_if grep -qx 'Environment=RASPUTIN_DATA_DIR=/var/lib/rasputin' "$API_UNIT")"
+# The api mints its own agent's bus token before it reports ready
+# (geekdojo-brain#140); the agent must be ordered after it so its first connect
+# finds the file.
+ok "rasputin-agent.service starts after rasputin-api.service" \
+	"$(yes_if grep -Eq '^After=.*[[:space:]]rasputin-api\.service([[:space:]]|$)' "$AGENT_UNIT")"
 
 echo "firstboot: $pass passed, $fail failed (shells:$TEST_SHELLS)"
 [ "$fail" -eq 0 ]
