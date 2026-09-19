@@ -72,6 +72,22 @@ jobs:
       - name: Release target guard tests
         run: bash test/release-target-guard-test.sh
 
+  # release.yml's sign step runs scripts/verify-bundle.sh on every signed
+  # .raucb: rauc info under the system.conf + keyring read out of that SKU's
+  # rootfs, so a bundle CI publishes is one a node on the image accepts
+  # (geekdojo/geekdojo-brain#532). That step only runs on a publish, so its
+  # behaviour is pinned here against a throwaway PKI and both SKUs' real
+  # rauc-system.conf: the production leaf profile passes, a wrong-purpose leaf
+  # fails, and the outcome follows the config's [keyring] check-purpose.
+  verify-bundle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install rauc + squashfs-tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends rauc squashfs-tools
+      - name: Bundle verification tests
+        run: bash test/verify-bundle-test.sh
+
   fallback-address-functional:
     runs-on: ubuntu-latest
     steps:
