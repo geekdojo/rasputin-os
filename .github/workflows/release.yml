@@ -146,7 +146,7 @@ jobs:
             echo "channel=dev" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Init Buildroot (pinned LTS)
+      - name: Init Buildroot (pinned release)
         run: ./scripts/init-buildroot.sh
 
       # Restore the Buildroot download dir + ccache. Warm ccache: kernel +
