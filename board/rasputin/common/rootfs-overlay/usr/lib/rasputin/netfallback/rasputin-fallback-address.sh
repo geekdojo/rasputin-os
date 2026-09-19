@@ -34,11 +34,11 @@
 # while it holds a DHCPv4 lease on a link, and unlinks it when the lease goes
 # (systemd 258.7, the version Buildroot 2026.08 ships, and 256.17 before it:
 # link_save() in src/network/networkd-state-file.c). The write is atomic -- a
-# dot-prefixed temp file renamed into place -- so "a non-dot file exists in that directory" is
-# exactly "networkd holds a lease". In this image only the wired links can hold
-# one: 20-wired.network is the only DHCP client config that matches hardware
-# (systemd's own 80-container-host0*.network match only inside a container, and
-# there is no Wi-Fi supplicant).
+# dot-prefixed temp file renamed into place -- so "a non-dot file exists in
+# that directory" is exactly "networkd holds a lease". In this image only the
+# wired links can hold one: 20-wired.network is the only DHCP client config
+# that matches hardware (systemd's own 80-container-host0*.network match only
+# inside a container, and there is no Wi-Fi supplicant).
 #
 # Two transitions, both driven by that fact and neither by a timer:
 #

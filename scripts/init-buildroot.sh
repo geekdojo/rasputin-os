@@ -13,6 +13,7 @@ set -euo pipefail
 # Bumping is a deliberate maintenance step: change BR_TAG here (the release.yml
 # cache key hashes this file, so it rolls over on its own) and run the full
 # bench regression before shipping.
+BR_REPO="https://gitlab.com/buildroot.org/buildroot.git"
 BR_TAG="2026.08"  # Buildroot 2026.08 (quarterly release, tagged 2026-09-04)
 
 cd "$(dirname "$0")/.."
