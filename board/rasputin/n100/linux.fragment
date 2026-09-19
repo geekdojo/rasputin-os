@@ -98,6 +98,26 @@ CONFIG_NF_NAT=y
 CONFIG_IP_NF_NAT=y
 CONFIG_IP_NF_TARGET_MASQUERADE=y
 
+# --- iptables-legacy tables + the raw table. Docker drives iptables-legacy
+#     (the image's iptables is built without nft). Two things changed with
+#     Buildroot 2026.08:
+#     - Linux 6.17+ (this SKU now builds 7.1) hides every legacy xtables
+#       table behind NETFILTER_XTABLES_LEGACY / IP_NF_IPTABLES_LEGACY, both
+#       default off; without them there is no filter or nat table and dockerd
+#       cannot create a bridge network.
+#     - Docker 28 installs raw-table PREROUTING rules that drop remote packets
+#       addressed to loopback-published ports and to container IPs from
+#       outside their bridge (moby#49325), so it needs IP_NF_RAW. The x86
+#       arch default config does not set it.
+#     Buildroot's iptables and docker-engine kernel fixups enable these too;
+#     pinned here so the table set does not depend on package fixups, and
+#     built in (=y) because this SKU ships no modules. ---
+CONFIG_NETFILTER_XTABLES_LEGACY=y
+CONFIG_IP_NF_IPTABLES_LEGACY=y
+CONFIG_IP_NF_IPTABLES=y
+CONFIG_IP_NF_FILTER=y
+CONFIG_IP_NF_RAW=y
+
 # --- BPF + cgroup device controller. On cgroup v2 runc enforces container
 #     device access with an eBPF program attached to the cgroup
 #     (BPF_CGROUP_DEVICE). Without CONFIG_CGROUP_BPF the container start aborts

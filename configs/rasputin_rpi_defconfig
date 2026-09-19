@@ -75,7 +75,8 @@ BR2_PACKAGE_SYSTEMD_COREDUMP=y
 # Pi-5-focused; Pi 4 (which booted fine on mainline) is dropped for the moment.
 # True Pi 4 + Pi 5 unification = a SECOND kernel (`kernel8.img` from bcm2711) on
 # the same FAT, config.txt auto-selecting — the Raspberry Pi OS model — tracked
-# as a follow-up. Pin matches Buildroot 2025.02.3 (a known-good combination).
+# as a follow-up. Pin is the one Buildroot 2025.02.x's raspberrypi5_defconfig
+# used (6.6.28, a known-good combination); it does NOT follow a Buildroot bump.
 # CM5 carrier note: bcm2712-rpi-5-b is the Pi 5 board; swap/add the CM5 carrier
 # DTB (bcm2712-rpi-cm5-cb / -cm5io) once a CM5 is on the bench.
 BR2_LINUX_KERNEL=y
