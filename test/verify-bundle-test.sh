@@ -145,10 +145,10 @@ expect ok "the same leaf is accepted when the image's config sets check-purpose=
 
 mkbundle "$W/n100-other.raucb" rasputin-n100 "$W/n100.img" leaf-other other-inter
 expect refuse "a chain to a root the image does not trust is refused" \
-	"$W/n100-other.raucb" "$W/n100.img"
+	"$W/n100-other.raucb" "$W/n100.img" "signature verification failed"
 
 expect refuse "an n100 bundle is refused against the rpi image's config (compatible)" \
-	"$W/n100-good.raucb" "$W/rpi.img" "compatible"
+	"$W/n100-good.raucb" "$W/rpi.img" "bundle compatible 'rasputin-n100' != device compatible 'rasputin-rpi-arm64'"
 
 expect refuse "a rootfs with no etc/rauc/system.conf is refused" \
 	"$W/n100-good.raucb" "$W/noconf.img" "no etc/rauc/system.conf"

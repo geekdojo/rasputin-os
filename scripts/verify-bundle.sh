@@ -19,9 +19,12 @@
 #
 #   1. unsquashfs etc/rauc/system.conf and the keyring file(s) it names out of
 #      <rootfs.img>;
-#   2. rewrite only the keyring path=/directory= keys so they point at the
-#      extracted copies (every other key, including check-purpose, is kept
-#      byte for byte);
+#   2. rewrite the keyring path=/directory= keys so they point at the
+#      extracted copies, and the node-state locations ([system] data-directory=
+#      and statusfile=) so they point into a scratch dir — RAUC creates the
+#      data directory while loading the config, and the node's
+#      /var/lib/rasputin/rauc is neither present nor writable on a runner.
+#      Every other key, including check-purpose, is kept byte for byte;
 #   3. `rauc --conf=<that> info <bundle>`, which verifies the signature chain
 #      and certificate purpose with the device's [keyring] settings;
 #   4. check the bundle's compatible matches the device's [system] compatible,
@@ -76,14 +79,21 @@ for p in "$KR_PATH" "$KR_DIR"; do
 	[ -e "$ROOT$p" ] || err "the device keyring '$p' is not in $ROOTFS — a node on this image cannot verify any bundle"
 done
 
-# 2. Same config, keyring keys pointed at the extracted files.
-awk -v root="$ROOT" '
-	/^[ \t]*\[/ { in_kr = ($0 ~ /^[ \t]*\[keyring\][ \t]*$/) }
+# 2. Same config, keyring keys pointed at the extracted files and node state
+#    pointed at scratch space. Nothing else is touched.
+mkdir -p "$WORK/state"
+awk -v root="$ROOT" -v state="$WORK/state" '
+	/^[ \t]*\[/ {
+		in_kr  = ($0 ~ /^[ \t]*\[keyring\][ \t]*$/)
+		in_sys = ($0 ~ /^[ \t]*\[system\][ \t]*$/)
+	}
 	in_kr && /^[ \t]*(path|directory)[ \t]*=/ {
 		key = $0; sub(/[ \t]*=.*/, "", key); sub(/^[ \t]*/, "", key)
 		val = $0; sub(/^[^=]*=[ \t]*/, "", val); sub(/[ \t]+$/, "", val)
 		print key "=" root val; next
 	}
+	in_sys && /^[ \t]*data-directory[ \t]*=/ { print "data-directory=" state "/data"; next }
+	in_sys && /^[ \t]*statusfile[ \t]*=/     { print "statusfile=" state "/status.raucs"; next }
 	{ print }' "$ROOT/etc/rauc/system.conf" > "$WORK/system.conf"
 
 DEV_COMPAT=$(awk '
@@ -95,6 +105,8 @@ DEV_COMPAT=$(awk '
 echo "verify-bundle: $(basename "$BUNDLE") against the device RAUC config from $(basename "$ROOTFS"):/etc/rauc/system.conf"
 echo "verify-bundle:   compatible=$DEV_COMPAT keyring=${KR_PATH:-$KR_DIR} check-purpose=${KR_PURPOSE:-<unset: OpenSSL default, smimesign>}"
 echo "verify-bundle:   $(rauc --version)"
+echo "verify-bundle:   lines rewritten for this runner (everything else is the image's file as shipped):"
+diff "$ROOT/etc/rauc/system.conf" "$WORK/system.conf" | grep '^[<>]' | sed 's/^/verify-bundle:     /' || true
 
 # 3. Signature + chain + purpose, under the device's [keyring] settings.
 if ! out=$(rauc --conf="$WORK/system.conf" info --output-format=shell "$BUNDLE" 2>&1); then
