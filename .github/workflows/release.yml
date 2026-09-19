@@ -672,8 +672,10 @@ jobs:
           echo "channel=$CHANNEL"       >> "$GITHUB_OUTPUT"
           echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
 
-      - name: Install rauc + xz
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends rauc xz-utils
+      - name: Install rauc + xz + squashfs-tools
+        # squashfs-tools: scripts/verify-bundle.sh reads the device RAUC config
+        # out of each SKU's rootfs.img with unsquashfs.
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends rauc xz-utils squashfs-tools
 
       - uses: actions/download-artifact@v4
         with:
@@ -789,6 +791,18 @@ jobs:
               --signing-keyring="/mnt/rasputin-sign/root-ca.pem" \
               "$d/bundle" \
               "release-out/rasputin-os-${sku}-${ver}.raucb"
+
+            # Verify the signed bundle the way a node will: with the
+            # /etc/rauc/system.conf and trust root baked into THIS SKU's rootfs
+            # (read out of the rootfs.img being shipped), not RAUC's defaults.
+            # `rauc bundle` above runs with no --conf, so its signing-time
+            # check uses the built-in purpose; a [keyring] setting in the
+            # device config (check-purpose, …) is only applied here. A bundle
+            # that fails this is one every node on the image would refuse, so
+            # it stops the release before anything is published.
+            ./scripts/verify-bundle.sh \
+              "release-out/rasputin-os-${sku}-${ver}.raucb" \
+              "$d/bundle/rootfs.img"
 
             # Compress the flashable .img (GH release asset limit is 2 GB;
             # our raw .img is ~3 GB so this is mandatory, not just an
