@@ -32,9 +32,9 @@
 #
 # THE FACT everything keys on: networkd writes /run/systemd/netif/leases/<ifindex>
 # while it holds a DHCPv4 lease on a link, and unlinks it when the lease goes
-# (systemd 256.17, the version Buildroot 2025.02.17 ships: link_save() in
-# src/network/networkd-state-file.c). The write is atomic -- a dot-prefixed temp
-# file renamed into place -- so "a non-dot file exists in that directory" is
+# (systemd 258.7, the version Buildroot 2026.08 ships, and 256.17 before it:
+# link_save() in src/network/networkd-state-file.c). The write is atomic -- a
+# dot-prefixed temp file renamed into place -- so "a non-dot file exists in that directory" is
 # exactly "networkd holds a lease". In this image only the wired links can hold
 # one: 20-wired.network is the only DHCP client config that matches hardware
 # (systemd's own 80-container-host0*.network match only inside a container, and
@@ -62,7 +62,7 @@
 # drop-in and reloading keeps networkd the owner. /run is tmpfs, so a reboot
 # starts from a clean slate and the decision is made again.
 #
-# NOT a networkd-native feature: systemd 256 has no conditional-static address.
+# NOT a networkd-native feature: systemd 258 has no conditional-static address.
 # `Address=` is unconditional (it would exist on every cluster, DHCP or not,
 # and land in the api leaf's IP SANs -- the objection that kept geekdojo-brain
 # #232 from being implemented the wrong way). `LinkLocalAddressing=` is the only
@@ -146,7 +146,7 @@ fi
 #      memory and re-adds the address the next time it configures the link,
 #      e.g. after a cable is pulled and replugged.
 #
-# The reload is not free, and it cannot be made free on systemd 256. A reload
+# The reload is not free, and it cannot be made free on systemd 258. A reload
 # that finds a changed drop-in reconfigures the link: network_reload() spots the
 # change, manager_reload() calls link_reconfigure(), and link_reconfigure_impl()
 # stops the DHCP client. So the DHCP address drops and is re-acquired, exactly

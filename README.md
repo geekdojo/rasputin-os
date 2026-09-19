@@ -32,7 +32,7 @@ this image — see
 
 ## What the image is
 
-- **Buildroot 2025.02.x LTS** (pinned as a pristine submodule; all
+- **Buildroot 2026.08** (a pinned release tag, as a pristine submodule; all
   customization lives in this external tree — near-zero Buildroot patches).
 - **Read-only squashfs rootfs, A/B slots + a persistent data partition.**
   One build emits both a flashable `.img` and a signed **RAUC** `.raucb` OTA
@@ -114,7 +114,7 @@ board/rasputin/rpi/                         genimage.cfg (MBR) + config.txt +
                                             autoboot.txt + cmdline per slot +
                                             tryboot RAUC backend bits
 package/rasputin-{agent,api}/               vendored release-binary packages
-scripts/init-buildroot.sh                   add the pinned Buildroot LTS submodule
+scripts/init-buildroot.sh                   add the pinned Buildroot submodule
 .github/workflows/release.yml               matrix build → QEMU smoke (amd64) →
                                             sign → GitHub Release
 ```
@@ -129,7 +129,7 @@ scripts/init-buildroot.sh                   add the pinned Buildroot LTS submodu
 ```sh
 git clone https://github.com/geekdojo/rasputin-os
 cd rasputin-os
-./scripts/init-buildroot.sh        # adds Buildroot 2025.02.x LTS as a submodule
+./scripts/init-buildroot.sh        # adds Buildroot (BR_TAG) as a submodule
 
 # Pre-fetch the vendored agent/api release tarballs into Buildroot's dl/
 # so the package step finds them locally (grab the version pinned in

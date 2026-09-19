@@ -23,7 +23,7 @@ name: ci
 # itself load-bearing and used to be provable only by a release build.
 #
 # The fallback address also gets a functional test against real
-# systemd-networkd 256.17 (the image's version) in a privileged container,
+# systemd-networkd 258.7 (the image's version) in a privileged container,
 # because what went wrong in geekdojo-brain#427 lives between networkd, the
 # kernel and systemd's path units, and no stub can show it. The core-dump
 # policy gets one for the same reason: it is nothing but systemd configuration,
