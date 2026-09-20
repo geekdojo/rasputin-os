@@ -512,6 +512,29 @@ jobs:
           # which is before the seed device is found — learned on dev.1.)
           grep -q "rasputin-firstboot: reading seed /run/rasputin-seed/rasputin-seed.env" /tmp/console.log \
             || { echo "::error::firstboot never read the seed — /run/rasputin-seed wiring (or kmsg logging) regressed"; exit 1; }
+          # At-rest modes (geekdojo/geekdojo-brain#494, gate 7).
+          # rasputin-atrest-audit.service checks every path in
+          # /usr/lib/rasputin/atrest/inventory once the api has written its
+          # files, and reports one verdict line to /dev/kmsg — the only channel
+          # this smoke has, since it holds no shell into the guest. The unit
+          # cannot fail the boot on purpose (a widened mode is worse reported
+          # than it is fatal), so the verdict has to be asserted here or
+          # nothing reads it.
+          #
+          # A missing line is a failure too, and a louder one: it means the
+          # unit did not run, so nothing checked the modes at all and every
+          # later release would go green over that silence.
+          if ! grep -q "rasputin-atrest: " /tmp/console.log; then
+            echo "::error::the at-rest mode audit never reported. rasputin-atrest-audit.service did not run, or its verdict did not reach /dev/kmsg — so NOTHING checked the modes of the join token, the bus key or the trust directories on this image. Check the unit's ordering (it is After= rasputin-api.service) and that /usr/lib/rasputin/atrest/ shipped in the rootfs."
+            exit 1
+          fi
+          if grep -q "rasputin-atrest: FAIL" /tmp/console.log; then
+            echo "::error::a file on the persistent partition is not at the mode the at-rest inventory declares:"
+            grep "rasputin-atrest: " /tmp/console.log || true
+            echo "::error::Fix the mode where it is set (usr/lib/tmpfiles.d/rasputin.conf, firstboot, the unit that creates it, or the api's at-rest helper). Do NOT widen the inventory to make this pass."
+            exit 1
+          fi
+          echo "at-rest modes: $(grep -o 'rasputin-atrest: PASS.*' /tmp/console.log | tail -1)"
           # "provisioning complete" proves the persistent partition mounted
           # (makefs+growfs path) and node.env was written — a fresh board
           # otherwise fails provisioning on read-only /etc (Mu bring-up

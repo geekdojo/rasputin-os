@@ -1,0 +1,41 @@
+# Check the at-rest modes of everything on the persistent partition that the
+# security contract names, once per boot, and report the verdict to the kernel
+# log.
+#
+# WHY A UNIT AND NOT ONLY A CI STEP. The modes it checks are produced by four
+# different mechanisms — tmpfiles.d, firstboot's umask and chmod calls, this
+# image's units, and the api's own at-rest helper. A CI step could only check
+# the image; this checks the machine the image turned into, including the files
+# the api wrote after it started.
+#
+# WHY THE KERNEL LOG. The QEMU smoke test has no shell into the guest. Only
+# lines written to /dev/kmsg are mirrored to the serial console it captures, so
+# that is where the verdict goes; the smoke greps for it, and a widened mode
+# fails a release build instead of shipping.
+#
+# It reads and reports. It changes no mode, and SuccessExitStatus keeps a
+# finding from taking multi-user.target down with it: an appliance that refuses
+# to finish booting because a file is 0644 is a worse outcome than one that
+# says so loudly and keeps serving.
+
+[Unit]
+Description=Audit at-rest file modes on the persistent partition
+RequiresMountsFor=/var/lib/rasputin
+ConditionPathIsMountPoint=/var/lib/rasputin
+# After the api: it writes the bus key, the agent token and the trust
+# directory, and auditing before it has done so would check an empty tree and
+# report a pass over nothing. rasputin-api.service is not Required — on a
+# compute node it never starts, and the audit still has firstboot's files to
+# check.
+After=rasputin-firstboot.service rasputin-api.service rasputin-coredump-store.service
+Requires=rasputin-firstboot.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/rasputin/atrest/rasputin-atrest-audit.sh
+# 1 is "the audit found something". It is reported, not fatal.
+SuccessExitStatus=0 1
+
+[Install]
+WantedBy=multi-user.target

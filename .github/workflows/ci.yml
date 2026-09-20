@@ -7,10 +7,10 @@ name: ci
 #
 # Scope is deliberately narrow: POSIX-sh syntax on every overlay script, the
 # node-id helper table tests, firstboot's seed handling and the join-token file
-# migration run against a scratch directory, plus the fallback-address suite,
-# which fakes networkd's lease directory and /sys/class/net so a boot-time
-# decision is testable without a network, a root shell, or a DHCP server to
-# take away.
+# migration run against a scratch directory, the at-rest mode audit against
+# synthetic trees, plus the fallback-address suite, which fakes networkd's lease
+# directory and /sys/class/net so a boot-time decision is testable without a
+# network, a root shell, or a DHCP server to take away.
 #
 # The fallback address also gets a functional test against real
 # systemd-networkd 256.17 (the image's version) in a privileged container,
@@ -85,6 +85,16 @@ jobs:
         env:
           REQUIRE_BUSYBOX: "1"
         run: sh test/jointoken-file-test.sh
+      # The at-rest mode audit (geekdojo/geekdojo-brain#494): the script that
+      # runs on every boot and whose verdict the QEMU smoke asserts. The smoke
+      # only runs on a tag, so the audit's LOGIC is pinned here instead —
+      # nearly every case is a synthetic tree it must refuse. Also checks the
+      # image's own declarations: no unit sets a UMask, and every directory the
+      # inventory expects is created with a mode by something in this tree.
+      - name: At-rest mode audit tests
+        env:
+          REQUIRE_BUSYBOX: "1"
+        run: sh test/atrest-modes-test.sh
       # release.yml's publish step runs scripts/release-target-guard.sh before
       # and after `gh release create` to prove the tag is on the commit the
       # images were built from. Every exit status, against a throwaway git

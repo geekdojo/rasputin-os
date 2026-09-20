@@ -1,0 +1,67 @@
+# The at-rest inventory: every path on the persistent partition whose mode is
+# part of the security contract, and what that mode must be.
+#
+# Read by rasputin-atrest-audit.sh, which runs once per boot and reports its
+# verdict to the kernel log. The QEMU smoke test asserts that verdict, so a
+# change that widens a mode fails a release build instead of shipping.
+#
+# WHY A DECLARED LIST. These modes are set in four different places — this
+# image's tmpfiles.d, firstboot's umask and chmod calls, a unit's ExecStart,
+# and the api's own at-rest helper. Nothing before this said what the RESULT is
+# supposed to be, so a file that came out 0644 looked exactly like one that was
+# meant to. A path in this list cannot drift without the smoke naming it and
+# saying what it became.
+#
+# Two kinds of line, whitespace-separated. Paths have no spaces.
+#
+#   MODE  PRESENCE  PATH
+#     MODE      the exact octal mode this path must have.
+#     PRESENCE  `required` — absent is a failure.
+#               `optional` — absent is fine: the path belongs to one role, or
+#                            appears only once something has run. Present with
+#                            the wrong mode is still a failure.
+#     Every entry is also checked for root ownership and for any group or
+#     world access, whatever MODE says.
+#
+#   sweep  PATH
+#     Every file under PATH, recursively, must be owner-only. This is the half
+#     that catches a NEW secret nobody declared, because the list above only
+#     knows about paths someone remembered to write down.
+#
+# Lines beginning with # are comments.
+
+# ── the node's identity and its credentials ────────────────────────────────
+# node.env NAMES the token file; the token itself lives in its own 0600 file
+# (agent.token on a controlplane, join.token on every other role).
+0600  required  /var/lib/rasputin/node.env
+0700  optional  /var/lib/rasputin/bus
+0600  optional  /var/lib/rasputin/bus/bus.key
+0600  optional  /var/lib/rasputin/bus/agent.token
+0600  optional  /var/lib/rasputin/bus/join.token
+0700  optional  /var/lib/rasputin/agent-state
+
+# ── trust material ─────────────────────────────────────────────────────────
+# The directories are root-only. Their contents are not swept: each holds a
+# certificate that is public by design next to a key that is not, and the api
+# that writes both asserts their modes in its own at-rest test. The directory
+# mode is what keeps the key unreachable regardless.
+0700  optional  /var/lib/rasputin/trust
+0700  optional  /var/lib/rasputin/mesh
+0700  optional  /var/lib/rasputin/tailscale
+
+# ── the A/B updater and the SSH host identity ──────────────────────────────
+0700  optional  /var/lib/rasputin/rauc
+0700  optional  /var/lib/rasputin/dropbear
+
+# ── the core store ─────────────────────────────────────────────────────────
+# A core is a memory image of a process that was holding keys, so the store is
+# root-only and everything in it is owner-only.
+0700  optional  /var/lib/rasputin/coredump
+
+# ── swept trees ────────────────────────────────────────────────────────────
+# Scoped deliberately to the trees whose contents are credentials without
+# exception. docker, containerd and tailscale are not swept: their contents
+# belong to those daemons and carry their own modes.
+sweep  /var/lib/rasputin/bus
+sweep  /var/lib/rasputin/agent-state
+sweep  /var/lib/rasputin/coredump
