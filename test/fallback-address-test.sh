@@ -209,8 +209,10 @@ echo "8. firstboot passes the override through to node.env"
 FB="$ROOT/board/rasputin/common/rootfs-overlay/usr/lib/rasputin/firstboot/rasputin-firstboot.sh"
 check "reads RASPUTIN_FALLBACK_ADDRESS from the seed" \
 	"$(grep -q 'RASPUTIN_FALLBACK_ADDRESS+set' "$FB" && echo 0 || echo 1)"
+# Written through nodeenv_put, which quotes every value
+# (geekdojo/geekdojo-brain#540) — the line used to be a bare `echo`.
 check "writes it into node.env" \
-	"$(grep -q 'echo "RASPUTIN_FALLBACK_ADDRESS=' "$FB" && echo 0 || echo 1)"
+	"$(grep -q 'nodeenv_put RASPUTIN_FALLBACK_ADDRESS' "$FB" && echo 0 || echo 1)"
 check "distinguishes set-but-empty from unset (opt-out survives)" \
 	"$(grep -q 'FALLBACK_ADDRESS_SET' "$FB" && echo 0 || echo 1)"
 
