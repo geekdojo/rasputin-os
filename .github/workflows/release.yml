@@ -717,7 +717,7 @@ jobs:
       # geekdojo/.github before changing any of them.
       - name: Stage and preflight the signing credential
         id: mat
-        uses: geekdojo/.github/.github/actions/rasputin-sign@ecbad26a422f9adf8625a424c1b72c891a72a68c
+        uses: geekdojo/.github/.github/actions/rasputin-sign@e94e742453c1a1d0d3426d1b541bd5f1a82f3c4a
         with:
           purpose: release
           leaf-key:  ${{ secrets.RASPUTIN_LEAF_KEY }}
@@ -834,7 +834,7 @@ jobs:
       # goes through the shared action with the same purpose the first-flash
       # verifier applies.
       - name: Self-verify the signed manifest
-        uses: geekdojo/.github/.github/actions/rasputin-sign@ecbad26a422f9adf8625a424c1b72c891a72a68c
+        uses: geekdojo/.github/.github/actions/rasputin-sign@e94e742453c1a1d0d3426d1b541bd5f1a82f3c4a
         with:
           mode: verify
           purpose: release
@@ -842,7 +842,7 @@ jobs:
 
       - name: Wipe signing material
         if: always()
-        uses: geekdojo/.github/.github/actions/rasputin-sign@ecbad26a422f9adf8625a424c1b72c891a72a68c
+        uses: geekdojo/.github/.github/actions/rasputin-sign@e94e742453c1a1d0d3426d1b541bd5f1a82f3c4a
         with:
           mode: cleanup
 
