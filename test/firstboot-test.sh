@@ -2,7 +2,9 @@
 #
 # Functional tests for rasputin-firstboot.sh's seed handling, starting with the
 # bus TLS values (geekdojo/geekdojo-brain#448): RASPUTIN_BUS_PIN in every seed,
-# RASPUTIN_BUS_KEY in the controlplane seed only.
+# RASPUTIN_BUS_KEY in the controlplane seed only. Then the join token, which
+# goes into its own 0600 file that node.env merely NAMES
+# (geekdojo/geekdojo-brain#537).
 #
 # Why. What firstboot does with a seed is invisible when wrong, and it only
 # runs once. A pin that never reaches node.env is a node that silently stays on
@@ -166,13 +168,15 @@ cp_seed() {
 
 # --- cases --------------------------------------------------------------------
 cases() {
-	# 1. A seed with no bus lines behaves as before: nothing new in node.env,
-	#    no bus directory, and the join token is still scrubbed.
+	# 1. A seed with no bus lines: no pin in node.env, and the join token is
+	#    still scrubbed. The token itself goes to bus/join.token, and node.env
+	#    NAMES that file rather than carrying the token
+	#    (geekdojo/geekdojo-brain#537).
 	setup; compute_seed; fb
 	ok "no bus lines: provisions" "$RC" "$OUT"
 	ok "no bus lines: no RASPUTIN_BUS_PIN in node.env" "$(yes_if not contains "$P/node.env" RASPUTIN_BUS_PIN)" "$(cat "$P/node.env")"
-	ok "no bus lines: no bus dir" "$(yes_if not test -e "$P/bus")"
-	ok "no bus lines: compute node.env names no agent token file" "$(yes_if not contains "$P/node.env" RASPUTIN_CP_JOIN_TOKEN_FILE)" "$(cat "$P/node.env")"
+	ok "no bus lines: the bus dir holds only the join token" "$(yes_if test "$(ls -A "$P/bus")" = "join.token")" "$(ls -A "$P/bus" 2>&1)"
+	ok "no bus lines: compute node.env names the join token file" "$(yes_if has_line "$P/node.env" "RASPUTIN_CP_JOIN_TOKEN_FILE=$P/bus/join.token")" "$(cat "$P/node.env")"
 	ok "no bus lines: join token still scrubbed" "$(yes_if has_line "$SEED" "RASPUTIN_CP_JOIN_TOKEN=")" "$(cat "$SEED")"
 
 	# 2. Compute: the pin goes into node.env verbatim and stays in the seed.
@@ -180,7 +184,7 @@ cases() {
 	ok "compute pin: provisions" "$RC" "$OUT"
 	ok "compute pin: node.env carries it" "$(yes_if has_line "$P/node.env" "RASPUTIN_BUS_PIN=$PIN")" "$(cat "$P/node.env")"
 	ok "compute pin: stays in the seed (public)" "$(yes_if has_line "$SEED" "RASPUTIN_BUS_PIN=$PIN")" "$(cat "$SEED")"
-	ok "compute pin: no bus dir on a compute node" "$(yes_if not test -e "$P/bus")"
+	ok "compute pin: the bus dir holds only the join token" "$(yes_if test "$(ls -A "$P/bus")" = "join.token")" "$(ls -A "$P/bus" 2>&1)"
 
 	# 3. Controlplane with key + pin: the full contract.
 	setup; cp_seed "RASPUTIN_BUS_PIN=$PIN" "RASPUTIN_BUS_KEY=$KEY"; fb
@@ -356,8 +360,21 @@ cases() {
 	ok "token + node id: provisions" "$RC" "$OUT"
 	ok "token + node id: stamped" "$(yes_if provisioned)"
 	ok "token + node id: node.env carries the seed's id" "$(yes_if has_line "$P/node.env" "RASPUTIN_NODE_ID=w1")" "$(cat "$P/node.env")"
-	ok "token + node id: node.env carries the token" "$(yes_if has_line "$P/node.env" "RASPUTIN_CP_JOIN_TOKEN=tok-w1")" "$(cat "$P/node.env")"
 	ok "token + node id: no id minted" "$(yes_if not test -e "$P/node-id.rand")"
+
+	# 14b. The token is at rest in ONE 0600 file, and node.env only names it
+	#      (geekdojo/geekdojo-brain#537, §7 4.1). Nothing is left in the
+	#      environment block the agent and every child it spawns inherit.
+	printf '%s\n' "tok-w1" > "$W/want.token"
+	ok "token file: holds the seed's token verbatim plus one newline" "$(yes_if cmp -s "$W/want.token" "$P/bus/join.token")" "$(cat "$P/bus/join.token" 2>&1)"
+	ok "token file: is 0600" "$(yes_if test "$(perms "$P/bus/join.token")" = "-rw-------")" "$(perms "$P/bus/join.token")"
+	ok "token file: bus dir is 0700" "$(yes_if test "$(perms "$P/bus")" = "drwx------")" "$(perms "$P/bus")"
+	ok "token file: no temp file left beside it" "$(yes_if test "$(ls -A "$P/bus")" = "join.token")" "$(ls -A "$P/bus")"
+	ok "token file: node.env names it" "$(yes_if has_line "$P/node.env" "RASPUTIN_CP_JOIN_TOKEN_FILE=$P/bus/join.token")" "$(cat "$P/node.env")"
+	ok "token file: node.env carries no inline token" "$(yes_if not grep -q '^RASPUTIN_CP_JOIN_TOKEN=' "$P/node.env")" "$(cat "$P/node.env")"
+	ok "token file: the token value is not in node.env at all" "$(yes_if not contains "$P/node.env" "tok-w1")" "$(cat "$P/node.env")"
+	ok "token file: never logged (stdout)" "$(yes_if not out_has "tok-w1")"
+	ok "token file: never logged (kmsg)" "$(yes_if not contains "$W/kmsg" "tok-w1")"
 
 	# 15. rasputin.id= on the kernel command line still names a node whose seed
 	#     has a token and no id.
