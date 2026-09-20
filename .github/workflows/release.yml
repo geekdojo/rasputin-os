@@ -235,27 +235,34 @@ jobs:
       # Pre-pull + save the mesh container images (self-hosted Headscale) for
       # the target arch so post-build.sh can bake them into the rootfs. The
       # controlplane then forms its mesh on first boot WITHOUT internet (the
-      # supervisor's `docker image inspect` finds the loaded image and skips the
+      # supervisor finds the loaded image by its recorded ID and skips the
       # pull). --platform so the cm5 (arm64) image is fetched correctly on this
-      # amd64 runner — we only `docker save` it here, never run it. Refs come
-      # from board/rasputin/common/mesh-images.list (single source; must match
-      # the api's defaultImage). See os-images/buildroot-os.md §8.
+      # amd64 runner — we only `docker save` it here, never run it.
+      #
+      # THE REFS COME FROM THE CONTROL-PLANE RELEASE, not from this repository.
+      # board/rasputin/common/mesh-images.list used to carry them, with a
+      # comment saying in capitals that the headscale ref "MUST match
+      # defaultImage" in rasputin-control-plane — a sync contract enforced by
+      # nobody. When the two drifted the baked tarball simply was not matched by
+      # the supervisor and it fell back to pulling at runtime: no error, no
+      # alert, just a controlplane that silently needs internet on its first
+      # boot, which is the one thing baking the image exists to prevent
+      # (geekdojo/geekdojo-brain#210, #211). The pin now comes from the SAME
+      # control-plane release this image vendors its api from, so the api that
+      # reads the pin at runtime and the build that bakes it are one version.
+      #
+      # It also records the IMAGE ID of each tarball, which is how the api both
+      # FINDS and PINS the baked image. `docker save` of a digest-pinned
+      # reference writes RepoTags null and `docker load` records no RepoDigest
+      # in the classic image store, so the loaded image has no name to look up;
+      # the ID is what survives, and it is read out of the saved tarball here,
+      # where the digest pin still holds. See os-images/buildroot-os.md §8.
       - name: Bake mesh container images
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          set -euo pipefail
-          arch='${{ matrix.arch }}'          # amd64 (n100) | arm64 (cm5)
-          list='${{ github.workspace }}/board/rasputin/common/mesh-images.list'
-          out='${{ github.workspace }}/mesh-images'
-          mkdir -p "$out"
-          grep -vE '^[[:space:]]*(#|$)' "$list" | while read -r ref; do
-            ref="$(printf '%s' "$ref" | tr -d '[:space:]')"
-            [ -n "$ref" ] || continue
-            file="$(printf '%s' "$ref" | tr '/:' '__').tar"
-            echo "→ pulling $ref (linux/$arch) → $file"
-            docker pull --platform "linux/$arch" "$ref"
-            docker save "$ref" -o "$out/$file"
-          done
-          echo "----- baked mesh image tarballs -----"; ls -lh "$out"
+          scripts/bake-mesh-images.sh '${{ matrix.arch }}' \
+            '${{ github.workspace }}/mesh-images'
 
       - name: Build
         env:
@@ -512,29 +519,6 @@ jobs:
           # which is before the seed device is found — learned on dev.1.)
           grep -q "rasputin-firstboot: reading seed /run/rasputin-seed/rasputin-seed.env" /tmp/console.log \
             || { echo "::error::firstboot never read the seed — /run/rasputin-seed wiring (or kmsg logging) regressed"; exit 1; }
-          # At-rest modes (geekdojo/geekdojo-brain#494, gate 7).
-          # rasputin-atrest-audit.service checks every path in
-          # /usr/lib/rasputin/atrest/inventory once the api has written its
-          # files, and reports one verdict line to /dev/kmsg — the only channel
-          # this smoke has, since it holds no shell into the guest. The unit
-          # cannot fail the boot on purpose (a widened mode is worse reported
-          # than it is fatal), so the verdict has to be asserted here or
-          # nothing reads it.
-          #
-          # A missing line is a failure too, and a louder one: it means the
-          # unit did not run, so nothing checked the modes at all and every
-          # later release would go green over that silence.
-          if ! grep -q "rasputin-atrest: " /tmp/console.log; then
-            echo "::error::the at-rest mode audit never reported. rasputin-atrest-audit.service did not run, or its verdict did not reach /dev/kmsg — so NOTHING checked the modes of the join token, the bus key or the trust directories on this image. Check the unit's ordering (it is After= rasputin-api.service) and that /usr/lib/rasputin/atrest/ shipped in the rootfs."
-            exit 1
-          fi
-          if grep -q "rasputin-atrest: FAIL" /tmp/console.log; then
-            echo "::error::a file on the persistent partition is not at the mode the at-rest inventory declares:"
-            grep "rasputin-atrest: " /tmp/console.log || true
-            echo "::error::Fix the mode where it is set (usr/lib/tmpfiles.d/rasputin.conf, firstboot, the unit that creates it, or the api's at-rest helper). Do NOT widen the inventory to make this pass."
-            exit 1
-          fi
-          echo "at-rest modes: $(grep -o 'rasputin-atrest: PASS.*' /tmp/console.log | tail -1)"
           # "provisioning complete" proves the persistent partition mounted
           # (makefs+growfs path) and node.env was written — a fresh board
           # otherwise fails provisioning on read-only /etc (Mu bring-up

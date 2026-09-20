@@ -211,17 +211,38 @@ echo "post-build: /etc/shadow -> /var/lib/rasputin/console/shadow (root locked; 
 
 # Bake mesh container images (self-hosted Headscale) into the rootfs so the
 # controlplane forms its mesh on FIRST BOOT WITHOUT INTERNET. CI's "Bake mesh
-# container images" step docker-saved the refs from
-# board/rasputin/common/mesh-images.list into $RASPUTIN_MESH_IMAGES_DIR; copy
-# the tarballs in, and rasputin-mesh-images.service `docker load`s them before
-# rasputin-api so the supervisor's `docker image inspect` finds the image and
-# skips the pull. No dir set (local dev build) → nothing baked; the supervisor
-# pulls at runtime as before (graceful). The loader unit is controlplane- and
-# images-present-gated, so enabling it unconditionally here is safe.
+# container images" step docker-saved the refs from the control-plane release's
+# mesh-images.json into $RASPUTIN_MESH_IMAGES_DIR; copy the tarballs in, and
+# rasputin-mesh-images.service `docker load`s them before rasputin-api so the
+# supervisor's `docker image inspect` finds the image and skips the pull. No
+# dir set (local dev build) → nothing baked; the supervisor pulls at runtime as
+# before (graceful). The loader unit is controlplane- and images-present-gated,
+# so enabling it unconditionally here is safe.
+#
+# loaded-ids.tsv travels with the tarballs. It records the image ID CI read out
+# of each saved tarball, which is what `docker load` will produce here.
+#
+# It is not belt and braces, it is the only handle this node has. `docker save`
+# of a digest-pinned reference writes a tarball whose RepoTags is null, and
+# `docker load` records no RepoDigest in the classic image store because there
+# was no registry pull to record one from — so the loaded image has no NAME at
+# all and `docker image inspect headscale/...@sha256:...` fails on a node
+# holding exactly the right bytes. The api finds and pins the image by that ID
+# instead, which is a stronger pin than any name: a name is a local label
+# anyone with the daemon can move, and an ID is the content.
 if [ -n "${RASPUTIN_MESH_IMAGES_DIR:-}" ] && ls "$RASPUTIN_MESH_IMAGES_DIR"/*.tar >/dev/null 2>&1; then
 	mkdir -p "$TARGET_DIR/usr/share/rasputin/mesh-images"
 	cp "$RASPUTIN_MESH_IMAGES_DIR"/*.tar "$TARGET_DIR/usr/share/rasputin/mesh-images/"
-	echo "post-build: baked $(ls "$RASPUTIN_MESH_IMAGES_DIR"/*.tar | wc -l | tr -d ' ') mesh image tarball(s) into /usr/share/rasputin/mesh-images — controlplane forms its mesh offline"
+	if [ -f "$RASPUTIN_MESH_IMAGES_DIR/loaded-ids.tsv" ]; then
+		cp "$RASPUTIN_MESH_IMAGES_DIR/loaded-ids.tsv" \
+			"$TARGET_DIR/usr/share/rasputin/mesh-images/loaded-ids.tsv"
+	else
+		# The tarballs without the record would bake images the api cannot
+		# account for, which is the state this file exists to end.
+		echo "post-build: ERROR mesh image tarballs were baked with no loaded-ids.tsv beside them" >&2
+		exit 1
+	fi
+	echo "post-build: baked $(ls "$RASPUTIN_MESH_IMAGES_DIR"/*.tar | wc -l | tr -d ' ') mesh image tarball(s) + their image IDs into /usr/share/rasputin/mesh-images — controlplane forms its mesh offline"
 else
 	echo "post-build: no mesh images baked (RASPUTIN_MESH_IMAGES_DIR unset/empty) — controlplane will pull Headscale at runtime (needs internet)"
 fi
