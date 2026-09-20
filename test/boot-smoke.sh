@@ -203,12 +203,19 @@ qemu_boot() {
     # gic-version is pinned rather than left to QEMU's per-version default, so a
     # runner-image bump cannot silently change the interrupt controller under
     # us; the kernel carries both ARM_GIC and ARM_GIC_V3.
+    #
+    # romfile= (empty) disables the NIC's PXE option ROM. Ubuntu's
+    # qemu-system-x86 depends on ipxe-qemu and qemu-system-arm does NOT, so on
+    # the arm64 runner virtio-net-pci dies at startup with `failed to find
+    # romfile "efi-virtio.rom"` — QEMU never runs at all. We boot with -kernel
+    # and never PXE, so the ROM is dead weight; dropping it beats adding a
+    # package dependency to get a ROM we would not use.
     exec timeout "$BOOT_BUDGET" qemu-system-aarch64 \
       -machine virt,gic-version=3 -accel tcg -m 2048 -smp 2 -cpu cortex-a72 -nographic \
       -kernel "$WORK/kernel_2712.img" -append "$CMDLINE" \
       -drive file="$IMG",format=raw,if=none,id=hd0 -device virtio-blk-pci,drive=hd0 \
       -netdev "user,id=n0,hostfwd=tcp:127.0.0.1:${HTTP_PORT}-:80,hostfwd=tcp:127.0.0.1:${HTTPS_PORT}-:443,hostfwd=udp:127.0.0.1:${DNS_PORT}-:53,hostfwd=tcp:127.0.0.1:${DNS_PORT}-:53" \
-      -device virtio-net-pci,netdev=n0 \
+      -device virtio-net-pci,netdev=n0,romfile= \
       -serial mon:stdio > "$CONSOLE_LOG" 2>&1
     ;;
   esac
@@ -224,10 +231,28 @@ QPID=$!
 # Every wait below is a poll on a checkable fact with a hard try count, never a
 # bare sleep: it exits the instant the fact is true, and the assertions further
 # down name exactly which fact never became true.
+#
+# Every poll ALSO checks that qemu is still alive. A poll that only watches the
+# console cannot tell "the guest is still booting" from "qemu died on its
+# command line a second ago", and burns its whole budget either way: the first
+# green build of this job spent 901s waiting for a multi-user marker from a
+# QEMU that had exited immediately over a missing option ROM, then reported
+# "did not reach multi-user" — true, and useless. QEMU's own errors go to
+# $CONSOLE_LOG (its stderr), so the cause is already in hand; this just stops
+# waiting and prints it.
+qemu_gone() { kill -0 "$QPID" 2>/dev/null && return 1 || return 0; }
+die_if_qemu_gone() {
+  qemu_gone || return 0
+  echo "::error::qemu exited on its own while waiting for $1 — it did not run long enough to be killed here. This is usually QEMU refusing its command line (a missing option ROM, an unsupported machine or CPU on the runner's QEMU), not a guest failure; QEMU's own message is in the console below, above any kernel output."
+  echo "----- console (whole file) -----"; cat "$CONSOLE_LOG" || true
+  exit 1
+}
+
 ok=0
 i=0
 while [ "$i" -lt "$MU_TRIES" ]; do
   if grep -qE "Reached target .*Multi-User|Welcome to Rasputin" "$CONSOLE_LOG"; then ok=1; break; fi
+  die_if_qemu_gone "multi-user"
   i=$((i + 1)); sleep 2
 done
 MU_AT=$(( $(date +%s) - START ))
@@ -242,6 +267,7 @@ if [ "$ok" = 1 ]; then
   i=0
   while [ "$i" -lt "$FB_TRIES" ]; do
     if grep -q "rasputin-firstboot: provisioning complete" "$CONSOLE_LOG"; then fb=1; break; fi
+    die_if_qemu_gone "firstboot to complete"
     i=$((i + 1)); sleep 2
   done
 fi
@@ -259,6 +285,7 @@ if [ "$fb" = 1 ]; then
   i=0
   while [ "$i" -lt "$API_TRIES" ]; do
     if [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 "http://127.0.0.1:${HTTP_PORT}/healthz" || true)" = "200" ]; then api=1; break; fi
+    die_if_qemu_gone "the api to answer /healthz"
     i=$((i + 1)); sleep 5
   done
   if [ "$api" = 1 ]; then
@@ -325,6 +352,7 @@ if [ "$api" = 1 ]; then
   i=0
   while [ "$i" -lt 35 ]; do
     sleep 2
+    die_if_qemu_gone "the uptime soak to finish"
     [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:${HTTP_PORT}/healthz" || true)" = "200" ] \
       || { soak=0; break; }
     i=$((i + 1))
