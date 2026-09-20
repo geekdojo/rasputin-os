@@ -10,9 +10,12 @@
 # already exists, and a bind mount makes it writable.
 #
 # Cores are hard-capped by coredump.conf.d/rasputin.conf (KeepFree guards the
-# partition). Purpose: capture the intermittent rauc double-free (rasputin-os#8),
-# which is A/B-OTA-adjacent, so the store must survive a reboot — hence
-# persistent, not tmpfs.
+# partition) and restricted to root by this unit's 0700 on the store plus the
+# systemd-coredump@.service.d drop-in. Purpose: capture the intermittent rauc
+# double-free (rasputin-os#8), which is A/B-OTA-adjacent, so the store must
+# survive a reboot — hence persistent, not tmpfs. Only rasputin-agent.service
+# has its core limit raised, so in practice that update path is the only thing
+# on the image that can fill this store.
 [Unit]
 Description=Persistent-partition backing store for systemd-coredump
 RequiresMountsFor=/var/lib/rasputin
@@ -22,6 +25,13 @@ ConditionPathIsMountPoint=/var/lib/rasputin
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/bin/mkdir -p /var/lib/rasputin/coredump
+# 0700 root: a core is a copy of a process's memory, so the store holds
+# whatever the crashing process held. mkdir alone would leave it 0755 under
+# root's umask — and 0755 on an EXISTING store from an older image would
+# survive the update, so this chmod is unconditional rather than a mkdir mode.
+# Every other persistent-partition directory that holds secrets is 0700 the
+# same way (see usr/lib/tmpfiles.d/rasputin.conf).
+ExecStart=/bin/chmod 0700 /var/lib/rasputin/coredump
 # -o bind is understood by both busybox and util-linux mount.
 ExecStart=/bin/mount -o bind /var/lib/rasputin/coredump /var/lib/systemd/coredump
 ExecStop=/bin/umount /var/lib/systemd/coredump

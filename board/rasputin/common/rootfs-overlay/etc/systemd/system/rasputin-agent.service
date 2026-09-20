@@ -60,6 +60,36 @@ RestartSec=2
 Type=notify
 WatchdogSec=30
 NotifyAccess=main
+# The ONLY unit on the image that raises the core-dump limit, and the reason
+# systemd-coredump is on the image at all: the intermittent rauc double-free
+# abort (rasputin-os#8) must leave a backtrace the next time it happens.
+#
+# WHY HERE. systemd gives every service RLIMIT_CORE soft 0 unless told
+# otherwise, and at soft 0 the kernel writes no core — coredump.conf's policy
+# never even sees the crash. The rauc OTA path is `rauc install` run as a
+# direct CHILD of this process (agent/internal/updater/rauc.go), and a child
+# inherits the limit, so raising it on this unit covers the crash that #8 is
+# about. rauc's D-Bus service mode is not built (BR2_PACKAGE_RAUC_DBUS is not
+# set), so there is no separate rauc.service the abort could happen in.
+#
+# WHY NOT GLOBALLY. This was `[Manager] DefaultLimitCORE=infinity` in
+# system.conf.d until 2026-09-19, which raised it for EVERY service. A core is
+# a copy of a process's memory, so that made any crashing service able to write
+# its secrets to the persistent partition. Scoped here, only the update path can
+# — see etc/systemd/coredump.conf.d/rasputin.conf for where cores go and
+# systemd-coredump@.service.d/rasputin-coredump.conf for their mode.
+#
+# The other two units that run rauc are deliberately NOT raised:
+# rasputin-mark-good.service and rasputin-rauc-reconcile.service run
+# `rauc status` / the Pi backend script, not an install, which is not the #8
+# path. Raise one of those only if a crash is actually seen there.
+#
+# NOTE: a MANUAL `rauc install` from an interactive SSH shell is NOT covered
+# (a shell's RLIMIT_CORE comes from PAM/limits, not systemd) — run it with
+# `ulimit -c unlimited` if reproducing that way. That was already true of the
+# global setting; the original #8 repro was manual, the real OTA path is
+# service-driven and is covered.
+LimitCORE=infinity
 
 [Install]
 WantedBy=multi-user.target
