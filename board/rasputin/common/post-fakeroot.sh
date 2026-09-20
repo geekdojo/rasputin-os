@@ -110,3 +110,81 @@ chmod 600 "$FACTORY_DIR/shadow"
 rm -f "$TARGET_DIR/etc/shadow"
 ln -s /var/lib/rasputin/console/shadow "$TARGET_DIR/etc/shadow"
 echo "post-fakeroot: /etc/shadow -> /var/lib/rasputin/console/shadow for $SOC (root locked; the control plane delivers the hash)"
+
+# ── the clock floor: /var/lib/systemd/timesync/clock ─────────────────────────
+#
+# A board with no battery-backed RTC — every Pi — boots at the Unix epoch, and
+# systemd advances the clock to its OWN compiled-in build time, which is the
+# systemd PACKAGE's build time, not this image's:
+#
+#     rpi-rtc soc:rpi_rtc: setting system clock to 1970-01-01T00:00:53 UTC
+#     systemd[1]: System time before build time, advancing clock.
+#
+# On 2026.09.4-dev.238 that landed the node on 2025-06-25 — fifteen months
+# before the image was built — because Buildroot's systemd predates the image
+# that vendors it. (/usr/lib/clock-epoch is not a lever here: this systemd is
+# built without it, PID 1 has only clock_apply_epoch and the compiled constant.)
+#
+# The control plane then mints its Mesh CA and HTTPS leaf against that clock.
+# rasputin-control-plane's clock gate waits up to 90s for NTP first, but it is
+# bounded and mints anyway on timeout — by design, so an offline node still
+# serves HTTPS. On a node that can reach NTP the wait covers this. On one that
+# CANNOT it always expires: the no-DHCP bootstrap address carries no gateway on
+# purpose (#53), and the baked FallbackNTP is four off-LAN anycast IPs, so
+# there is no reachable time source on exactly the path that address exists
+# for. The leaf is then dated fifteen months in the past — already expired —
+# and it never heals, because the renewal check reads the same wrong clock and
+# sees a leaf with a year left. geekdojo/rasputin-os#1 hit this in July 2026
+# and was closed on the 90s gate; a bounded wait is a delay, not a floor.
+#
+# systemd-timesyncd raises the clock to the MTIME of its timestamp file when it
+# starts, before any NTP exchange. The image ships the directory but no file,
+# so there has never been a floor above systemd's own. Baking the file with
+# this build's timestamp moves the floor to image build time: an offline node
+# mints a leaf dated to the build and valid for its full year, instead of one
+# born expired.
+#
+# This is a FLOOR, not a clock. It does not make an offline node's time
+# correct and it replaces nothing about NTP — it bounds how wrong the time can
+# be at the moment a certificate is signed.
+#
+# Why the mtime and not the contents: timesyncd stats this file, it never reads
+# it — hence an empty file. Why this stage and not post-build.sh or a committed
+# rootfs overlay: a file in the overlay carries its git CHECKOUT mtime, which
+# says nothing about when the image was built, and post-fakeroot is the last
+# thing to touch the tree before the image command, so nothing downstream
+# restamps it.
+TIMESYNC_DIR="$TARGET_DIR/var/lib/systemd/timesync"
+CLOCK_FILE="$TIMESYNC_DIR/clock"
+
+if [ ! -d "$TIMESYNC_DIR" ]; then
+	echo "post-fakeroot: ERROR — no $TIMESYNC_DIR in the rootfs; that directory is where systemd-timesyncd reads the clock floor, so the image would ship with no floor above systemd's own build time" >&2
+	exit 1
+fi
+if [ -e "$CLOCK_FILE" ]; then
+	echo "post-fakeroot: ERROR — $CLOCK_FILE already exists; refusing to restamp a floor this script did not bake" >&2
+	exit 1
+fi
+# Fail closed on a build host whose own clock is wrong: baking a floor from a
+# bad clock is worse than baking none, because it is invisible afterwards. Any
+# date before this repo could have produced the change means the builder's
+# clock is unset, not that the build is old.
+BUILD_EPOCH="$(date -u +%s)"
+MIN_EPOCH=1767225600            # 2026-01-01T00:00:00Z
+if [ "$BUILD_EPOCH" -lt "$MIN_EPOCH" ]; then
+	echo "post-fakeroot: ERROR — the build host's clock reads $(date -u -d "@$BUILD_EPOCH" 2>/dev/null || echo "$BUILD_EPOCH"), before $MIN_EPOCH; refusing to bake a clock floor from an unset clock" >&2
+	exit 1
+fi
+
+: > "$CLOCK_FILE"
+chmod 644 "$CLOCK_FILE"
+# Own it the way the directory is owned. timesyncd only needs to stat the file,
+# but it drops to this user and a file it owns is one less thing to explain.
+TS_OWNER="$(awk -F: '$1=="systemd-timesync"{print $3":"$4; exit}' "$TARGET_DIR/etc/passwd")"
+# Not fatal: under fakeroot this always succeeds, and outside it (the test)
+# it cannot. Ownership is cosmetic for a file whose only consumer stats it.
+if [ -n "$TS_OWNER" ]; then
+	chown "$TS_OWNER" "$CLOCK_FILE" 2>/dev/null \
+		|| echo "post-fakeroot: note — could not chown the clock floor to $TS_OWNER; timesyncd only stats it" >&2
+fi
+echo "post-fakeroot: clock floor baked for $SOC — /var/lib/systemd/timesync/clock mtime $(date -u -d "@$BUILD_EPOCH" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u '+%Y-%m-%dT%H:%M:%SZ')"
