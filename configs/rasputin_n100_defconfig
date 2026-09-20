@@ -56,10 +56,15 @@ BR2_TARGET_GENERIC_ROOT_PASSWD="rasputin"
 BR2_PACKAGE_SYSTEMD_NETWORKD=y
 BR2_PACKAGE_SYSTEMD_RESOLVED=y
 # systemd-coredump: capture a backtrace on the next crash (esp. the intermittent
-# rauc double-free abort, rasputin-os#8 — deferred pending a repro/core). Cores
-# are routed to the persistent partition and hard-capped; see the overlay
-# (var/lib/systemd/coredump symlink, etc/systemd/coredump.conf.d/rasputin.conf,
-# tmpfiles.d/rasputin.conf). Pulls target elfutils (backtrace symbolisation).
+# rauc double-free abort, rasputin-os#8 — deferred pending a repro/core). Only
+# rasputin-agent.service, which runs `rauc install`, has its core limit raised,
+# so that update path is in practice the only thing on the image that can dump.
+# Cores are routed to the persistent partition, hard-capped, and readable by
+# root only; see the overlay (etc/systemd/system/rasputin-agent.service,
+# etc/systemd/coredump.conf.d/rasputin.conf,
+# etc/systemd/system/rasputin-coredump-store.service,
+# etc/systemd/system/systemd-coredump@.service.d/rasputin-coredump.conf).
+# Pulls target elfutils (backtrace symbolisation).
 BR2_PACKAGE_SYSTEMD_COREDUMP=y
 
 # --- kernel: arch default config + Rasputin fragment ---
