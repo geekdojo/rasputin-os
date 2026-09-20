@@ -157,10 +157,12 @@ echo "post-fakeroot: /etc/shadow -> /var/lib/rasputin/console/shadow for $SOC (r
 TIMESYNC_DIR="$TARGET_DIR/var/lib/systemd/timesync"
 CLOCK_FILE="$TIMESYNC_DIR/clock"
 
-if [ ! -d "$TIMESYNC_DIR" ]; then
-	echo "post-fakeroot: ERROR — no $TIMESYNC_DIR in the rootfs; that directory is where systemd-timesyncd reads the clock floor, so the image would ship with no floor above systemd's own build time" >&2
-	exit 1
-fi
+# Buildroot's systemd ships this directory, but the floor must not DEPEND on
+# that: a missing directory should mean the image still gets a floor, not that
+# the build fails or — worse — quietly ships without one. Create it if absent.
+# (It also keeps this script self-sufficient against a minimal tree; that is
+# what test/rootfs-shadow-test.sh hands it.)
+mkdir -p "$TIMESYNC_DIR"
 if [ -e "$CLOCK_FILE" ]; then
 	echo "post-fakeroot: ERROR — $CLOCK_FILE already exists; refusing to restamp a floor this script did not bake" >&2
 	exit 1

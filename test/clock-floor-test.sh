@@ -72,18 +72,18 @@ case "$out" in
 	*) echo "FAIL — the build says what it baked: got '$out'"; fails=$((fails + 1)) ;;
 esac
 
-# --- 2. a missing timesync directory is a build failure, not a silent skip ---
-# If Buildroot ever stops shipping the directory, the floor would quietly not
-# exist and every offline node would go back to minting expired leaves.
+# --- 2. a missing timesync directory is created, not fatal, not skipped ------
+# If Buildroot ever stops shipping the directory the floor must still be baked.
+# Failing the build instead would be worse than useless: post-fakeroot.sh also
+# runs against minimal fixture trees (test/rootfs-shadow-test.sh), so a hard
+# failure here breaks an unrelated test without protecting anything.
 T="$TMP/nodir"
 make_target "$T"
 rmdir "$T/var/lib/systemd/timesync"
 out=$(sh "$SCRIPT" "$T" rpi 2>&1); rc=$?
-check "exits non-zero when the timesync directory is gone" "$([ "$rc" -ne 0 ] && echo yes || echo no)" "yes"
-case "$out" in
-	*"where systemd-timesyncd reads the clock floor"*) echo "ok   — and says why it matters" ;;
-	*) echo "FAIL — and says why it matters: got '$out'"; fails=$((fails + 1)) ;;
-esac
+check "exits 0 when the timesync directory is absent" "$rc" "0"
+check "and creates the floor anyway" \
+	"$([ -f "$T/var/lib/systemd/timesync/clock" ] && echo yes || echo no)" "yes"
 
 # --- 3. an existing clock file is never restamped -----------------------------
 T="$TMP/exists"
