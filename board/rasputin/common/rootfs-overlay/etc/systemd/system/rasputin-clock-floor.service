@@ -1,0 +1,40 @@
+[Unit]
+Description=Rasputin clock floor for systemd-timesyncd
+# A no-RTC board boots at the epoch and PID 1 only advances the clock to
+# systemd's OWN compiled-in build time, which lags this image by however long
+# the systemd package has been pinned (fifteen months on 2026.09.4). Every
+# certificate the control plane mints before NTP lands is dated from there, and
+# on a node that can never reach NTP -- the no-DHCP bootstrap path has no
+# gateway by design (#53) -- that leaf is born expired and never heals.
+# geekdojo/rasputin-os#1.
+#
+# systemd-timesyncd restores the clock from the mtime of its timestamp file at
+# startup, before any NTP exchange. It opens that file READ-WRITE, so a copy
+# baked into the read-only squashfs fails with EROFS and the restore is skipped
+# silently -- PR #101 shipped exactly that and changed nothing on the bench.
+# This unit gives it a writable one, seeded from the factory copy with its
+# mtime intact. See usr/lib/rasputin/clock/.
+#
+# Ordering. Before systemd-timesyncd so the file exists when it reads it, and
+# before time-set.target so anything gated on "the clock has been set" sees the
+# floor rather than 2025. After systemd-tmpfiles-setup, which is what
+# timesyncd itself waits for, so this slots in at the same point without
+# moving anything else.
+#
+# DefaultDependencies=no because this runs inside sysinit, before the implicit
+# basic.target ordering exists; the explicit After= below is the whole
+# dependency set it needs.
+DefaultDependencies=no
+After=systemd-tmpfiles-setup.service systemd-sysusers.service
+Before=systemd-timesyncd.service time-set.target sysinit.target
+# No factory copy means a build that did not bake one; skip quietly rather than
+# fail a boot over a floor. post-fakeroot.sh is what puts it there.
+ConditionPathExists=/usr/share/factory/rasputin/timesync-clock
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/rasputin/clock/rasputin-clock-floor.sh
+
+[Install]
+WantedBy=sysinit.target

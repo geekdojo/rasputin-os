@@ -32,6 +32,15 @@ ln -sf /etc/systemd/system/rasputin-agent.service \
 # hostname isn't). Only the controlplane may answer rasputin.local via mDNS.
 ln -sf /etc/systemd/system/rasputin-hostname.service \
 	"$TARGET_DIR/etc/systemd/system/multi-user.target.wants/rasputin-hostname.service"
+# Give systemd-timesyncd a WRITABLE timestamp file stamped at the image build
+# date, before it starts. Without it a no-RTC board keeps systemd's own
+# compiled-in build time (fifteen months stale on 2026.09.4) and an offline
+# controlplane mints an already-expired HTTPS leaf. sysinit.target.wants, not
+# multi-user: timesyncd runs inside sysinit and this has to precede it.
+# geekdojo/rasputin-os#1.
+mkdir -p "$TARGET_DIR/etc/systemd/system/sysinit.target.wants"
+ln -sf /etc/systemd/system/rasputin-clock-floor.service \
+	"$TARGET_DIR/etc/systemd/system/sysinit.target.wants/rasputin-clock-floor.service"
 # Apply the seed's RASPUTIN_NTP_SERVER (if any) to systemd-timesyncd, every boot
 # (/run drop-in; /etc is read-only). No-op when unset — the baked numeric
 # FallbackNTP (usr/lib/systemd/timesyncd.conf.d) still gets a no-RTC node correct
