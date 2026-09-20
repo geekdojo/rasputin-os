@@ -101,10 +101,11 @@ jobs:
         # Both SKUs — n100 (amd64) and rpi (arm64: Pi 4 / Pi 5 / CM5) — are built
         # AND published on every release. arm64 is first-class v1 ship scope, so
         # there is no per-arch publish gate: a release always ships every built
-        # SKU (gate retired 2026-07-04). arm64 still has no CI boot smoke (a Pi
-        # can't be emulated end-to-end here), so hardware validation stays a
-        # manual bench step — tracked in the wiki backlog (os-images arm64/Pi
-        # parity) — but that no longer withholds the published image.
+        # SKU (gate retired 2026-07-04). Both are now boot-smoked before publish
+        # (smoke-amd64 / smoke-arm64). The arm64 smoke runs the SAME assertions
+        # on QEMU's `virt` machine — it does NOT emulate a Pi, so the EEPROM
+        # bootloader, autoboot.txt boot_partition switching and the one-shot
+        # tryboot flag remain unproven by CI and stay a manual bench step.
         include:
           - sku: rpi
             defconfig: rasputin_rpi_defconfig
@@ -306,25 +307,22 @@ jobs:
           # the leaf signing key never enters the build runner. The bundle/
           # contents above are what sign-and-release feeds to `rauc bundle`.
 
-  # Boot-smoke the amd64 image in QEMU — the relaxation of "no boot test in
-  # CI" that needs NO hardware (the N100 is generic x86_64; a generic UEFI
-  # image boots in QEMU and on the real board alike). Catches boot/rootfs/
-  # RAUC regressions automatically. The arm64/CM5 image can't be fully
-  # smoke-tested here (Pi firmware + tryboot need a real Pi) — that stays
-  # manual on hardware.
+  # Boot-smoke the built images in QEMU — the relaxation of "no boot test in
+  # CI" that needs NO hardware. Both SKUs now have one; the assertions live in
+  # ONE script (test/boot-smoke.sh) that both jobs call, so they cannot drift
+  # apart. Read that script for what is asserted and why each assertion exists.
   #
-  # TODO(bring-up): tune two things on the first green build —
-  #   (a) the kernel cmdline needs `console=ttyS0,115200` so systemd logs to
-  #       the serial QEMU captures (wire it in the GRUB cfg / genimage);
-  #   (b) confirm the success marker string below matches the boot output.
+  # Per-arch notes are on each job below. The shared shape: download the SKU's
+  # unsigned .img artifact, seed it as a controlplane, boot it headless, and
+  # assert the boot, the provisioning chain, the api/UI/DNS surface and a 70s
+  # uptime soak. A red smoke BLOCKS sign-and-release.
   smoke-amd64:
     needs: build
     # Run as long as the workflow wasn't cancelled — !cancelled() decouples
-    # smoke from cm5: with `fail-fast: false`, needs.build.result is 'failure'
-    # if ANY matrix entry failed, which would otherwise skip smoke when n100
-    # built fine but cm5 didn't (cm5 is hardware bring-up; it shouldn't block
-    # amd64 QEMU validation). If n100 also failed, the artifact-download step
-    # below surfaces that cleanly.
+    # smoke from the other matrix entry: with `fail-fast: false`,
+    # needs.build.result is 'failure' if ANY matrix entry failed, which would
+    # otherwise skip this job when n100 built fine but rpi didn't. If n100 also
+    # failed, the artifact-download step below surfaces that cleanly.
     #
     # full_build arrives as a real boolean from the UI checkbox but as the
     # STRING "true" via the API / `gh -f`. Accept both. (Defaults to false
@@ -332,290 +330,76 @@ jobs:
     if: ${{ !cancelled() && (startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && (inputs.full_build == true || inputs.full_build == 'true' || inputs.publish == true || inputs.publish == 'true'))) }}
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - name: Install QEMU + OVMF (UEFI firmware) + mtools
         run: |
           sudo apt-get update
-          # bind9-dnsutils: dig, for the CP-nameserver assertion below (the
-          # api's DNS listener is queried through a hostfwd, not grepped).
+          # bind9-dnsutils: dig, for the CP-nameserver assertion (the api's DNS
+          # listener is queried through a hostfwd, not grepped). sfdisk + jq are
+          # preinstalled on the runner image.
           sudo apt-get install -y --no-install-recommends qemu-system-x86 ovmf mtools bind9-dnsutils
       - uses: actions/download-artifact@v4
         with:
           pattern: n100-*
           merge-multiple: true
           path: img
-      - name: Boot headless, wait for multi-user.target
+      - name: Boot headless and assert
         run: |
           set -x
           IMG=$(ls img/*.img | head -1)
-          test -n "$IMG" || { echo "no n100 .img artifact"; exit 1; }
-          # Seed role=controlplane so this boot also brings up rasputin-api and
-          # we can assert the API + bundled web UI actually serve (the shipped
-          # seed is blank → role-less boot would never start the api). The seed
-          # lives on its own auto-mounting FAT partition now (Microsoft basic
-          # data — Win/macOS show it, unlike the hidden ESP), so find its byte
-          # offset from the GPT rather than the old fixed ESP offset (17408).
-          # mtools keeps the recipe identical to the macOS bench one.
-          # RASPUTIN_NODE_ID is required for role=controlplane (firstboot fails
-          # loud without it — a real CP seed always carries one).
-          # RASPUTIN_CLUSTER_ID is deliberately NOT the default "rasputin".
-          # Seeding a real cluster name is what makes this smoke exercise the
-          # ADR-0003 chain end to end — seed -> node.env -> hostname -> the
-          # api's derived RP ID. With the default, every assertion below would
-          # pass even if the whole naming chain were broken, because the
-          # fallback lands on exactly the values the old hardcodes carried.
-          printf 'RASPUTIN_NODE_ROLE=controlplane\nRASPUTIN_NODE_ID=smoke-cp\nRASPUTIN_CLUSTER_ID=smoke1\nRASPUTIN_NATS_URL=\nRASPUTIN_CP_JOIN_TOKEN=\n' > /tmp/seed-cp.env
-          SEED_OFF=$(sfdisk -J "$IMG" | jq -r '.partitiontable.partitions[] | select((.type|ascii_upcase)=="EBD0A0A2-B9E5-4433-87C0-68B6B72699C7") | .start * 512')
-          test -n "$SEED_OFF" || { echo "::error::could not locate the seed partition in $IMG"; sfdisk -J "$IMG"; exit 1; }
-          mcopy -o -i "$IMG"@@${SEED_OFF} /tmp/seed-cp.env ::rasputin-seed.env
-          # Ubuntu's ovmf package renamed the firmware files (the un-suffixed
-          # OVMF_CODE.fd / OVMF_VARS.fd are gone on 24.04+; the 4M variants
-          # are the modern names, and the secboot ones require signed
-          # bootloaders which our GRUB isn't). Pick whichever non-secboot
-          # variant is installed.
-          OVMF_CODE=$(ls /usr/share/OVMF/OVMF_CODE*.fd 2>/dev/null | grep -v secboot | head -1)
-          OVMF_VARS=$(ls /usr/share/OVMF/OVMF_VARS*.fd 2>/dev/null | grep -v secboot | head -1)
-          if [ -z "$OVMF_CODE" ] || [ -z "$OVMF_VARS" ]; then
-            echo "::error::OVMF firmware not found"; ls -la /usr/share/OVMF/ || true; exit 1
-          fi
-          echo "using OVMF code=$OVMF_CODE vars=$OVMF_VARS"
-          cp "$OVMF_VARS" /tmp/vars.fd
-          # -cpu max: advertise every ISA extension QEMU's TCG knows. The
-          # image is built with BR2_x86_corei7 (Nehalem baseline → SSE4.2);
-          # the default qemu64 CPU model lacks SSE4.2 so glibc's dynamic
-          # linker hits "invalid opcode" the moment init runs. Real N100
-          # hardware has SSE4.2+ so the build target is correct — this
-          # only affects emulation. (max works without KVM, which not all
-          # GH runners expose at /dev/kvm.)
-          # user-mode NIC with a host forward so the runner can curl the
-          # api/UI; virtio-net matches the virtio-blk the image already
-          # boots from. The api listens on :80 now (HTTP bootstrap surface;
-          # RASPUTIN_HTTP_ADDR=:80 in rasputin-api.service — the old :8080
-          # default is gone from the image). /healthz stays plain-HTTP by
-          # contract. HTTPS (:443) and mDNS are NOT asserted here: user-mode
-          # networking makes multicast useless, and the self-signed-cert
-          # handshake adds nothing healthz doesn't already prove.
-          # timeout stretched 300→900: this boot now also has
-          # to start the api (NATS + sqlite + docker units) under TCG, and
-          # the poll budgets below (240s multi-user + 120s firstboot +
-          # 240s api/UI) must all fit inside it.
-          ( timeout 900 qemu-system-x86_64 \
-              -machine q35 -m 2048 -smp 2 -cpu max -nographic \
-              -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
-              -drive if=pflash,format=raw,file=/tmp/vars.fd \
-              -drive file="$IMG",format=raw,if=virtio \
-              -nic user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:18080-:80,hostfwd=tcp:127.0.0.1:18443-:443,hostfwd=udp:127.0.0.1:15353-:53,hostfwd=tcp:127.0.0.1:15353-:53 \
-              -serial mon:stdio > /tmp/console.log 2>&1 ) &
-          QPID=$!
-          ok=0
-          for _ in $(seq 1 120); do
-            if grep -qE "Reached target .*Multi-User|Welcome to Rasputin" /tmp/console.log; then ok=1; break; fi
-            sleep 2
-          done
-          # Do NOT kill qemu yet: the getty prompt races firstboot (parallel
-          # multi-user jobs; firstboot waits on makefs→mount of the persistent
-          # partition and finishes a few seconds AFTER the login prompt).
-          # dev.2 false-failed by asserting the instant multi-user showed.
-          # Keep the same boot running and poll — a second boot can't work,
-          # firstboot is guarded by the .provisioned stamp it just wrote.
-          fb=0
-          if [ "$ok" = 1 ]; then
-            for _ in $(seq 1 60); do
-              if grep -q "rasputin-firstboot: provisioning complete" /tmp/console.log; then fb=1; break; fi
-              sleep 2
-            done
-          fi
-          # API + web UI smoke (same boot, via the hostfwd to guest :80):
-          # the seed above made this a controlplane, so rasputin-api must
-          # come up and answer /healthz over plain HTTP on :80 (that stays
-          # the contract even after the HTTPS listener lands). GET / on :80
-          # passes as either the bundled UI HTML (api 0.3.x, HTTP-only) or
-          # a redirect to the HTTPS origin (api with native TLS treats :80
-          # as a bootstrap/redirect surface) — accept both so the smoke
-          # doesn't break across the api's HTTPS rollout.
-          # Validated locally 2026-06-11: api answers within ~30s of
-          # multi-user under TCG; budget 240s for slower runners.
-          api=0 ui=0 NSUDP="" NSTCP=""
-          if [ "$fb" = 1 ]; then
-            for _ in $(seq 1 48); do
-              if [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 http://127.0.0.1:18080/healthz || true)" = "200" ]; then api=1; break; fi
-              sleep 5
-            done
-            if [ "$api" = 1 ]; then
-              rcode=$(curl -s -o /tmp/root.body -w '%{http_code}' --max-time 5 http://127.0.0.1:18080/ || true)
-              root=$(cat /tmp/root.body 2>/dev/null || true)
-              case "$root" in *"<html"*|*"<!DOCTYPE"*) ui=1;; esac
-              case "$rcode" in 301|302|307|308) ui=1;; esac
-              # Capture the api's WebAuthn RP ID while the VM is STILL RUNNING.
-              # It is asserted further down with the console checks, but it can
-              # only be COLLECTED here: everything below runs after the qemu
-              # kill, so an HTTP call there talks to a dead machine and returns
-              # nothing — which reads exactly like a failed derivation.
-              # HTTPS because :80 is only the bootstrap/redirect surface; -k
-              # because the leaf is signed by the per-installation Mesh CA.
-              # Unauthenticated on purpose: first-user registration is open
-              # until a user exists, which is this freshly-provisioned box.
-              RPID=$(curl -sk --max-time 10 -X POST https://127.0.0.1:18443/api/auth/register/begin \
-                -H 'Content-Type: application/json' \
-                -d '{"name":"smoke","displayName":"Smoke Test"}' | jq -r '.publicKey.rp.id // empty')
-              # CP nameserver (ADR-0004 §3/§8): ask the guest's own :53 for the
-              # cluster zone apex over BOTH transports, via the hostfwd on the
-              # qemu line. Collected here for the same reason as RPID —
-              # everything below runs after the qemu kill, so a query there
-              # talks to a dead machine and reads exactly like a real failure.
-              #
-              # Queried rather than grepped from the console because the api
-              # logs to the journal and only kmsg-mirrored lines reach the
-              # serial console (see the RP ID note below) — its "nameserver
-              # authoritative for ..." line is simply not in console.log. As
-              # with RPID, asking is the stronger check anyway: it proves the
-              # responder ANSWERS, not that something printed.
-              #
-              # UDP and TCP are asked SEPARATELY on purpose. The api binds the
-              # two transports independently (control-plane #126 — deriving the
-              # TCP port from the UDP bind was a TOCTOU that intermittently
-              # failed CI), so a UDP answer says nothing about TCP.
-              #
-              # This is worth a gate because the failure is SILENT: a
-              # nameserver bind error is deliberately non-fatal (the api logs
-              # it and serves on without DNS, on the reasoning that a control
-              # plane that won't start is worse than one that won't resolve).
-              # Nothing crashes, healthz stays 200, and no other assertion in
-              # this smoke would notice the cluster had lost name resolution.
-              # No poll needed: the api binds :53 long before it listens on
-              # :80, so healthz answering means the bind already succeeded or
-              # already failed.
-              NSUDP=$(dig +short +time=5 +tries=2 @127.0.0.1 -p 15353 smoke1.internal A 2>/dev/null | head -1)
-              NSTCP=$(dig +short +time=5 +tries=2 +tcp @127.0.0.1 -p 15353 smoke1.internal A 2>/dev/null | head -1)
-            fi
-          fi
-          # Uptime soak: retry-until-success probes are blind to a crash
-          # loop (the api's missing sd_notify watchdog support meant every
-          # hardware boot SIGABRT-cycled it every ~33s for FIVE releases,
-          # and this smoke passed every time — found 2026-06-12 on the Mu
-          # bench). 70s straddles two 30s watchdog windows: if any unit is
-          # being watchdog-killed, healthz at the end fails and/or the
-          # console shows the kill. Both are asserted after shutdown below.
-          # Probe CONTINUOUSLY (every 2s for 70s, every probe must pass):
-          # a single end-of-window probe would land inside a crash loop's
-          # ~28s live window ~85% of the time — the exact blindness that
-          # let the bug ship. A 33s kill cycle has a 4-5s dead window that
-          # 2s-interval probes cannot miss.
-          soak=0
-          if [ "$api" = 1 ]; then
-            soak=1
-            for _ in $(seq 1 35); do
-              sleep 2
-              [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:18080/healthz || true)" = "200" ] \
-                || { soak=0; break; }
-            done
-          fi
-          kill "$QPID" 2>/dev/null || true
-          echo "----- last 60 lines of console -----"; tail -60 /tmp/console.log || true
-          [ "$ok" = 1 ] || { echo "::error::image did not reach multi-user in QEMU"; exit 1; }
-          echo "amd64 image booted to multi-user in QEMU"
-          # firstboot logs to /dev/kmsg, so its lines reach the serial console.
-          # (Asserting on systemd's own "Mounted ..." line doesn't work: PID 1
-          # stops mirroring unit status to the console once journald is up,
-          # which is before the seed device is found — learned on dev.1.)
-          grep -q "rasputin-firstboot: reading seed /run/rasputin-seed/rasputin-seed.env" /tmp/console.log \
-            || { echo "::error::firstboot never read the seed — /run/rasputin-seed wiring (or kmsg logging) regressed"; exit 1; }
-          # "provisioning complete" proves the persistent partition mounted
-          # (makefs+growfs path) and node.env was written — a fresh board
-          # otherwise fails provisioning on read-only /etc (Mu bring-up
-          # 2026-06-09).
-          [ "$fb" = 1 ] \
-            || { echo "::error::firstboot did not complete — persistent mount (e2fsprogs/makefs?) or node.env write failed; see console artifact"; exit 1; }
-          echo "seed read + provisioning completion confirmed in boot output"
-          # Per-role hostname: rasputin-hostname.service runs every boot
-          # (after firstboot, before the api) and logs to kmsg like firstboot
-          # does. On this controlplane-seeded boot it must have promoted the
-          # baked "rasputin-node" placeholder to "rasputin" — that transient
-          # hostname is what resolved announces as rasputin.local (mDNS
-          # itself can't be asserted under user-mode networking).
-          grep -q "rasputin-hostname: transient hostname set to smoke1 (role=controlplane)" /tmp/console.log \
-            || { echo "::error::the controlplane hostname did not follow RASPUTIN_CLUSTER_ID — the seeded cluster name never reached the hostname (check firstboot node.env pass-through and rasputin-hostname.sh); the cluster would be unreachable at smoke1.local; see console artifact"; exit 1; }
-          echo "per-cluster hostname (smoke1) confirmed in boot output"
-          # The api must DERIVE its WebAuthn identity from the same cluster id.
-          # This is the assertion the naming work most needs: credentials bind
-          # to the RP ID, so a wrong derivation does not error — it produces a
-          # cluster whose passkeys silently cannot be used.
-          #
-          # Asked over HTTP rather than grepped from the console, for two
-          # reasons. The api logs to the journal and ONLY kmsg-mirrored lines
-          # (firstboot, rasputin-hostname) reach the serial console, so a
-          # console grep here could never match. And this is the stronger
-          # check anyway: register/begin returns the real
-          # PublicKeyCredentialCreationOptions, so it proves what WebAuthn will
-          # actually use rather than what something printed.
-          #
-          # Unauthenticated on purpose: first-user registration is open until a
-          # user exists, which is exactly this freshly-provisioned box. HTTPS
-          # because :80 is only the bootstrap/redirect surface; -k because the
-          # leaf is signed by the per-installation Mesh CA.
-          if [ "$RPID" != "smoke1.local" ]; then
-            echo "::error::the api's WebAuthn RP ID is '${RPID:-<no response>}', expected 'smoke1.local' — it did not derive from RASPUTIN_CLUSTER_ID. Every passkey would bind to the wrong origin."
-            grep -o "rasputin-api: cluster identity:.*" /tmp/console.log || true
-            exit 1
-          fi
-          echo "api derived its WebAuthn RP ID from the cluster id ($RPID)"
-          # The cluster zone must resolve over UDP *and* TCP. Both answers are
-          # the CP's own LAN IP (the SLIRP guest address); the value is checked
-          # for shape rather than pinned to 10.0.2.15 so a qemu networking
-          # change doesn't false-fail this.
-          case "$NSUDP" in
-            ''|*[!0-9.]*)
-              echo "::error::the CP nameserver did not answer smoke1.internal over UDP on the guest's :53 (got '${NSUDP:-<no answer>}') — the responder failed to bind, or never started. This failure is SILENT on real hardware: the bind error is non-fatal, so the control plane serves on with no name resolution and healthz still returns 200. Check the api journal for 'nameserver not started'."
-              exit 1;;
-          esac
-          case "$NSTCP" in
-            ''|*[!0-9.]*)
-              echo "::error::the CP nameserver answered smoke1.internal over UDP but NOT TCP (got '${NSTCP:-<no answer>}') — the TCP listener failed to bind. Resolvers fall back to TCP for answers truncated past 512 bytes, so this breaks only large responses: precisely the regression that ships unnoticed. See control-plane #126 for why the two transports bind independently."
-              exit 1;;
-          esac
-          if [ "$NSUDP" != "$NSTCP" ]; then
-            echo "::error::the CP nameserver returned different addresses for smoke1.internal over UDP ($NSUDP) and TCP ($NSTCP) — the two listeners are not serving the same handler."
-            exit 1
-          fi
-          echo "CP nameserver answered smoke1.internal over UDP and TCP ($NSUDP)"
-          # No unit file may carry a malformed Environment= assignment.
-          #
-          # systemd's Environment= splits on whitespace, so an unquoted value
-          # containing a space is silently truncated and the remainder is
-          # dropped. That shipped: RASPUTIN_MDNS_RECOVER_CMD reached the agent
-          # as bare "systemctl", so the mDNS name guard's recovery ran
-          # `sh -c "systemctl"` and repaired nothing — for an entire release,
-          # past green CI, a clean security review, and a 93% mutation gate.
-          # Detection kept working, which is what made it invisible.
-          #
-          # systemd DID warn, on the console, on every boot:
-          #   /etc/systemd/system/rasputin-agent.service:29: Invalid
-          #   environment assignment, ignoring: restart
-          # Nobody was reading. This turns that warning into a build failure.
-          #
-          # Deliberately generic rather than asserting one expected value: it
-          # guards EVERY unit's Environment= lines, and it needs nothing from
-          # the guest beyond the console we already capture (the smoke has no
-          # shell in, and dumping the agent's env would leak
-          # RASPUTIN_CP_JOIN_TOKEN).
-          if grep -n "Invalid environment assignment" /tmp/console.log; then
-            echo "::error::a unit file has a malformed Environment= line (see the matches above) — systemd truncated the value at the first space, so the process is running with a silently wrong environment. Quote the whole assignment: Environment=\"VAR=value with spaces\""
-            exit 1
-          fi
-          echo "no malformed Environment= assignments in any unit"
-          [ "$api" = 1 ] \
-            || { echo "::error::rasputin-api never answered /healthz on :80 on the controlplane boot — unit failed to start, RASPUTIN_HTTP_ADDR regressed, or networking broke; see console artifact"; exit 1; }
-          [ "$ui" = 1 ] \
-            || { echo "::error::GET / on :80 returned neither the web UI nor an HTTPS redirect — RASPUTIN_UI_DIR contents missing from the api tarball or the bootstrap surface regressed"; exit 1; }
-          [ "$soak" = 1 ] \
-            || { echo "::error::api did not survive the 70s uptime soak — watchdog kill loop or crash; check console for 'Watchdog timeout' / SIGABRT"; exit 1; }
-          if grep -q "Watchdog timeout" /tmp/console.log; then
-            echo "::error::systemd watchdog killed a rasputin unit during the smoke — sd_notify petting regressed (see the v0.4.3 sdnotify package)"; exit 1
-          fi
-          echo "api healthz + web UI + 70s uptime soak confirmed over hostfwd"
+          test -n "$IMG" || { echo "::error::no n100 .img artifact"; exit 1; }
+          test/boot-smoke.sh amd64 "$IMG"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: smoke-amd64-console
+          path: /tmp/console.log
+
+  # The arm64 half of the same test. WHAT IT DOES NOT PROVE, stated here rather
+  # than only in the PR that added it, because this is where someone will read
+  # it: QEMU is not a Raspberry Pi. This job boots the image's own kernel and
+  # its own cmdline.txt on QEMU's generic `virt` machine. The Pi's EEPROM
+  # bootloader stage, the selector FAT's autoboot.txt `boot_partition` A/B
+  # switch, the one-shot `tryboot` flag, config.txt's [pi4]/[pi5] kernel
+  # selection and start4.elf are FIRMWARE behaviour that nothing here executes.
+  # A green smoke-arm64 says the arm64 rootfs, kernel, units, provisioning chain
+  # and the arm64 rasputin-agent/api binaries work. It says NOTHING about
+  # whether a Pi would boot this card, and nothing about whether a RAUC update
+  # would switch slots on one. Those stay bench-only, on real Pi 4 / Pi 5 / CM5
+  # hardware. Do not read this job as Pi coverage.
+  #
+  # It also boots only kernel_2712.img (Pi 5 / CM5). The image's second kernel,
+  # kernel8.img (Pi 4 / bcm2711, built by post-build.sh), is not booted here.
+  smoke-arm64:
+    needs: build
+    # Same !cancelled() reasoning as smoke-amd64 above, mirrored: an n100 build
+    # failure must not skip the arm64 smoke.
+    if: ${{ !cancelled() && (startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && (inputs.full_build == true || inputs.full_build == 'true' || inputs.publish == true || inputs.publish == 'true'))) }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install QEMU (aarch64) + mtools
+        run: |
+          sudo apt-get update
+          # qemu-system-arm ships qemu-system-aarch64. No OVMF: the `virt` guest
+          # is booted with -kernel, not through UEFI.
+          sudo apt-get install -y --no-install-recommends qemu-system-arm mtools bind9-dnsutils
+          qemu-system-aarch64 --version | head -1
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: rpi-*
+          merge-multiple: true
+          path: img
+      - name: Boot headless and assert
+        run: |
+          set -x
+          IMG=$(ls img/*.img | head -1)
+          test -n "$IMG" || { echo "::error::no rpi .img artifact"; exit 1; }
+          test/boot-smoke.sh arm64 "$IMG"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: smoke-arm64-console
           path: /tmp/console.log
 
   # Discrete signing + publish job — the leaf key is scoped to HERE and nowhere
@@ -628,7 +412,7 @@ jobs:
   # cut, push a `-dev.N` suffixed tag (e.g. 2026.05.0-dev.1) — same shape,
   # marked as prerelease.
   sign-and-release:
-    needs: [build, smoke-amd64]
+    needs: [build, smoke-amd64, smoke-arm64]
     # A failing smoke must BLOCK publication. It did not: `!cancelled()` in the
     # condition below meant the job ran on any non-cancelled outcome, so
     # 2026.07.9-dev.136 published to the dev channel with a red smoke
@@ -637,12 +421,21 @@ jobs:
     #
     # Kept as an explicit result check rather than dropping !cancelled(),
     # because that flag is doing separate work: it decouples this job from the
-    # cm5 build matrix, so an arm64 hardware-bring-up failure does not block an
-    # otherwise-good amd64 publish. Both concerns coexist.
+    # build matrix's own result, so one SKU's build failure does not by itself
+    # decide this job's condition. Both concerns coexist.
+    #
+    # BOTH smokes must be green. The rpi SKU used to publish with no boot test
+    # of any kind — it was built, signed and released having never been booted,
+    # while `!cancelled()` on the arm64 leg was explicitly described as letting
+    # "an arm64 hardware-bring-up failure not block an otherwise-good amd64
+    # publish". That asymmetry is gone: a release ships both SKUs, so a release
+    # is blocked if either SKU fails to boot. If the rpi image is red and an
+    # amd64-only publish is genuinely wanted, that is a decision to make
+    # explicitly, not a default.
     # Publishes on a tag (stable or legacy -dev tag) OR on a dispatch with
     # publish=true (a run-number-versioned dev release). Bench dispatches
     # (full_build only) skip this and just produce artifacts.
-    if: ${{ !cancelled() && needs.smoke-amd64.result == 'success' && (startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && (inputs.publish == true || inputs.publish == 'true'))) }}
+    if: ${{ !cancelled() && needs.smoke-amd64.result == 'success' && needs.smoke-arm64.result == 'success' && (startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && (inputs.publish == true || inputs.publish == 'true'))) }}
     runs-on: ubuntu-latest
     # The release signing credential lives in this repository's `signing`
     # ENVIRONMENT, not in repository- or organisation-level secrets

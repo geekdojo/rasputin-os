@@ -85,3 +85,32 @@ CONFIG_CGROUP_DEVICE=y
 
 # --- tailscale (mesh / remote access): tailscaled needs /dev/net/tun ---
 CONFIG_TUN=y
+
+# --- virtio + a generic PCIe host, so this SKU can be BOOTED IN CI ------------
+# The rpi image was built, signed and published for months without ever being
+# booted: the n100 had a QEMU boot smoke and arm64 had nothing, so the class of
+# bug that boots-but-is-broken on arm64 specifically had no net at all.
+#
+# Emulating a real Pi is not the answer. QEMU's `raspi4b` machine does boot this
+# image (measured), but QEMU disables the board's GENET NIC and its USB host
+# controller never enumerates, so a raspi4b guest has NO network — which would
+# reduce the smoke to "it reached multi-user" and drop every assertion that
+# proves the arm64 rasputin-api actually serves. The `virt` machine keeps the
+# arm64 smoke's assertion set identical to amd64's, and `virt` speaks virtio
+# over a generic ECAM PCIe host, neither of which the Pi fork's bcm2712/bcm2711
+# defconfigs build (they carry PCIE_BRCMSTB, the Pi's own controller).
+#
+# These are the four symbols that gap costs. On real Pi hardware they are inert:
+# nothing in a Pi's device tree matches them, so they probe nothing and bind
+# nothing — they are a few tens of KB of never-executed text in exchange for
+# making the SKU testable at all. (Everything else `virt` needs — GICv3, PSCI,
+# the ARM arch timer, PL011, 4K pages, MSDOS partitions — the Pi kernels already
+# have; verified by reading the config out of the shipped 2026.09.4-dev.238
+# kernel8.img/kernel_2712.img via CONFIG_IKCONFIG.)
+#
+# Driven by test/boot-smoke.sh. See the smoke-arm64 job in .github/workflows/
+# release.yml for what the resulting test does and does NOT prove.
+CONFIG_PCI_HOST_GENERIC=y
+CONFIG_VIRTIO_PCI=y
+CONFIG_VIRTIO_BLK=y
+CONFIG_VIRTIO_NET=y
