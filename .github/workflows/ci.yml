@@ -85,6 +85,16 @@ jobs:
         env:
           REQUIRE_BUSYBOX: "1"
         run: sh test/jointoken-file-test.sh
+      # The console root password (geekdojo/geekdojo-brain#546): the helper the
+      # control plane's push invokes, and the image declarations that make it
+      # able to work at all. Two failure modes here are silent — a console that
+      # admits anybody (the image used to bake one public password), and a
+      # half-written /etc/shadow, which locks every account out of a headless
+      # box. Every refusal case asserts the file was not touched.
+      - name: Console root password tests
+        env:
+          REQUIRE_BUSYBOX: "1"
+        run: sh test/console-root-hash-test.sh
       # The at-rest mode audit (geekdojo/geekdojo-brain#494): the script that
       # runs on every boot and whose verdict the QEMU smoke asserts. The smoke
       # only runs on a tag, so the audit's LOGIC is pinned here instead —
@@ -125,6 +135,19 @@ jobs:
       - uses: actions/checkout@v4
       - name: Fallback address against real networkd (no DHCP, DHCP, late lease, carrier flap)
         run: sh test/fallback-address-functional.sh
+
+  # The console root password's arrangement (geekdojo/geekdojo-brain#546) is
+  # one tmpfiles.d line and a symlink, and the claim it rests on is a claim
+  # about what systemd does with a C line. Wrong one way, every boot reverts a
+  # delivered password; wrong the other, /etc/shadow is created world-readable
+  # on every node. Runs against real systemd-tmpfiles 256.17, the image's
+  # version, in a container.
+  console-shadow-functional:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Console shadow against real systemd-tmpfiles (seed, preserve, tighten, symlink)
+        run: sh test/console-shadow-functional.sh
 
   # The core-dump policy is configuration only — a manager default, one unit's
   # LimitCORE, a StateDirectoryMode and an ExecStopPost — so nothing in the

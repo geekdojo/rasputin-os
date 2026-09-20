@@ -1,0 +1,150 @@
+#!/bin/sh
+#
+# set-root-hash — install a root password HASH delivered by the control plane
+# into /etc/shadow.
+#
+# The image bakes NO console password: root's field ships as a non-empty,
+# unusable lock (BR2_TARGET_ENABLE_ROOT_LOGIN=n). The operator chooses a
+# password in the first-run wizard, the control plane hashes it and pushes the
+# HASH to every node over that node's own command lane, and the agent invokes
+# this script (console.root_hash, rasputin-control-plane#363,
+# geekdojo/geekdojo-brain#546).
+#
+# SAME CONTRACT AS THE FIREWALL IMAGE'S HELPER, deliberately, at the same path:
+# rasputin-openwrt-firewall/files/usr/lib/rasputin/set-root-hash
+# (geekdojo/rasputin-openwrt-firewall#64). The agent calls one path on both
+# images. Two things differ, and only because this image differs:
+#
+#   1. /etc/shadow here is a SYMLINK onto the persistent partition
+#      (/var/lib/rasputin/console/shadow — post-build.sh), because the rootfs
+#      is a read-only squashfs. The temp file therefore has to be written
+#      beside the RESOLVED file; writing beside /etc/shadow would try to
+#      create a file on the squashfs and fail with EROFS.
+#   2. `logger` is not guaranteed to be on this image, and this may run
+#      outside a unit. Messages go to stderr, which systemd's journal captures
+#      when the agent runs it; logger is used as well when it exists.
+#
+# CONTRACT
+#   - The argument (or, with no argument, one line on stdin) is a crypt(3)
+#     password HASH — a value ready to go into /etc/shadow's password field —
+#     NOT a plaintext password. The hash on STDIN is what the agent uses: an
+#     argument is readable in /proc/<pid>/cmdline by every process on the box
+#     while this runs.
+#   - Accepted: a modular-crypt hash ($id$... — e.g. $6$, $5$, $y$, $2y$) or an
+#     explicit lock token (* or !). Rejected: empty, a bare non-$ string, or a
+#     value containing ':' or whitespace (either would corrupt the shadow row).
+#   - The hash is secret material: never logged, printed, or written anywhere
+#     but root's shadow field. Error messages describe the shape, never the
+#     value.
+#   - Atomic and idempotent: writes a 0600 temp file beside the resolved shadow
+#     file and renames it, so a failure leaves the old file whole; re-applying
+#     the same hash gives the same result.
+#
+# EXIT: 0 on success (root's field now equals the hash), non-zero otherwise,
+# having changed nothing.
+#
+# Usage:
+#   printf '%s' "$HASH" | set-root-hash
+#   set-root-hash '$6$saltsalt$hash...'
+#
+# POSIX sh: this runs under busybox ash on the appliance and under dash and
+# bash in the repo's tests. No arrays, no [[ ]], no local.
+
+set -eu
+
+# /etc/shadow in production. RASPUTIN_SHADOW_FILE lets the behaviour tests
+# point it at a scratch file; it is never set on the box.
+SHADOW="${RASPUTIN_SHADOW_FILE:-/etc/shadow}"
+
+die() {
+	# Never include the candidate value — it is secret.
+	command -v logger >/dev/null 2>&1 && logger -t rasputin "set-root-hash: ERROR: $1"
+	printf 'set-root-hash: ERROR: %s\n' "$1" >&2
+	exit 1
+}
+
+note() {
+	command -v logger >/dev/null 2>&1 && logger -t rasputin "set-root-hash: $1"
+	printf 'set-root-hash: %s\n' "$1" >&2
+}
+
+if [ "$#" -ge 1 ]; then
+	HASH="$1"
+else
+	# One line on stdin; strip a trailing newline only.
+	HASH="$(cat)"
+fi
+
+# Trim surrounding whitespace and any CR (a hash delivered/edited on Windows).
+HASH="$(printf '%s' "$HASH" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+
+[ -n "$HASH" ] || die "no hash given (argument or stdin); nothing changed"
+
+# A shadow password field must not contain ':' (the field separator) or any
+# whitespace. Reject rather than corrupt the row.
+case "$HASH" in
+	*:* )           die "hash contains ':', which is not valid in a shadow field; nothing changed" ;;
+	*[[:space:]]* ) die "hash contains whitespace, which is not valid in a shadow field; nothing changed" ;;
+esac
+
+# Must be a real crypt hash or an explicit lock token — never a plaintext.
+case "$HASH" in
+	'*'|'!' )   : ;;                      # explicit lock
+	'$'?*'$'* ) : ;;                      # modular crypt: $id$...$...
+	* )         die "value is not a crypt hash (expected \$id\$... or a lock token); a plaintext password is refused; nothing changed" ;;
+esac
+
+# Resolve the symlink BEFORE writing anything. On this image /etc/shadow points
+# at the persistent partition; the temp file and the rename must both happen
+# there, not on the read-only squashfs that holds the link.
+#
+# readlink -f is in busybox and in coreutils. If it is not available, or the
+# link dangles, say so rather than write to a path that is about to fail: a
+# dangling shadow is a node whose console admits nobody, and turning that into
+# a half-written file would be worse.
+if [ -L "$SHADOW" ]; then
+	RESOLVED="$(readlink -f "$SHADOW" 2>/dev/null || true)"
+	[ -n "$RESOLVED" ] || die "$SHADOW is a symlink that cannot be resolved; nothing changed"
+else
+	RESOLVED="$SHADOW"
+fi
+
+[ -f "$RESOLVED" ] || die "$RESOLVED not found (via $SHADOW); nothing changed"
+[ -w "$RESOLVED" ] || die "$RESOLVED is not writable (via $SHADOW) — this node's /etc/shadow is on a read-only filesystem, so the console root password cannot be changed on this image; nothing changed"
+grep -q '^root:' "$RESOLVED" || die "no root line in $RESOLVED; nothing changed"
+
+# Already holds it: report success without touching the file. The agent decides
+# "changed" from the value it read, and a re-run of the push job is a no-op.
+current="$(awk -F: '$1=="root"{print $2; exit}' "$RESOLVED")"
+if [ "$current" = "$HASH" ]; then
+	note "root already holds the delivered hash; nothing to do"
+	exit 0
+fi
+
+tmp="$RESOLVED.rasputin.$$"
+trap 'rm -f "$tmp" 2>/dev/null || true' EXIT
+
+# Rewrite only the second field of the root line. OFS reconstitutes the row
+# with every other field intact.
+if ! awk -v h="$HASH" -F: 'BEGIN{OFS=":"} $1=="root"{$2=h} {print}' "$RESOLVED" > "$tmp" 2>/dev/null; then
+	die "could not write temporary shadow file; nothing changed"
+fi
+chmod 600 "$tmp" 2>/dev/null || die "could not set mode on temporary shadow file; nothing changed"
+
+# Confirm the root field now equals the delivered hash before committing, and
+# that the row still parses (7 ':' => 8 fields, a well-formed shadow row).
+verify="$(awk -F: '$1=="root"{print $2; exit}' "$tmp")"
+[ "$verify" = "$HASH" ] || die "verification of the rewritten root field failed; nothing changed"
+fields="$(awk -F: '$1=="root"{print NF; exit}' "$tmp")"
+[ "$fields" -ge 8 ] 2>/dev/null || die "rewritten root row is malformed; nothing changed"
+# Every other row must survive untouched: a rewrite that dropped a line would
+# lock out an account nobody was asking about.
+before_lines="$(wc -l < "$RESOLVED")"
+after_lines="$(wc -l < "$tmp")"
+[ "$before_lines" = "$after_lines" ] || die "rewritten shadow file has a different number of rows; nothing changed"
+
+mv -f "$tmp" "$RESOLVED" || die "could not replace $RESOLVED; nothing changed"
+trap - EXIT
+
+note "applied a control-plane-delivered root password hash [geekdojo/geekdojo-brain#546]"
+exit 0

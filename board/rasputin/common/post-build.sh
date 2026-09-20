@@ -151,6 +151,64 @@ ln -sf /usr/lib/systemd/system/tailscaled.service \
 ln -sf /etc/systemd/system/dropbear.service \
 	"$TARGET_DIR/etc/systemd/system/multi-user.target.wants/dropbear.service"
 
+# ── the console root password: /etc/shadow onto the persistent partition ────
+#
+# The control plane delivers a root password HASH to every node over its own
+# command lane (console.root_hash, rasputin-control-plane#363) and the agent
+# applies it with /usr/lib/rasputin/set-root-hash. On this image that write has
+# always failed with EROFS: the rootfs is a read-only squashfs, so /etc/shadow
+# is part of the image and root's password is whatever the build baked. That is
+# why the image used to bake one — a single public password, the same on every
+# download, reachable over BMC serial-over-LAN. geekdojo/geekdojo-brain#546.
+#
+# So /etc/shadow becomes a symlink onto the persistent partition, the way
+# /var/lib/docker and /var/lib/tailscale already are, and the file the build
+# produced is kept as the read-only master copy that seeds it. tmpfiles.d
+# copies the master in on first boot (C line, which only acts when the
+# destination does not exist) so an already-delivered hash is never reverted by
+# a reboot or an A/B update.
+#
+# Fail-closed in every window this opens:
+#   - before the copy runs, /etc/shadow dangles, and a dangling shadow means
+#     NO password authenticates — login refuses rather than admits;
+#   - the master copy ships root LOCKED (BR2_TARGET_ENABLE_ROOT_LOGIN=n writes
+#     root:*:), so a node that has never been given a hash has no console
+#     password rather than a public one;
+#   - key-only SSH is untouched: dropbear's public-key path never reads the
+#     password field (verified on the firewall image, geekdojo-brain#468).
+#
+# /etc/gshadow is left alone: nothing delivers a group password, and it carries
+# no credential this image ever sets.
+FACTORY_DIR="$TARGET_DIR/usr/share/factory/rasputin"
+mkdir -p "$FACTORY_DIR"
+if [ ! -f "$TARGET_DIR/etc/shadow" ]; then
+	echo "post-build: ERROR — no /etc/shadow in the rootfs to seed the console password from" >&2
+	exit 1
+fi
+if [ -L "$TARGET_DIR/etc/shadow" ]; then
+	echo "post-build: ERROR — /etc/shadow is already a symlink; the build's own copy is gone" >&2
+	exit 1
+fi
+# Refuse to ship a rootfs whose root account has a usable password baked in.
+# This is the check that keeps the defconfig honest: someone re-adding
+# BR2_TARGET_GENERIC_ROOT_PASSWD gets a failed build, not a quiet regression
+# to one password on every image (geekdojo/geekdojo-brain#546, F14).
+baked_field="$(awk -F: '$1=="root"{print $2; exit}' "$TARGET_DIR/etc/shadow")"
+case "$baked_field" in
+	'*'|'!'|'!!' ) : ;;
+	'' )
+		echo "post-build: ERROR — root's baked password field is EMPTY (any password, or none, would open a console)" >&2
+		exit 1 ;;
+	* )
+		echo "post-build: ERROR — root has a usable password baked into the image; the console password is delivered by the control plane, never baked (geekdojo/geekdojo-brain#546)" >&2
+		exit 1 ;;
+esac
+cp "$TARGET_DIR/etc/shadow" "$FACTORY_DIR/shadow"
+chmod 600 "$FACTORY_DIR/shadow"
+rm -f "$TARGET_DIR/etc/shadow"
+ln -s /var/lib/rasputin/console/shadow "$TARGET_DIR/etc/shadow"
+echo "post-build: /etc/shadow -> /var/lib/rasputin/console/shadow (root locked; the control plane delivers the hash)"
+
 # Bake mesh container images (self-hosted Headscale) into the rootfs so the
 # controlplane forms its mesh on FIRST BOOT WITHOUT INTERNET. CI's "Bake mesh
 # container images" step docker-saved the refs from
