@@ -40,14 +40,26 @@ BR2_TARGET_GENERIC_ISSUE="Welcome to Rasputin OS"
 # systemd logs + a getty on the serial console so QEMU (and a real serial
 # cable) can watch boot. The QEMU smoke job greps this output.
 BR2_TARGET_GENERIC_GETTY_PORT="ttyS0"
-# Default console/serial root password (Buildroot hashes it at build). Network
-# SSH stays key-only (dropbear -s ignores passwords), so this only guards the
-# physical console — defense-in-depth, not a network control. Baked because
-# /etc/shadow is on the read-only squashfs rootfs and can't be changed at
-# runtime yet; making it operator-changeable (passwd / wizard) needs shadow on
-# the persistent partition — tracked in the backlog. Document the default +
-# "change me" in getting-started.
-BR2_TARGET_GENERIC_ROOT_PASSWD="rasputin"
+# THE IMAGE SHIPS NO CONSOLE PASSWORD, and root's shadow field is a non-empty,
+# unusable lock ("*"). Buildroot writes that field itself when root login by
+# password is disabled (package/skeleton-init-common: !BR2_TARGET_ENABLE_ROOT_LOGIN
+# => root:*:), which is the same floor the firewall image applies at boot
+# (rasputin-openwrt-firewall#64).
+#
+# It used to be BR2_TARGET_GENERIC_ROOT_PASSWD="rasputin" — one password, the
+# same on every image anyone has ever downloaded, reachable over BMC
+# serial-over-LAN from any session that can open the console. Network SSH was
+# never the exposure (dropbear -s ignores passwords); the console was.
+#
+# What replaces it is a password the OPERATOR chooses in the first-run wizard,
+# hashed by the control plane and delivered to every node over its own command
+# lane (console.root_hash, rasputin-control-plane#363). For that to be
+# applicable at all, root's shadow entry has to be writable at runtime — see
+# post-build.sh, which moves /etc/shadow onto the persistent partition. Until a
+# hash is delivered, the lock stands: no password opens a console, and key-only
+# SSH is unaffected because dropbear's public-key path never reads the field.
+# geekdojo/geekdojo-brain#546.
+BR2_TARGET_ENABLE_ROOT_LOGIN=n
 # networkd + resolved are Buildroot defaults (=y) but the image now
 # FUNCTIONALLY depends on both: 20-wired.network (DHCP + per-link mDNS) and
 # resolved's mDNS responder for rasputin.local (first-run WebAuthn flow).

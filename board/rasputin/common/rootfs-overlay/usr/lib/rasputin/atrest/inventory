@@ -49,6 +49,15 @@
 0700  optional  /var/lib/rasputin/mesh
 0700  optional  /var/lib/rasputin/tailscale
 
+# ── the console root password ──────────────────────────────────────────────
+# /etc/shadow lives here: it is a baked-in symlink onto this directory, so the
+# control plane can deliver a root password hash to a read-only rootfs
+# (geekdojo/geekdojo-brain#546). Required, not optional: tmpfiles seeds it on
+# every boot, so a node without it is one whose console cannot authenticate
+# anyone and whose next delivered hash has nowhere to land.
+0700  required  /var/lib/rasputin/console
+0600  required  /var/lib/rasputin/console/shadow
+
 # ── the A/B updater and the SSH host identity ──────────────────────────────
 0700  optional  /var/lib/rasputin/rauc
 0700  optional  /var/lib/rasputin/dropbear
@@ -63,5 +72,6 @@
 # exception. docker, containerd and tailscale are not swept: their contents
 # belong to those daemons and carry their own modes.
 sweep  /var/lib/rasputin/bus
+sweep  /var/lib/rasputin/console
 sweep  /var/lib/rasputin/agent-state
 sweep  /var/lib/rasputin/coredump

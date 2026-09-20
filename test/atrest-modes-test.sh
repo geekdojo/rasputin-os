@@ -104,9 +104,13 @@ world() {
 	mkdir -p "$V"
 	umask 077
 	: >"$V/node.env"; chmod 0600 "$V/node.env"
-	for d in bus agent-state trust mesh tailscale rauc dropbear coredump; do
+	for d in bus agent-state trust mesh tailscale rauc dropbear coredump console; do
 		mkdir -p "$V/$d"; chmod 0700 "$V/$d"
 	done
+	# /etc/shadow lives here: a baked-in symlink points at it so the control
+	# plane can deliver a root password hash to a read-only rootfs
+	# (geekdojo/geekdojo-brain#546). Required, so a correct tree has it.
+	: >"$V/console/shadow"; chmod 0600 "$V/console/shadow"
 	: >"$V/bus/bus.key"; chmod 0600 "$V/bus/bus.key"
 	: >"$V/bus/agent.token"; chmod 0600 "$V/bus/agent.token"
 	: >"$V/bus/join.token"; chmod 0600 "$V/bus/join.token"

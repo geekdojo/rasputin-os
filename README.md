@@ -70,9 +70,15 @@ this image — see
   [the releases](https://github.com/geekdojo/rasputin-os/releases)).
   IPv6 is disabled across the stack by design.
 
+  The image bakes NO console root password: root's shadow field ships as a
+  non-empty, unusable lock. The operator sets a console password in the
+  control plane's first-run wizard and it is delivered to every node as a
+  hash; until then no password opens a console, and key-only SSH is
+  unaffected. Releases up to and including `2026.09.4-dev.171` baked the
+  public password `rasputin`.
+
 Known gaps (tracked, not hidden): dm-verity rootfs integrity + initramfs is
-designed but not wired; the console root password is baked at build time and
-not yet operator-changeable at runtime.
+designed but not wired.
 
 ## Layout
 
