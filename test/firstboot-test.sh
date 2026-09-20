@@ -125,6 +125,10 @@ setup() {
 printf '%s\n' "$*" >> "$STUB_MOUNT_CALLS"
 exit "${STUB_MOUNT_RC:-0}"
 STUB
+	# The agent the seed is checked through. Absent by default — most cases
+	# are about firstboot, not about the check — so they take the documented
+	# fallback; agent_stub() installs one when a case is about it.
+	AGENT="$BIN/rasputin-agent-absent"
 	printf '#!/bin/sh\nexit 0\n' > "$BIN/systemctl"
 	printf '#!/bin/sh\nexit 0\n' > "$BIN/sync"
 	chmod +x "$BIN/mount" "$BIN/systemctl" "$BIN/sync"
@@ -133,6 +137,25 @@ STUB
 
 # seed LINE... — write the seed file, one argument per line.
 seed() { printf '%s\n' "$@" > "$SEED"; }
+
+# agent_stub BODY — install a fake `rasputin-agent` whose `seed check` behaves
+# as BODY says. The real one is a Go binary built from another repo; what
+# firstboot depends on is the contract (exit 0 with a normalized seed on
+# stdout, 1 with the reason on stderr and nothing on stdout, 2 for a build
+# that has never heard of the subcommand), and that is what this drives.
+agent_stub() {
+	AGENT="$BIN/rasputin-agent"
+	{
+		printf '#!/bin/sh\n'
+		printf 'if [ "$1" != seed ] || [ "$2" != check ]; then\n'
+		printf '  echo "rasputin-agent: unknown command \\"$1\\"" >&2\n'
+		printf '  exit 2\n'
+		printf 'fi\n'
+		printf 'shift 2\n'
+		printf '%s\n' "$1"
+	} > "$AGENT"
+	chmod +x "$AGENT"
+}
 
 # fb — run firstboot; sets OUT (stdout+stderr) and RC.
 fb() {
@@ -147,6 +170,7 @@ fb() {
 		RASPUTIN_FIRSTBOOT_CMDLINE="$W/cmdline" \
 		RASPUTIN_FIRSTBOOT_KMSG="$W/kmsg" \
 		RASPUTIN_FIRSTBOOT_MOUNT="$BIN/mount" \
+		RASPUTIN_FIRSTBOOT_AGENT="$AGENT" \
 		"$@" 2>&1)
 	RC=$?
 }
@@ -176,13 +200,13 @@ cases() {
 	ok "no bus lines: provisions" "$RC" "$OUT"
 	ok "no bus lines: no RASPUTIN_BUS_PIN in node.env" "$(yes_if not contains "$P/node.env" RASPUTIN_BUS_PIN)" "$(cat "$P/node.env")"
 	ok "no bus lines: the bus dir holds only the join token" "$(yes_if test "$(ls -A "$P/bus")" = "join.token")" "$(ls -A "$P/bus" 2>&1)"
-	ok "no bus lines: compute node.env names the join token file" "$(yes_if has_line "$P/node.env" "RASPUTIN_CP_JOIN_TOKEN_FILE=$P/bus/join.token")" "$(cat "$P/node.env")"
+	ok "no bus lines: compute node.env names the join token file" "$(yes_if has_line "$P/node.env" "RASPUTIN_CP_JOIN_TOKEN_FILE='$P/bus/join.token'")" "$(cat "$P/node.env")"
 	ok "no bus lines: join token still scrubbed" "$(yes_if has_line "$SEED" "RASPUTIN_CP_JOIN_TOKEN=")" "$(cat "$SEED")"
 
 	# 2. Compute: the pin goes into node.env verbatim and stays in the seed.
 	setup; compute_seed "RASPUTIN_BUS_PIN=$PIN"; fb
 	ok "compute pin: provisions" "$RC" "$OUT"
-	ok "compute pin: node.env carries it" "$(yes_if has_line "$P/node.env" "RASPUTIN_BUS_PIN=$PIN")" "$(cat "$P/node.env")"
+	ok "compute pin: node.env carries it" "$(yes_if has_line "$P/node.env" "RASPUTIN_BUS_PIN='$PIN'")" "$(cat "$P/node.env")"
 	ok "compute pin: stays in the seed (public)" "$(yes_if has_line "$SEED" "RASPUTIN_BUS_PIN=$PIN")" "$(cat "$SEED")"
 	ok "compute pin: the bus dir holds only the join token" "$(yes_if test "$(ls -A "$P/bus")" = "join.token")" "$(ls -A "$P/bus" 2>&1)"
 
@@ -194,9 +218,9 @@ cases() {
 	ok "cp key: bus.key is 0600" "$(yes_if test "$(perms "$P/bus/bus.key")" = "-rw-------")" "$(perms "$P/bus/bus.key")"
 	ok "cp key: bus dir is 0700" "$(yes_if test "$(perms "$P/bus")" = "drwx------")" "$(perms "$P/bus")"
 	ok "cp key: no temp file left beside it" "$(yes_if test "$(ls -A "$P/bus")" = "bus.key")" "$(ls -A "$P/bus")"
-	ok "cp key: node.env names the agent token file the api mints" "$(yes_if has_line "$P/node.env" "RASPUTIN_CP_JOIN_TOKEN_FILE=$P/bus/agent.token")" "$(cat "$P/node.env")"
+	ok "cp key: node.env names the agent token file the api mints" "$(yes_if has_line "$P/node.env" "RASPUTIN_CP_JOIN_TOKEN_FILE='$P/bus/agent.token'")" "$(cat "$P/node.env")"
 	ok "cp key: node.env carries no join token of its own" "$(yes_if not contains "$P/node.env" "RASPUTIN_CP_JOIN_TOKEN=")" "$(cat "$P/node.env")"
-	ok "cp key: pin in node.env (the CP's own agent pins too)" "$(yes_if has_line "$P/node.env" "RASPUTIN_BUS_PIN=$PIN")" "$(cat "$P/node.env")"
+	ok "cp key: pin in node.env (the CP's own agent pins too)" "$(yes_if has_line "$P/node.env" "RASPUTIN_BUS_PIN='$PIN'")" "$(cat "$P/node.env")"
 	ok "cp key: key NOT in node.env (name)" "$(yes_if not contains "$P/node.env" RASPUTIN_BUS_KEY)" "$(cat "$P/node.env")"
 	ok "cp key: key NOT in node.env (value)" "$(yes_if not contains "$P/node.env" "$KEY")"
 	ok "cp key: scrubbed from the seed, left empty" "$(yes_if has_line "$SEED" "RASPUTIN_BUS_KEY=")" "$(cat "$SEED")"
@@ -243,7 +267,7 @@ cases() {
 	cr=$(printf '\r')
 	setup; compute_seed "RASPUTIN_BUS_PIN=$PIN$cr"; fb
 	ok "pin with trailing CR: provisions" "$RC" "$OUT"
-	ok "pin with trailing CR: written without it" "$(yes_if has_line "$P/node.env" "RASPUTIN_BUS_PIN=$PIN")" "$(od -c "$P/node.env" | tail -5)"
+	ok "pin with trailing CR: written without it" "$(yes_if has_line "$P/node.env" "RASPUTIN_BUS_PIN='$PIN'")" "$(od -c "$P/node.env" | tail -5)"
 	setup; cp_seed "RASPUTIN_BUS_KEY=\"  $KEY$cr\""; printf '%s\n' "$KEY" > "$W/want.key"; fb
 	ok "padded key: provisions" "$RC" "$OUT"
 	ok "padded key: written trimmed" "$(yes_if cmp -s "$W/want.key" "$P/bus/bus.key")"
@@ -359,7 +383,7 @@ cases() {
 	setup; compute_seed; fb
 	ok "token + node id: provisions" "$RC" "$OUT"
 	ok "token + node id: stamped" "$(yes_if provisioned)"
-	ok "token + node id: node.env carries the seed's id" "$(yes_if has_line "$P/node.env" "RASPUTIN_NODE_ID=w1")" "$(cat "$P/node.env")"
+	ok "token + node id: node.env carries the seed's id" "$(yes_if has_line "$P/node.env" "RASPUTIN_NODE_ID='w1'")" "$(cat "$P/node.env")"
 	ok "token + node id: no id minted" "$(yes_if not test -e "$P/node-id.rand")"
 
 	# 14b. The token is at rest in ONE 0600 file, and node.env only names it
@@ -370,19 +394,147 @@ cases() {
 	ok "token file: is 0600" "$(yes_if test "$(perms "$P/bus/join.token")" = "-rw-------")" "$(perms "$P/bus/join.token")"
 	ok "token file: bus dir is 0700" "$(yes_if test "$(perms "$P/bus")" = "drwx------")" "$(perms "$P/bus")"
 	ok "token file: no temp file left beside it" "$(yes_if test "$(ls -A "$P/bus")" = "join.token")" "$(ls -A "$P/bus")"
-	ok "token file: node.env names it" "$(yes_if has_line "$P/node.env" "RASPUTIN_CP_JOIN_TOKEN_FILE=$P/bus/join.token")" "$(cat "$P/node.env")"
+	ok "token file: node.env names it" "$(yes_if has_line "$P/node.env" "RASPUTIN_CP_JOIN_TOKEN_FILE='$P/bus/join.token'")" "$(cat "$P/node.env")"
 	ok "token file: node.env carries no inline token" "$(yes_if not grep -q '^RASPUTIN_CP_JOIN_TOKEN=' "$P/node.env")" "$(cat "$P/node.env")"
 	ok "token file: the token value is not in node.env at all" "$(yes_if not contains "$P/node.env" "tok-w1")" "$(cat "$P/node.env")"
 	ok "token file: never logged (stdout)" "$(yes_if not out_has "tok-w1")"
 	ok "token file: never logged (kmsg)" "$(yes_if not contains "$W/kmsg" "tok-w1")"
 
-	# 15. rasputin.id= on the kernel command line still names a node whose seed
-	#     has a token and no id.
+	# 15. The kernel command line CANNOT name a node any more
+	#     (geekdojo/geekdojo-brain#540, M27). rasputin.id= used to provision a
+	#     seed that carried a token and no id; a node's identity now comes
+	#     from its seed and from nothing else, so the same boot fails the way
+	#     any seed with no id fails.
 	setup
 	seed "RASPUTIN_NODE_ROLE=compute" "RASPUTIN_NATS_URL=nats://bench.local:4222" "RASPUTIN_CP_JOIN_TOKEN=tok-w2"
-	printf 'quiet rasputin.id=w2\n' > "$W/cmdline"; fb
-	ok "cmdline id + token: provisions" "$RC" "$OUT"
-	ok "cmdline id + token: node.env carries the cmdline id" "$(yes_if has_line "$P/node.env" "RASPUTIN_NODE_ID=w2")" "$(cat "$P/node.env" 2>&1)"
+	printf 'quiet rasputin.id=w2 rasputin.role=controlplane rasputin.nats=nats://evil.local:4222\n' > "$W/cmdline"; fb
+	ok "cmdline id: no longer provisions" "$(yes_if test "$RC" != 0)" "$OUT"
+	ok "cmdline id: says the seed carries no node id" "$(yes_if out_has "no RASPUTIN_NODE_ID")" "$OUT"
+	ok "cmdline id: nothing was written" "$(yes_if not test -f "$P/node.env")" "$(cat "$P/node.env" 2>&1)"
+
+	# And with a COMPLETE seed, a command line naming another role, id and bus
+	# changes nothing: the seed wins because it is the only source.
+	setup
+	compute_seed
+	printf 'quiet rasputin.id=impostor rasputin.role=controlplane rasputin.nats=nats://evil.local:4222\n' > "$W/cmdline"; fb
+	ok "cmdline override: provisions from the seed" "$RC" "$OUT"
+	ok "cmdline override: the id is the seed's" "$(yes_if has_line "$P/node.env" "RASPUTIN_NODE_ID='w1'")" "$(cat "$P/node.env" 2>&1)"
+	ok "cmdline override: the role is the seed's" "$(yes_if has_line "$P/node.env" "RASPUTIN_NODE_ROLE='compute'")" "$(cat "$P/node.env" 2>&1)"
+	ok "cmdline override: the bus is the seed's" "$(yes_if has_line "$P/node.env" "RASPUTIN_NATS_URL='nats://bench.local:4222'")" "$(cat "$P/node.env" 2>&1)"
+	ok "cmdline override: no controlplane marker" "$(yes_if not test -f "$P/role.controlplane")" "$(ls -a "$P")"
+
+	# 15b. The seed is read THROUGH the agent, not sourced as a shell script
+	#      (geekdojo/geekdojo-brain#540, F18). The three exit statuses are the
+	#      contract, and each one means something different to firstboot.
+
+	# 0 — checked. What firstboot uses is the agent's OUTPUT, not the file on
+	# the volume. Proven by having the stub answer with a different node id
+	# than the seed carries: if node.env says the stub's, the raw file was not
+	# what was sourced.
+	setup; agent_stub "cat <<'CHECKED'
+RASPUTIN_NODE_ROLE='compute'
+RASPUTIN_NODE_ID='from-the-agent'
+RASPUTIN_CLUSTER_ID='bench'
+RASPUTIN_NATS_URL='nats://bench.local:4222'
+RASPUTIN_CP_JOIN_TOKEN='tok-checked'
+CHECKED"
+	compute_seed; fb
+	ok "seed check: provisions" "$RC" "$OUT"
+	ok "seed check: the normalized copy is what was sourced" \
+		"$(yes_if has_line "$P/node.env" "RASPUTIN_NODE_ID='from-the-agent'")" "$(cat "$P/node.env" 2>&1)"
+	ok "seed check: says it checked the seed" "$(yes_if out_has "seed checked by")" "$OUT"
+	# The normalized copy holds the join token, so it does not outlive the read.
+	ok "seed check: the checked copy is removed" \
+		"$(yes_if not test -e "$P/.seed-checked.env")" "$(ls -a "$P")"
+	ok "seed check: and so is its stderr" \
+		"$(yes_if not test -e "$P/.seed-checked.env.err")" "$(ls -a "$P")"
+	ok "seed check: the checked token never reaches node.env" \
+		"$(yes_if not contains "$P/node.env" "tok-checked")" "$(cat "$P/node.env")"
+
+	# 1 — the agent refuses the seed. Provisioning STOPS, the node is left
+	# unprovisioned so firstboot re-runs once the seed is fixed, and the
+	# agent's own reason is what the console shows.
+	setup; agent_stub "echo 'SEED UNUSABLE: RASPUTIN_NODE_ID is \"Node_1\", which is not a usable node id' >&2; exit 1"
+	compute_seed; fb
+	ok "seed refused: fails" "$(yes_if test "$RC" != 0)" "$OUT"
+	ok "seed refused: relays the agent's reason" "$(yes_if out_has "SEED UNUSABLE")" "$OUT"
+	ok "seed refused: nothing written" "$(yes_if not test -f "$P/node.env")" "$(cat "$P/node.env" 2>&1)"
+	ok "seed refused: not stamped, so firstboot re-runs" "$(yes_if not provisioned)" "$(ls -a "$P")"
+	ok "seed refused: no temp files left behind" \
+		"$(yes_if not test -e "$P/.seed-checked.env")" "$(ls -a "$P")"
+
+	# 2 — an agent that predates the subcommand. MIXED FLEETS: an image can
+	# carry an agent a release behind, and a node must not fail to provision
+	# for it. Falls back to reading the seed directly, and says so.
+	setup; agent_stub "exit 2"
+	compute_seed; fb
+	ok "old agent: still provisions" "$RC" "$OUT"
+	ok "old agent: says it fell back" "$(yes_if out_has "does not support 'seed check'")" "$OUT"
+	ok "old agent: the seed's own values are used" \
+		"$(yes_if has_line "$P/node.env" "RASPUTIN_NODE_ID='w1'")" "$(cat "$P/node.env" 2>&1)"
+
+	# An agent that does not know ANY of this — the literal shape of an older
+	# build, which answers an unknown command on stderr with exit 2.
+	setup; agent_stub "echo unreachable"
+	compute_seed
+	printf '#!/bin/sh\necho "rasputin-agent: unknown command \\"$1\\"" >&2\nexit 2\n' > "$AGENT"
+	chmod +x "$AGENT"; fb
+	ok "unknown command: still provisions" "$RC" "$OUT"
+	ok "unknown command: says it fell back" "$(yes_if out_has "does not support 'seed check'")" "$OUT"
+
+	# No agent on the image at all: the same fallback, named differently so
+	# the two are not confused in a console log.
+	setup
+	compute_seed; fb
+	ok "no agent: still provisions" "$RC" "$OUT"
+	ok "no agent: says there is no agent" "$(yes_if out_has "no agent at")" "$OUT"
+	ok "no agent: the seed's own values are used" \
+		"$(yes_if has_line "$P/node.env" "RASPUTIN_NODE_ID='w1'")" "$(cat "$P/node.env" 2>&1)"
+
+	# 15c. node.env quotes EVERY value (geekdojo/geekdojo-brain#540). The file
+	#      is sourced by sh on every boot — rasputin-hostname and
+	#      rasputin-timesync-apply read it, and systemd hands it to the agent —
+	#      so a value a shell would act on has to come back as data.
+	setup; agent_stub "cat <<'CHECKED'
+RASPUTIN_NODE_ROLE='compute'
+RASPUTIN_NODE_ID='w1'
+RASPUTIN_CLUSTER_ID='bench'
+RASPUTIN_NATS_URL='nats://bench.local:4222'
+RASPUTIN_CP_JOIN_TOKEN='tok-w1'
+RASPUTIN_NTP_SERVER='ntp1.example 10.0.0.1'
+CHECKED"
+	compute_seed; fb
+	ok "quoting: provisions" "$RC" "$OUT"
+	ok "quoting: a value with spaces is quoted" \
+		"$(yes_if has_line "$P/node.env" "RASPUTIN_NTP_SERVER='ntp1.example 10.0.0.1'")" "$(cat "$P/node.env" 2>&1)"
+	ok "quoting: every line is KEY='value'" \
+		"$(yes_if not grep -qvE "^[A-Z_]+='.*'$" "$P/node.env")" "$(cat "$P/node.env")"
+	# Sourced back by a real shell, the value is the value — and nothing runs.
+	got=$(sh -c ". '$P/node.env'; printf '%s' \"\$RASPUTIN_NTP_SERVER\"" 2>/dev/null)
+	ok "quoting: sourcing node.env gives a spaced value back whole" \
+		"$(yes_if test "$got" = "ntp1.example 10.0.0.1")" "got=<$got>"
+
+	# And a value that WOULD run if it were not quoted. RASPUTIN_NATS_URL is
+	# the one field that reaches node.env with no validation or sanitizing of
+	# its own — the node id is canonicalised, the cluster id is a DNS label,
+	# the NTP server and the fallback address are filtered to their alphabets
+	# — so it is where the quoting is the only thing standing between a seed
+	# and a root shell on every boot.
+	#
+	# Written into the raw seed, single-quoted there, so the value that
+	# reaches firstboot is the literal text and not the result of running it.
+	setup
+	seed "RASPUTIN_NODE_ROLE=compute" "RASPUTIN_NODE_ID=w1" "RASPUTIN_CLUSTER_ID=bench" \
+		"RASPUTIN_NATS_URL='\$(touch $W/node-env-canary)'" "RASPUTIN_CP_JOIN_TOKEN=tok-w1"
+	fb
+	ok "quoting: a hostile bus URL still provisions" "$RC" "$OUT"
+	rm -f "$W/node-env-canary"
+	sh -c ". '$P/node.env'" >/dev/null 2>&1 || true
+	ok "quoting: sourcing node.env runs nothing" \
+		"$(yes_if not test -e "$W/node-env-canary")" "$(cat "$P/node.env" 2>&1)"
+	got=$(sh -c ". '$P/node.env'; printf '%s' \"\$RASPUTIN_NATS_URL\"" 2>/dev/null)
+	ok "quoting: the hostile value comes back as data" \
+		"$(yes_if test "$got" = "\$(touch $W/node-env-canary)")" "got=<$got>"
 
 	# 16. A controlplane seed with no node id still fails, with its own message.
 	setup

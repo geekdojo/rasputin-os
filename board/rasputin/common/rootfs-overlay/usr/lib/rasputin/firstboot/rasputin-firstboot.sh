@@ -7,14 +7,15 @@
 # Design: os-images/provisioning.md §1-§3. This is the cloud-init-NoCloud
 # essence (one FAT env file) without the cloud-init dependency.
 #
-# Seed sources, in priority order:
-#   1. /run/rasputin-seed/rasputin-seed.env   (mounted seed partition)
-#   2. kernel cmdline rasputin.role=… rasputin.nats=… (override/escape hatch)
-# ROLE is REQUIRED (from 1 or 2) — a blank/absent role is an un-provisioned node
-# and firstboot fails loud rather than inventing one. The node id is REQUIRED
-# too (seed RASPUTIN_NODE_ID, or rasputin.id= on the cmdline): the join token is
-# bound to it, so the node never derives one. Optional fields default: nats to
-# the controlplane mDNS name (rasputin.local).
+# The seed is the ONE source of a node's identity:
+# /run/rasputin-seed/rasputin-seed.env on the mounted seed partition, read
+# through `rasputin-agent seed check` rather than sourced as a shell script.
+# ROLE is REQUIRED — a blank/absent role is an un-provisioned node and firstboot
+# fails loud rather than inventing one. The node id is REQUIRED too (seed
+# RASPUTIN_NODE_ID): the join token is bound to it, so the node never derives
+# one. Optional fields default: nats to the controlplane mDNS name
+# (rasputin.local). The kernel command line used to be able to override all
+# three; it cannot any more (geekdojo/geekdojo-brain#540, M27).
 #
 set -eu
 
@@ -26,13 +27,13 @@ set -eu
 #
 # The RASPUTIN_FIRSTBOOT_* overrides exist for test/firstboot-test.sh, which runs
 # this script against a scratch directory; the unit sets none of them, so on a
-# node every path is the real one below.
+# node every path is the real one below. RASPUTIN_FIRSTBOOT_CMDLINE is gone with
+# the kernel-command-line override it belonged to (geekdojo/geekdojo-brain#540).
 PERSIST="${RASPUTIN_FIRSTBOOT_PERSIST:-/var/lib/rasputin}"
 NODE_ENV=$PERSIST/node.env
 SEED_MNT="${RASPUTIN_FIRSTBOOT_SEED_MNT:-/run/rasputin-seed}"
 SEED_FILE="$SEED_MNT/rasputin-seed.env"
 LIBDIR="${RASPUTIN_FIRSTBOOT_LIBDIR:-/usr/lib/rasputin}"
-CMDLINE="${RASPUTIN_FIRSTBOOT_CMDLINE:-/proc/cmdline}"
 KMSG="${RASPUTIN_FIRSTBOOT_KMSG:-/dev/kmsg}"
 # Indirected rather than stubbed on PATH: under the CI runner's (Ubuntu)
 # busybox sh, a PATH stub named mount was bypassed for busybox's own applet.
@@ -156,8 +157,8 @@ bus_key_valid() {
 # The seed FAT is mounted read-only at $SEED_MNT by run-rasputin\x2dseed.mount
 # (Wants'd by rasputin-firstboot.service), matched by filesystem label
 # RASPUTIN-OS — common to both boards even though the GPT partition name
-# differs (n100 "esp", cm5 "firmware"). If the mount failed we fall through
-# to the cmdline/defaults below.
+# differs (n100 "esp", cm5 "firmware"). If the mount failed we fall through to
+# the defaults below, and the fail-loud checks refuse to provision the node.
 ROLE=""
 NODE_ID=""
 # Where the node id came from, for the error message if it is not a valid DNS
@@ -186,10 +187,76 @@ FALLBACK_ADDRESS_SET=""
 BUS_PIN=""
 BUS_KEY=""
 
+# --- read the seed THROUGH the agent, not as a shell script -------------------
+#
+# The seed arrives on a FAT volume an operator wrote, and until now this line
+# SOURCED it as root: whatever the file said, the node ran
+# (geekdojo/geekdojo-brain#540, F18). `rasputin-agent seed check` replaces that.
+# It PARSES the file — KEY=VALUE, one layer of quoting, not an interpreter —
+# refuses one it cannot use, and prints a normalized copy with every value
+# single-quoted. What gets sourced below is that output, which this image's own
+# binary wrote.
+#
+# The three exit statuses are the contract, and each means something different
+# here:
+#   0  checked. Source the normalized copy.
+#   1  the seed is unusable, and stdout is empty. The agent has already said
+#      which field and what to do; the same fail-loud path the checks further
+#      down take applies, so provisioning stops and firstboot re-runs once the
+#      seed is fixed.
+#   2  a usage error — which on this path means one thing: an agent that
+#      predates the subcommand. So does a missing binary (127).
+#
+# MIXED FLEETS. An image can carry an agent older than `seed check`: the OS
+# pins one version and the firewall's pin lags on purpose. Case 2 therefore
+# falls back to sourcing the raw seed, exactly as before, and says so in the
+# log — a node must not fail to provision because its agent is a release
+# behind. The fallback is transitional and deletable on a checkable fact: it
+# goes when every image in the fleet ships an agent that answers `seed check`.
+SEED_CHECKED="$PERSIST/.seed-checked.env"
+AGENT_BIN="${RASPUTIN_FIRSTBOOT_AGENT:-/usr/bin/rasputin-agent}"
+
+# seed_source FILE — put the seed's values in this shell's environment, through
+# the agent when it can and directly when it cannot. Returns non-zero only when
+# the agent REFUSED the seed, which is a provisioning failure.
+seed_source() {
+	_ss_rc=0
+	if [ -x "$AGENT_BIN" ]; then
+		rm -f "$SEED_CHECKED"
+		(umask 077 && "$AGENT_BIN" seed check "$1" > "$SEED_CHECKED" 2>"$SEED_CHECKED.err") || _ss_rc=$?
+		case "$_ss_rc" in
+			0)
+				log "seed checked by $AGENT_BIN; sourcing the normalized copy"
+				# shellcheck disable=SC1090
+				. "$SEED_CHECKED"
+				rm -f "$SEED_CHECKED" "$SEED_CHECKED.err"
+				return 0
+				;;
+			1)
+				log "ERROR: $AGENT_BIN refused the seed:"
+				while IFS= read -r _ss_line; do log "  $_ss_line"; done < "$SEED_CHECKED.err"
+				rm -f "$SEED_CHECKED" "$SEED_CHECKED.err"
+				return 1
+				;;
+			*)
+				log "NOTE: $AGENT_BIN does not support 'seed check' (exit $_ss_rc) — this image's agent predates it; reading the seed directly"
+				;;
+		esac
+		rm -f "$SEED_CHECKED" "$SEED_CHECKED.err"
+	else
+		log "NOTE: no agent at $AGENT_BIN — reading the seed directly"
+	fi
+	# shellcheck disable=SC1090
+	. "$1"
+}
+
 if [ -f "$SEED_FILE" ]; then
 	log "reading seed $SEED_FILE"
-	# shellcheck disable=SC1090
-	. "$SEED_FILE"
+	if ! seed_source "$SEED_FILE"; then
+		log "ERROR: the provisioning seed at $SEED_FILE cannot be used."
+		log "Re-generate the enrollment file from the control plane (Add node) and re-seed."
+		exit 1
+	fi
 	ROLE="${RASPUTIN_NODE_ROLE:-}"
 	NODE_ID="${RASPUTIN_NODE_ID:-}"
 	[ -n "$NODE_ID" ] && NODE_ID_FROM="RASPUTIN_NODE_ID in $SEED_FILE"
@@ -225,14 +292,19 @@ if [ -n "$SSH_KEY" ]; then
 	fi
 fi
 
-# --- kernel cmdline override (escape hatch) ----------------------------------
-for tok in $(cat "$CMDLINE"); do
-	case "$tok" in
-		rasputin.role=*) ROLE="${tok#rasputin.role=}" ;;
-		rasputin.id=*)   NODE_ID="${tok#rasputin.id=}"; NODE_ID_FROM="rasputin.id= on the kernel command line" ;;
-		rasputin.nats=*) NATS_URL="${tok#rasputin.nats=}" ;;
-	esac
-done
+# THE KERNEL COMMAND LINE NO LONGER PROVISIONS THIS NODE.
+#
+# rasputin.role=, rasputin.id= and rasputin.nats= used to override the seed
+# from /proc/cmdline. They were an escape hatch nobody documented and nothing
+# used, and they were a second way to say who a node is — one that answers to
+# whoever can edit a bootloader entry, is copied into both A/B slots by the
+# updater, survives a re-seed, and appears in `dmesg` and in the process list
+# of anything that reads /proc/cmdline. A node's identity comes from its seed
+# and from nothing else (geekdojo/geekdojo-brain#540, M27).
+#
+# Nothing replaces them. An operator who needs to change a node's identity
+# writes a new seed on the RASPUTIN-OS volume and reboots, which is the one
+# path the control plane's Add-node flow and rasputin-provision both produce.
 
 # Lowercase + trim an operator-supplied id, exactly as rasputin-provision does;
 # a value that is only whitespace (or a bare CR from a Windows-saved seed)
@@ -242,7 +314,7 @@ NODE_ID=$(rasputin_label_canon "$NODE_ID")
 [ -n "$NODE_ID" ] || NODE_ID_FROM=""
 
 # --- require a real provisioning signal --------------------------------------
-# ROLE must come from the seed or the kernel cmdline. A blank/absent role means
+# ROLE must come from the seed. A blank/absent role means
 # the node was never provisioned — the seed template ships every field empty.
 # Do NOT invent an identity and half-join: that strands the node as a zombie
 # that never reaches the bus — it looks "up" but never appears in inventory. Found 2026-06-22 on the bench, when
@@ -387,34 +459,66 @@ if [ -z "$NATS_URL" ]; then
 fi
 
 # --- write node.env ----------------------------------------------------------
+#
+# EVERY VALUE IS QUOTED (geekdojo/geekdojo-brain#540). node.env is sourced by
+# sh — rasputin-hostname and rasputin-timesync-apply read it that way, and
+# systemd hands it to the agent — so an unquoted value holding a space, a $, a
+# backtick or a semicolon is not data, it is script running as root on every
+# boot. Which values "need" quotes has been a judgement made per line, and the
+# judgement has to be re-made every time a field's alphabet changes: the NTP
+# server got quotes after that trap was found once, and the reasoning beside
+# the bus pin is that its alphabet happens to be safe today.
+#
+# nodeenv_put writes one line in single quotes, which sh interprets nothing
+# inside, with an embedded quote written as the '\'' idiom. It is the same
+# rule proto.RenderSeed applies to the seed this file is derived from, so a
+# value survives from the control plane to the node without any step deciding
+# for itself whether it looked dangerous.
+#
+# A value that cannot be one line of an env file — a newline or a carriage
+# return — is refused rather than written, and refusing is fatal: half a
+# node.env is a node that comes up as something nobody asked for.
+nodeenv_put() {
+	# Byte counts, not a case pattern: `case $v in *"$(printf '\n')"*)` looks
+	# like it tests for a newline and does not — command substitution strips
+	# trailing newlines, so the pattern is `**` and matches every value. It
+	# read as a check and refused everything.
+	if [ "$(printf '%s' "$2" | tr -d '\n\r' | wc -c)" -ne "$(printf '%s' "$2" | wc -c)" ]; then
+		log "ERROR: the value for $1 contains a newline or a carriage return; it cannot be written to node.env."
+		log "Re-generate the enrollment file from the control plane (Add node) and re-seed."
+		exit 1
+	fi
+	# '\'' closes the quoting, escapes one quote, and reopens it.
+	printf "%s='%s'\n" "$1" "$(printf '%s' "$2" | sed "s/'/'\\\\''/g")" >> "$NODE_ENV"
+}
+
 log "role=$ROLE id=$NODE_ID nats=$NATS_URL"
 umask 077
-cat > "$NODE_ENV" <<EOF
-RASPUTIN_NODE_ROLE=$ROLE
-RASPUTIN_NODE_ID=$NODE_ID
-RASPUTIN_CLUSTER_ID=$CLUSTER_ID
-RASPUTIN_NATS_URL=$NATS_URL
-EOF
+: > "$NODE_ENV"
+nodeenv_put RASPUTIN_NODE_ROLE "$ROLE"
+nodeenv_put RASPUTIN_NODE_ID "$NODE_ID"
+nodeenv_put RASPUTIN_CLUSTER_ID "$CLUSTER_ID"
+nodeenv_put RASPUTIN_NATS_URL "$NATS_URL"
 # The bus pin — ALL roles, the controlplane included: its own agent dials
-# 127.0.0.1 and pins the key too. Public, so it stays in the seed. Validated
-# above, so its alphabet is A-Z a-z 0-9 + / = and it needs no quoting. No pin
+# 127.0.0.1 and pins the key too. Public, so it stays in the seed. No pin
 # line means the agent dials in plaintext until the controlplane delivers one
 # into its state dir (/var/lib/rasputin/agent-state/bus/pin, persistent).
 if [ -n "$BUS_PIN" ]; then
-	echo "RASPUTIN_BUS_PIN=$BUS_PIN" >> "$NODE_ENV"
+	nodeenv_put RASPUTIN_BUS_PIN "$BUS_PIN"
 fi
 # Optional operator NTP server(s) — ALL roles: every node needs correct time to
 # mint/verify its mesh + API TLS (a no-RTC node with a bogus clock mints an
 # "expired" leaf). rasputin-timesync-apply.service renders this into a
 # timesyncd drop-in each boot; the image's numeric FallbackNTP is the safety
 # net when it's unset. provisioning.md "Time sync".
+#
+# Still sanitized to host/IP/space characters before it is written: the
+# quoting makes the LINE safe, and this makes the VALUE something timesyncd
+# will accept. Two different jobs; the sanitizer is no longer the only thing
+# standing between a seed and a root shell.
 if [ -n "$NTP_SERVER" ]; then
-	# node.env is SOURCED by sh (rasputin-hostname + rasputin-timesync-apply),
-	# so a space-separated value MUST be written double-quoted or the 2nd word
-	# executes as a command (same trap as the SSH key). Sanitize to host/IP/
-	# space chars first so the quoting can't be broken out of.
 	NTP_SERVER=$(printf '%s' "$NTP_SERVER" | tr -d '\n' | tr -cd 'A-Za-z0-9 .:_-')
-	[ -n "$NTP_SERVER" ] && echo "RASPUTIN_NTP_SERVER=\"$NTP_SERVER\"" >> "$NODE_ENV"
+	[ -n "$NTP_SERVER" ] && nodeenv_put RASPUTIN_NTP_SERVER "$NTP_SERVER"
 fi
 # Optional controlplane fallback address (CIDR) for a LAN with no DHCP server.
 # Written whenever the seed MENTIONED the key, empty value included -- an empty
@@ -425,12 +529,12 @@ fi
 # simply keeps the built-in default, so there is nothing to strand (#84).
 if [ -n "$FALLBACK_ADDRESS_SET" ]; then
 	FALLBACK_ADDRESS=$(printf '%s' "$FALLBACK_ADDRESS" | tr -cd '0-9./')
-	echo "RASPUTIN_FALLBACK_ADDRESS=$FALLBACK_ADDRESS" >> "$NODE_ENV"
+	nodeenv_put RASPUTIN_FALLBACK_ADDRESS "$FALLBACK_ADDRESS"
 fi
 # The controlplane needs to know its own id for the system.update self-skip
 # and the BMC host default (see control-plane/updates.md, bmc.md).
 if [ "$ROLE" = "controlplane" ]; then
-	echo "RASPUTIN_SELF_NODE_ID=$NODE_ID" >> "$NODE_ENV"
+	nodeenv_put RASPUTIN_SELF_NODE_ID "$NODE_ID"
 	# The controlplane's own agent authenticates to the bus with a join token
 	# like every other node: the bus trusts nothing for coming from loopback
 	# (geekdojo-brain#140). Nobody provisions it — the api mints a token bound
@@ -439,20 +543,20 @@ if [ "$ROLE" = "controlplane" ]; then
 	# The path is the api's <RASPUTIN_DATA_DIR>/bus/agent.token, beside bus.key.
 	# An agent new enough to read this line also defaults to this path on a
 	# controlplane, so a controlplane provisioned before this line keeps working.
-	echo "RASPUTIN_CP_JOIN_TOKEN_FILE=$PERSIST/bus/agent.token" >> "$NODE_ENV"
+	nodeenv_put RASPUTIN_CP_JOIN_TOKEN_FILE "$PERSIST/bus/agent.token"
 	# A provisioned matched set ships enforce on (bus auth required), carried in
 	# the seed so a pre-paired cluster comes up enforced with no manual flip.
 	# Absent → the api's default (enforce). Only the controlplane's api reads this.
 	# token-provisioning-pipeline.md §4.
 	if [ -n "$BUS_AUTH" ]; then
-		echo "RASPUTIN_BUS_AUTH=$BUS_AUTH" >> "$NODE_ENV"
+		nodeenv_put RASPUTIN_BUS_AUTH "$BUS_AUTH"
 	fi
 	# Update channel (stable|dev) the api's Check-for-Updates tracks.
 	# provision-cluster writes this into the controlplane seed when flashing a
 	# dev/pre-release image; absent → the api's default (stable). Only the
 	# controlplane runs the api, so it's controlplane-only like BUS_AUTH.
 	if [ -n "$RELEASE_CHANNEL" ]; then
-		echo "RASPUTIN_RELEASE_CHANNEL=$RELEASE_CHANNEL" >> "$NODE_ENV"
+		nodeenv_put RASPUTIN_RELEASE_CHANNEL "$RELEASE_CHANNEL"
 	fi
 fi
 # Non-controlplane nodes present the join token to the bus auth callout: the
@@ -501,7 +605,7 @@ if [ -n "$JOIN_TOKEN" ] && [ "$ROLE" != "controlplane" ]; then
 	# provisioned NOW runs the agent from the image that ships this script, and
 	# genimage.cfg pre-populates slot B with that same rootfs at flash, so a
 	# rollback on a freshly provisioned node lands on a file-aware agent too.
-	echo "RASPUTIN_CP_JOIN_TOKEN_FILE=$JOIN_TOKEN_FILE" >> "$NODE_ENV"
+	nodeenv_put RASPUTIN_CP_JOIN_TOKEN_FILE "$JOIN_TOKEN_FILE"
 fi
 
 # --- tailnet enrollment (join token) -----------------------------------------
