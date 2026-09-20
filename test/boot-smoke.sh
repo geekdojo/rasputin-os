@@ -19,7 +19,7 @@
 #     default qemu64 model lacks); `-cpu cortex-a72` on arm64, the exact
 #     BR2_cortex_a72 build target.
 #   - console device: ttyS0 on amd64, ttyAMA0 (PL011) on arm64.
-#   - time budgets: arm64 is the same guest under a cross-ISA TCG translation.
+# The time budgets are SHARED — measured, arm64 is the faster of the two.
 # The root device is addressed by PARTUUID from the image's own cmdline on both,
 # so nothing here hardcodes /dev/vda vs /dev/sda.
 #
@@ -41,12 +41,24 @@ HTTP_PORT=18080
 HTTPS_PORT=18443
 DNS_PORT=15353
 
-# Budgets. amd64 keeps the values the inline job was tuned to; arm64 gets the
-# longer rope TCG needs. These are CEILINGS, not sleeps — every wait below polls
-# a checkable fact and exits the moment it is true, so a fast run is fast.
+# Budgets, shared by both arches. These are CEILINGS, not sleeps — every wait
+# below polls a checkable fact and exits the moment it is true, so a fast run is
+# fast. They are the values the amd64 job was tuned to.
+#
+# arm64 was given roughly 3x these on the reasoning that a cross-ISA TCG
+# translation would need the rope. MEASURED, it does not: on the same runner
+# class the arm64 guest reached multi-user in 31s against amd64's 36s, and
+# finished the whole script in 137s against 148s. It is faster, not slower —
+# `virt` + virtio has far less to emulate than q35 + OVMF. Keeping a separate,
+# larger arm64 budget would have been an assumption the numbers contradict, and
+# would only have meant a hung arm64 boot burning 45 minutes before saying so.
+#
+# (The arm64 job also DOESN'T need the rope for a different reason: a dead qemu
+# is now detected directly, see die_if_qemu_gone, so the budget is only ever
+# reached by a guest that is genuinely stuck.)
+BOOT_BUDGET=900 ; MU_TRIES=120 ; FB_TRIES=60 ; API_TRIES=48
 case "$ARCH" in
-  amd64) BOOT_BUDGET=900  ; MU_TRIES=120 ; FB_TRIES=60  ; API_TRIES=48  ;;
-  arm64) BOOT_BUDGET=2700 ; MU_TRIES=450 ; FB_TRIES=210 ; API_TRIES=144 ;;
+  amd64|arm64) ;;
   *) echo "::error::unknown arch '$ARCH' (expected amd64 or arm64)"; exit 1 ;;
 esac
 
