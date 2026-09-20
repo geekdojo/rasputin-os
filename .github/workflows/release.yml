@@ -634,9 +634,11 @@ jobs:
           name: smoke-amd64-console
           path: /tmp/console.log
 
-  # Discrete signing + publish job — the leaf key (encrypted secret) is
-  # scoped to HERE and nowhere else. Materialised onto an in-memory tmpfs
-  # for the duration of `rauc bundle`, then wiped. (release-pipeline.md §3)
+  # Discrete signing + publish job — the leaf key is scoped to HERE and nowhere
+  # else. It comes from this repository's `signing` environment, is staged and
+  # preflighted by the organisation's shared rasputin-sign action onto an
+  # in-memory tmpfs for the duration of `rauc bundle`, and is wiped at the end
+  # of the job. (release-pipeline.md §3, geekdojo/geekdojo-brain#524)
   #
   # Only on a CalVer tag push. To exercise this path before a real release
   # cut, push a `-dev.N` suffixed tag (e.g. 2026.05.0-dev.1) — same shape,
@@ -658,6 +660,13 @@ jobs:
     # (full_build only) skip this and just produce artifacts.
     if: ${{ !cancelled() && needs.smoke-amd64.result == 'success' && (startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && (inputs.publish == true || inputs.publish == 'true'))) }}
     runs-on: ubuntu-latest
+    # The release signing credential lives in this repository's `signing`
+    # ENVIRONMENT, not in repository- or organisation-level secrets
+    # (geekdojo/geekdojo-brain#524). Naming the environment here is what makes
+    # its secrets reachable at all, and what makes its deployment-branch policy
+    # apply: a job that does not name it gets no leaf and fails the preflight
+    # rather than signing with something weaker.
+    environment: signing
     permissions:
       contents: write
     steps:
@@ -717,82 +726,40 @@ jobs:
             echo "::endgroup::"
           done
 
-      - name: Materialise signing material to tmpfs
+      # The credential is staged and gated by the organisation's shared action
+      # (geekdojo/geekdojo-brain#524), pinned by SHA. It runs the same check set
+      # rasputin-control-plane scripts/pki-init.sh runs at mint time, so the
+      # three properties this step used to check inline -- the smimesign purpose
+      # every deployed board enforces, RAUC's codesign semantics read straight
+      # off the extensions, and the Rasputin release OID artifactsig authorises
+      # on -- are now checked in one place for every signing repository, and a
+      # fourth (the cert secret must carry the intermediate too) comes with it.
+      #
+      # The reasoning those inline checks carried has moved into the action, not
+      # been dropped: read .github/actions/rasputin-sign/action.yml in
+      # geekdojo/.github before changing any of them.
+      - name: Stage and preflight the signing credential
         id: mat
-        env:
-          LEAF_KEY:  ${{ secrets.RASPUTIN_LEAF_KEY }}
-          LEAF_CERT: ${{ secrets.RASPUTIN_LEAF_CERT }}
-          ROOT_PEM:  ${{ vars.RASPUTIN_ROOT_CA_PEM }}
-        run: |
-          set -eu
-          if [ -z "${LEAF_KEY:-}" ] || [ -z "${LEAF_CERT:-}" ] || [ -z "${ROOT_PEM:-}" ]; then
-            echo "::error::missing one of RASPUTIN_LEAF_KEY / RASPUTIN_LEAF_CERT (repo secrets) or RASPUTIN_ROOT_CA_PEM (org variable)"; exit 1
-          fi
-          sudo mkdir -p /mnt/rasputin-sign
-          sudo mount -t tmpfs -o size=8M,mode=0700,uid=$(id -u),gid=$(id -g) tmpfs /mnt/rasputin-sign
-          umask 077
-          printf '%s' "$LEAF_KEY"  > /mnt/rasputin-sign/leaf.key
-          printf '%s' "$LEAF_CERT" > /mnt/rasputin-sign/leaf-chain.pem
-          printf '%s' "$ROOT_PEM"  > /mnt/rasputin-sign/root-ca.pem
-          # Split leaf-chain.pem into separate leaf.pem + intermediate.pem.
-          # rauc only embeds the FIRST cert from --cert into the CMS signature;
-          # the intermediate must be passed explicitly via `--intermediate` so
-          # the device-side rauc can build leaf → intermediate → root from
-          # the bundle alone (with just root in the device trust store).
-          awk -v leaf=/mnt/rasputin-sign/leaf.pem \
-              -v inter=/mnt/rasputin-sign/intermediate.pem \
-              '/-----BEGIN CERTIFICATE-----/{i++} {if(i==1)print > leaf; else if(i==2)print > inter}' \
-              /mnt/rasputin-sign/leaf-chain.pem
-          # Sanity-check the chain locally before signing anything with it.
-          openssl verify -CAfile /mnt/rasputin-sign/root-ca.pem \
-            -untrusted /mnt/rasputin-sign/intermediate.pem \
-            /mnt/rasputin-sign/leaf.pem \
-            || { echo "::error::leaf cert chain does not verify against root"; exit 1; }
-          # A valid chain is NOT a usable signing leaf, and the difference cost
-          # a full build. `openssl verify` with no -purpose skips purpose
-          # checking entirely, so the check above passed leaf-002 — which
-          # carried codeSigning + the release OID and no emailProtection —
-          # while `rauc bundle` three steps later died with "unsuitable
-          # certificate purpose" (X509_V_ERR_INVALID_PURPOSE, error 26) after
-          # both SKU builds and the QEMU smoke had already run.
-          #
-          # 1. smimesign is OpenSSL CMS_verify's DEFAULT purpose. `rauc bundle`
-          #    and EVERY deployed board enforce it, because no rasputin-os
-          #    rauc-system.conf sets [keyring] check-purpose. This is the check
-          #    that decides whether the fleet can install an update at all.
-          #    Never redirect its stderr — see the note on (2).
-          openssl verify -CAfile /mnt/rasputin-sign/root-ca.pem \
-            -untrusted /mnt/rasputin-sign/intermediate.pem \
-            -purpose smimesign /mnt/rasputin-sign/leaf.pem \
-            || { echo "::error::signing leaf does not satisfy the 'smimesign' X509 purpose, which is what OpenSSL CMS_verify enforces by default — i.e. every deployed board. Artifacts this leaf signs cannot be installed by the fleet. Re-mint with scripts/pki-init.sh --rotate-leaf in rasputin-control-plane."; exit 1; }
-          echo "leaf satisfies X509 purpose: smimesign"
-
-          # 2. RAUC's codesign semantics, checked DIRECTLY on the extensions
-          #    rather than through OpenSSL's "codesign" purpose.
-          #
-          #    Do not reintroduce `-purpose codesign` here. That purpose does
-          #    not exist in OpenSSL 3.0.13, which is what ubuntu-latest ships;
-          #    asking for it returns "Invalid purpose codesign" and the check
-          #    fails for a reason that has nothing to do with the certificate.
-          #    Run #172 died exactly that way, on a leaf that was correct, and
-          #    the first version of this gate hid the explanation by sending
-          #    stderr to /dev/null. Both mistakes are corrected here.
-          #
-          #    Checking the extensions is also the more faithful test: RAUC
-          #    does not use OpenSSL's purpose. It registers its OWN via
-          #    X509_PURPOSE_add ("codesign-rauc", src/signature.c), and that
-          #    callback requires precisely these two things of a leaf.
-          leaf_eku=$(openssl x509 -in /mnt/rasputin-sign/leaf.pem -noout -ext extendedKeyUsage 2>/dev/null || true)
-          leaf_ku=$(openssl x509 -in /mnt/rasputin-sign/leaf.pem -noout -ext keyUsage 2>/dev/null || true)
-          echo "$leaf_eku" | grep -q "Code Signing" \
-            || { echo "::error::signing leaf's extendedKeyUsage does not include Code Signing. RAUC's codesign-rauc purpose refuses such a leaf, so any board configured with [keyring] check-purpose=codesign will reject every artifact it signs. Got: $leaf_eku"; exit 1; }
-          echo "$leaf_ku" | grep -q "Digital Signature" \
-            || { echo "::error::signing leaf's keyUsage does not include Digital Signature; RAUC refuses it. Got: $leaf_ku"; exit 1; }
-          echo "leaf satisfies RAUC codesign semantics (EKU codeSigning + KU digitalSignature)"
-          echo "tmpfs=/mnt/rasputin-sign" >> "$GITHUB_OUTPUT"
+        uses: geekdojo/.github/.github/actions/rasputin-sign@e94e742453c1a1d0d3426d1b541bd5f1a82f3c4a
+        with:
+          purpose: release
+          leaf-key:  ${{ secrets.RASPUTIN_LEAF_KEY }}
+          leaf-cert: ${{ secrets.RASPUTIN_LEAF_CERT }}
+          root-ca:   ${{ vars.RASPUTIN_ROOT_CA_PEM }}
 
       - name: Sign .raucb bundles + compress .img + emit signed manifest
         id: sign
+        env:
+          # Through the environment, not expanded into the script text: a
+          # `${{ }}` inside a run block is substituted before the shell ever
+          # sees it, so its value becomes code rather than data. These
+          # particular values are paths the signing action just wrote, but the
+          # rule is the rule (zizmor template-injection), and a step that
+          # follows it is one nobody has to re-reason about later.
+          LEAF: ${{ steps.mat.outputs.leaf }}
+          INTERMEDIATE: ${{ steps.mat.outputs.intermediate }}
+          KEY: ${{ steps.mat.outputs.key }}
+          ROOT: ${{ steps.mat.outputs.root }}
         run: |
           set -eu
           mkdir -p release-out
@@ -808,10 +775,10 @@ jobs:
 
             echo "::group::Sign $sku (compatible=$compatible)"
             rauc bundle \
-              --cert="/mnt/rasputin-sign/leaf.pem" \
-              --intermediate="/mnt/rasputin-sign/intermediate.pem" \
-              --key="/mnt/rasputin-sign/leaf.key" \
-              --signing-keyring="/mnt/rasputin-sign/root-ca.pem" \
+              --cert="$LEAF" \
+              --intermediate="$INTERMEDIATE" \
+              --key="$KEY" \
+              --signing-keyring="$ROOT" \
               "$d/bundle" \
               "release-out/rasputin-os-${sku}-${ver}.raucb"
 
@@ -874,24 +841,33 @@ jobs:
           # (root CA: https://rasputin.geekdojo.com/rasputin-root-ca.pem)
           openssl cms -sign -binary \
             -in       release-out/manifest.json \
-            -signer   /mnt/rasputin-sign/leaf.pem \
-            -certfile /mnt/rasputin-sign/intermediate.pem \
-            -inkey    /mnt/rasputin-sign/leaf.key \
+            -signer   "$LEAF" \
+            -certfile "$INTERMEDIATE" \
+            -inkey    "$KEY" \
             -outform DER \
             -out      release-out/manifest.json.sig
-          # Prove the published verify command passes before shipping it.
-          openssl cms -verify -binary -inform DER \
-            -in release-out/manifest.json.sig \
-            -content release-out/manifest.json \
-            -CAfile /mnt/rasputin-sign/root-ca.pem -out /dev/null \
-            || { echo "::error::manifest.json.sig does not verify against the root CA"; exit 1; }
-
           echo "----- release-out/ -----" && ls -lh release-out/ && \
             echo "----- manifest.json -----" && cat release-out/manifest.json
 
+      # Prove the published verify command passes before anything is shipped.
+      # The .raucb bundles are self-verified above by scripts/verify-bundle.sh,
+      # which reads each SKU's own /etc/rauc/system.conf out of the rootfs it is
+      # shipping -- RAUC-specific, and not something a generic CMS check can
+      # stand in for. manifest.json is a plain detached CMS signature, so it
+      # goes through the shared action with the same purpose the first-flash
+      # verifier applies.
+      - name: Self-verify the signed manifest
+        uses: geekdojo/.github/.github/actions/rasputin-sign@e94e742453c1a1d0d3426d1b541bd5f1a82f3c4a
+        with:
+          mode: verify
+          purpose: release
+          artifacts: release-out/manifest.json
+
       - name: Wipe signing material
         if: always()
-        run: sudo umount /mnt/rasputin-sign 2>/dev/null || true
+        uses: geekdojo/.github/.github/actions/rasputin-sign@e94e742453c1a1d0d3426d1b541bd5f1a82f3c4a
+        with:
+          mode: cleanup
 
       - name: Publish GitHub Release
         env:
