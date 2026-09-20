@@ -44,6 +44,13 @@ ln -sf /etc/systemd/system/rasputin-timesync-apply.service \
 # clusters provisioned before per-cluster naming — control-plane #75.
 ln -sf /etc/systemd/system/rasputin-clusterid-backfill.service \
 	"$TARGET_DIR/etc/systemd/system/multi-user.target.wants/rasputin-clusterid-backfill.service"
+# Move the bus join token out of node.env into its own 0600 file, every boot,
+# before the agent reads either. No-op on a node provisioned by this image's
+# firstboot (already the new form), on a controlplane (its api mints its
+# agent's token into a file) and on dev (no node.env). One-time migration for
+# nodes provisioned before the token file — geekdojo/geekdojo-brain#537.
+ln -sf /etc/systemd/system/rasputin-jointoken-file.service \
+	"$TARGET_DIR/etc/systemd/system/multi-user.target.wants/rasputin-jointoken-file.service"
 # Bind the persistent coredump store over /var/lib/systemd/coredump so
 # systemd-coredump can write cores on the read-only rootfs (diagnostic for the
 # rauc double-free, rasputin-os#8). See the unit for why a bind mount and not a

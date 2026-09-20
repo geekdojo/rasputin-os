@@ -164,6 +164,16 @@ A matched set from `rasputin-provision` also gives the controlplane seed
 `/var/lib/rasputin/bus/bus.key` and blanks it in the seed. Without one the
 controlplane generates its own key.
 
+On the node, the join token is kept in one owner-only file —
+`/var/lib/rasputin/bus/join.token`, mode 0600, beside the bus key —
+and `/var/lib/rasputin/node.env` only *names* it, as
+`RASPUTIN_CP_JOIN_TOKEN_FILE`. The agent re-reads that file on every connect
+attempt, so a token that is rotated or re-minted on disk is picked up on the
+next reconnect rather than the next restart. A node provisioned before this
+is migrated in place on its next boot. (The controlplane's own agent has had
+the same arrangement since its api started minting its token into
+`bus/agent.token`.)
+
 ## Releases
 
 CI builds both SKUs, boot-smokes the amd64 image under QEMU, signs the RAUC

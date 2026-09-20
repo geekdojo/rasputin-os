@@ -6,10 +6,11 @@ name: ci
 # decision could only be found by flashing hardware.
 #
 # Scope is deliberately narrow: POSIX-sh syntax on every overlay script, the
-# node-id helper table tests, firstboot's seed handling run against a scratch
-# directory, plus the fallback-address suite, which fakes networkd's lease directory and
-# /sys/class/net so a boot-time decision is testable without a network, a root
-# shell, or a DHCP server to take away.
+# node-id helper table tests, firstboot's seed handling and the join-token file
+# migration run against a scratch directory, plus the fallback-address suite,
+# which fakes networkd's lease directory and /sys/class/net so a boot-time
+# decision is testable without a network, a root shell, or a DHCP server to
+# take away.
 #
 # The fallback address also gets a functional test against real
 # systemd-networkd 256.17 (the image's version) in a privileged container,
@@ -75,6 +76,15 @@ jobs:
         env:
           REQUIRE_BUSYBOX: "1"
         run: sh test/coredump-mode-test.sh
+      # The join token moves out of node.env into its own 0600 file
+      # (geekdojo/geekdojo-brain#537). The migration rewrites, on every boot, the
+      # file that holds a fielded node's only bus credential, so what is pinned
+      # here is that it is idempotent, that it never leaves a node with neither
+      # form, and that it leaves a controlplane and a dev box alone.
+      - name: Join-token file migration tests
+        env:
+          REQUIRE_BUSYBOX: "1"
+        run: sh test/jointoken-file-test.sh
       # release.yml's publish step runs scripts/release-target-guard.sh before
       # and after `gh release create` to prove the tag is on the commit the
       # images were built from. Every exit status, against a throwaway git

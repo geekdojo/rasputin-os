@@ -1,0 +1,24 @@
+[Unit]
+Description=Move the bus join token out of node.env into its own 0600 file
+Documentation=https://github.com/geekdojo/geekdojo-brain/issues/537
+# node.env is written by rasputin-firstboot; read it after (on later boots
+# firstboot is condition-skipped, which still satisfies the ordering). Ordered
+# before the agent and the api so whichever reads the token sees the completed
+# node.env. Every-boot oneshot, NOT part of firstboot: firstboot is run-once,
+# but an OS update swaps the rootfs while keeping the old persistent node.env,
+# which is exactly the node this migration exists for. Same shape as
+# rasputin-clusterid-backfill.service.
+After=rasputin-firstboot.service
+Before=rasputin-agent.service rasputin-api.service
+RequiresMountsFor=/var/lib/rasputin
+# The appliance gate: a provisioned node has node.env; a dev box does not, so
+# this unit is condition-skipped there and never rewrites a developer's env.
+ConditionPathExists=/var/lib/rasputin/node.env
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/rasputin/jointoken/rasputin-jointoken-file.sh
+
+[Install]
+WantedBy=multi-user.target

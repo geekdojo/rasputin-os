@@ -460,8 +460,48 @@ fi
 # validates it (token-provisioning-pipeline.md). The controlplane's own
 # co-located agent presents the token its api mints (RASPUTIN_CP_JOIN_TOKEN_FILE,
 # above), so its seed carries none.
+#
+# The token goes into its OWN 0600 file and node.env only NAMES that file
+# (geekdojo/geekdojo-brain#537). It used to be written into node.env as
+# RASPUTIN_CP_JOIN_TOKEN, which put a live credential into an environment
+# block: systemd hands node.env to the agent, every child the agent spawns
+# inherits it, and it is readable through /proc for anything running as the
+# same user. A file is one place, with one owner, that can also be REPLACED
+# under a running agent — the agent re-reads it on every connect attempt, so a
+# re-minted or rotated token reaches it on the next reconnect instead of the
+# next restart. Same contract as the controlplane's agent.token, above.
+#
+# Written the way bus.key is: 0700 dir, atomic 0600 file. A failure here is
+# fatal, like the other provisioning failures above — a node whose token never
+# landed cannot join, and half-joining is exactly what this script refuses to
+# do. firstboot re-runs after the seed is fixed and the node rebooted.
 if [ -n "$JOIN_TOKEN" ] && [ "$ROLE" != "controlplane" ]; then
-	echo "RASPUTIN_CP_JOIN_TOKEN=$JOIN_TOKEN" >> "$NODE_ENV"
+	JOIN_TOKEN_FILE="$PERSIST/bus/join.token"
+	if ! { mkdir -p "$PERSIST/bus" && chmod 700 "$PERSIST/bus"; }; then
+		log "ERROR: could not create $PERSIST/bus for the join token — provisioning stopped."
+		exit 1
+	fi
+	jt_tmp="$PERSIST/bus/.join.token.$$"
+	rm -f "$jt_tmp"
+	if (umask 077 && printf '%s\n' "$JOIN_TOKEN" > "$jt_tmp") \
+		&& chmod 600 "$jt_tmp" \
+		&& mv -f "$jt_tmp" "$JOIN_TOKEN_FILE"; then
+		sync
+		log "wrote the join token to $JOIN_TOKEN_FILE (0600)"
+	else
+		rm -f "$jt_tmp"
+		log "ERROR: could not write the join token to $JOIN_TOKEN_FILE — provisioning stopped so this node does not boot without a credential."
+		exit 1
+	fi
+	# node.env carries the PATH, never the token. An agent that predates the
+	# file (before control-plane v2026.09.4-dev.167) reads only
+	# RASPUTIN_CP_JOIN_TOKEN and would not join off this line — which is why
+	# the migration for ALREADY-provisioned nodes keeps its inline token (see
+	# usr/lib/rasputin/jointoken/rasputin-jointoken-file.sh). A node being
+	# provisioned NOW runs the agent from the image that ships this script, and
+	# genimage.cfg pre-populates slot B with that same rootfs at flash, so a
+	# rollback on a freshly provisioned node lands on a file-aware agent too.
+	echo "RASPUTIN_CP_JOIN_TOKEN_FILE=$JOIN_TOKEN_FILE" >> "$NODE_ENV"
 fi
 
 # --- tailnet enrollment (join token) -----------------------------------------
