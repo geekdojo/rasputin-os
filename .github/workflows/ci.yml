@@ -51,6 +51,13 @@ jobs:
           exit $fail
       - name: Controlplane fallback-address tests
         run: sh test/fallback-address-test.sh
+      # The image's clock floor is an mtime on an empty file: a build that
+      # silently stops baking it looks identical and puts every offline first
+      # boot back to minting already-expired certificates
+      # (geekdojo/rasputin-os#1). Nothing downstream would notice, so it is
+      # pinned here.
+      - name: Image clock-floor tests
+        run: sh test/clock-floor-test.sh
       # The node id becomes the hostname and the username the agent presents to
       # the bus, which accepts only a DNS label; an id that breaks the rule
       # boots fine and never joins. Table tests for the shared helpers under
