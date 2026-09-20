@@ -35,7 +35,7 @@ OVERLAY="$ROOT/board/rasputin/common/rootfs-overlay"
 SCRIPT="$OVERLAY/usr/lib/rasputin/set-root-hash"
 TMPFILES="$OVERLAY/usr/lib/tmpfiles.d/rasputin.conf"
 INVENTORY="$OVERLAY/usr/lib/rasputin/atrest/inventory"
-POST_BUILD="$ROOT/board/rasputin/common/post-build.sh"
+POST_FAKEROOT="$ROOT/board/rasputin/common/post-fakeroot.sh"
 [ -f "$SCRIPT" ] || { echo "missing: $SCRIPT" >&2; exit 2; }
 
 if [ -z "${TEST_SHELLS:-}" ]; then
@@ -229,14 +229,17 @@ for cfg in "$ROOT"/configs/rasputin_*_defconfig; do
 done
 
 # /etc/shadow has to be writable at runtime or nothing above can ever run on a
-# real node: post-build moves it onto the persistent partition and keeps the
-# build's copy as the master.
-ok "post-build symlinks /etc/shadow onto the persistent partition" \
-	"$(yes_if grep -q 'ln -s /var/lib/rasputin/console/shadow' "$POST_BUILD")" "$(grep -n shadow "$POST_BUILD")"
-ok "post-build keeps the build's shadow as the master copy" \
-	"$(yes_if grep -q 'usr/share/factory/rasputin' "$POST_BUILD")" "$(grep -n factory "$POST_BUILD")"
-ok "post-build refuses a rootfs with a usable baked root password" \
-	"$(yes_if grep -q 'usable password baked into the image' "$POST_BUILD")" "$(grep -n baked "$POST_BUILD")"
+# real node: post-fakeroot moves it onto the persistent partition and keeps the
+# build's copy as the master. It is post-FAKEROOT and not post-BUILD because
+# Buildroot's mkusers still rewrites /etc/shadow after post-build and dies on a
+# dangling symlink; test/rootfs-shadow-test.sh pins that ordering by running
+# the real mkusers. These three are the declarations, cheap and here.
+ok "post-fakeroot symlinks /etc/shadow onto the persistent partition" \
+	"$(yes_if grep -q 'ln -s /var/lib/rasputin/console/shadow' "$POST_FAKEROOT")" "$(grep -n shadow "$POST_FAKEROOT")"
+ok "post-fakeroot keeps the build's shadow as the master copy" \
+	"$(yes_if grep -q 'usr/share/factory/rasputin' "$POST_FAKEROOT")" "$(grep -n factory "$POST_FAKEROOT")"
+ok "post-fakeroot refuses a rootfs with a usable baked root password" \
+	"$(yes_if grep -q 'usable password baked into the image' "$POST_FAKEROOT")" "$(grep -n baked "$POST_FAKEROOT")"
 
 # tmpfiles seeds the persistent copy only when it is absent (C), so a delivered
 # hash survives a reboot and an A/B update.

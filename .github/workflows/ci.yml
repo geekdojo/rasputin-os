@@ -12,6 +12,11 @@ name: ci
 # directory and /sys/class/net so a boot-time decision is testable without a
 # network, a root shell, or a DHCP server to take away.
 #
+# One job goes further than the overlay scripts: rootfs-shadow checks out the
+# pinned Buildroot and runs its own mkusers over a target dir prepared by
+# post-build.sh, because where in the build the /etc/shadow swap happens is
+# itself load-bearing and used to be provable only by a release build.
+#
 # The fallback address also gets a functional test against real
 # systemd-networkd 256.17 (the image's version) in a privileged container,
 # because what went wrong in geekdojo-brain#427 lives between networkd, the
@@ -112,6 +117,27 @@ jobs:
       # the image's shell.
       - name: Release target guard tests
         run: bash test/release-target-guard-test.sh
+
+  # The /etc/shadow swap is a BUILD-ORDER claim, and nothing here used to test
+  # the build. cc74fb4 put the swap in post-build.sh, where Buildroot's mkusers
+  # still comes along afterwards and does `sed -i --follow-symlinks` on
+  # /etc/shadow — a hard error on a dangling link. main could not produce an
+  # image on either arch and every PR check stayed green, because the only
+  # thing that reaches squashfs is the ~25-minute release build, which does not
+  # run on a pull request. This job runs the pinned Buildroot's OWN mkusers over
+  # a target dir prepared by post-build.sh, in the build's order, so that class
+  # of failure fails here in about a minute instead. It also pins the
+  # anti-baked-password guard (geekdojo/geekdojo-brain#546, F14).
+  rootfs-shadow:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The same pinned checkout release.yml uses, so the mkusers this runs is
+      # the mkusers the image build runs. Shallow; ~1 minute.
+      - name: Check out the pinned Buildroot
+        run: ./scripts/init-buildroot.sh
+      - name: Rootfs /etc/shadow ordering + baked-password guard
+        run: sh test/rootfs-shadow-test.sh
 
   # release.yml's sign step runs scripts/verify-bundle.sh on every signed
   # .raucb: rauc info under the system.conf + keyring read out of that SKU's
