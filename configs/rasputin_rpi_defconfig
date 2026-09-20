@@ -59,7 +59,7 @@ BR2_TARGET_GENERIC_GETTY_PORT="ttyS0"
 # hashed by the control plane and delivered to every node over its own command
 # lane (console.root_hash, rasputin-control-plane#363). For that to be
 # applicable at all, root's shadow entry has to be writable at runtime — see
-# post-build.sh, which moves /etc/shadow onto the persistent partition. Until a
+# post-fakeroot.sh, which moves /etc/shadow onto the persistent partition. Until a
 # hash is delivered, the lock stands: no password opens a console, and key-only
 # SSH is unaffected because dropbear's public-key path never reads the field.
 # geekdojo/geekdojo-brain#546.
@@ -202,5 +202,11 @@ BR2_TARGET_ROOTFS_SQUASHFS4_XZ=y
 # --- overlay + hooks (shared across both arches) ---
 BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_RASPUTIN_PATH)/board/rasputin/common/rootfs-overlay"
 BR2_ROOTFS_POST_BUILD_SCRIPT="$(BR2_EXTERNAL_RASPUTIN_PATH)/board/rasputin/common/post-build.sh"
+# post-fakeroot runs INSIDE fakeroot at the very end of the fakeroot script —
+# after mkusers and makedevs, immediately before the image command. The
+# /etc/shadow swap onto the persistent partition has to happen there and not
+# in post-build: mkusers still rewrites /etc/shadow after post-build and dies
+# on a dangling symlink ("sed: couldn't readlink ..."). See post-fakeroot.sh.
+BR2_ROOTFS_POST_FAKEROOT_SCRIPT="$(BR2_EXTERNAL_RASPUTIN_PATH)/board/rasputin/common/post-fakeroot.sh"
 BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL_RASPUTIN_PATH)/board/rasputin/common/post-image.sh"
 BR2_ROOTFS_POST_SCRIPT_ARGS="rpi"
