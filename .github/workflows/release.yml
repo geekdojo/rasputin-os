@@ -726,6 +726,17 @@ jobs:
 
       - name: Sign .raucb bundles + compress .img + emit signed manifest
         id: sign
+        env:
+          # Through the environment, not expanded into the script text: a
+          # `${{ }}` inside a run block is substituted before the shell ever
+          # sees it, so its value becomes code rather than data. These
+          # particular values are paths the signing action just wrote, but the
+          # rule is the rule (zizmor template-injection), and a step that
+          # follows it is one nobody has to re-reason about later.
+          LEAF: ${{ steps.mat.outputs.leaf }}
+          INTERMEDIATE: ${{ steps.mat.outputs.intermediate }}
+          KEY: ${{ steps.mat.outputs.key }}
+          ROOT: ${{ steps.mat.outputs.root }}
         run: |
           set -eu
           mkdir -p release-out
@@ -741,10 +752,10 @@ jobs:
 
             echo "::group::Sign $sku (compatible=$compatible)"
             rauc bundle \
-              --cert="${{ steps.mat.outputs.leaf }}" \
-              --intermediate="${{ steps.mat.outputs.intermediate }}" \
-              --key="${{ steps.mat.outputs.key }}" \
-              --signing-keyring="${{ steps.mat.outputs.root }}" \
+              --cert="$LEAF" \
+              --intermediate="$INTERMEDIATE" \
+              --key="$KEY" \
+              --signing-keyring="$ROOT" \
               "$d/bundle" \
               "release-out/rasputin-os-${sku}-${ver}.raucb"
 
@@ -807,9 +818,9 @@ jobs:
           # (root CA: https://rasputin.geekdojo.com/rasputin-root-ca.pem)
           openssl cms -sign -binary \
             -in       release-out/manifest.json \
-            -signer   ${{ steps.mat.outputs.leaf }} \
-            -certfile ${{ steps.mat.outputs.intermediate }} \
-            -inkey    ${{ steps.mat.outputs.key }} \
+            -signer   "$LEAF" \
+            -certfile "$INTERMEDIATE" \
+            -inkey    "$KEY" \
             -outform DER \
             -out      release-out/manifest.json.sig
           echo "----- release-out/ -----" && ls -lh release-out/ && \
