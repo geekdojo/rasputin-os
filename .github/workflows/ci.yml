@@ -58,6 +58,17 @@ jobs:
       # pinned here.
       - name: Image clock-floor tests
         run: sh test/clock-floor-test.sh
+      # The firewall image descriptor the image bakes for an offline control
+      # plane (geekdojo/geekdojo-brain#595). Two small files nothing reads on a
+      # healthy network, so a build that stopped baking them ships an image that
+      # looks identical and strands the one operator who needs them — a
+      # greenfield bring-up with no route to the internet. Pinned here: the pin
+      # parses, and every way the bake can go wrong (no pin, a malformed pin, a
+      # failed fetch, a bad signature, no trust root) fails the build instead.
+      # Real openssl over a throwaway PKI; a stub curl serves a fake release
+      # tree, so nothing here touches the network.
+      - name: Baked firewall manifest tests
+        run: sh test/firewall-manifest-test.sh
       # The node id becomes the hostname and the username the agent presents to
       # the bus, which accepts only a DNS label; an id that breaks the rule
       # boots fine and never joins. Table tests for the shared helpers under

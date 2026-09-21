@@ -276,6 +276,13 @@ jobs:
           # Mesh image tarballs from the "Bake mesh container images" step;
           # post-build.sh copies them into /usr/share/rasputin/mesh-images.
           RASPUTIN_MESH_IMAGES_DIR: ${{ github.workspace }}/mesh-images
+          # A PUBLISHED image must carry the offline firewall descriptor: this
+          # is the build where an unverifiable manifest has to stop the line
+          # rather than ship an image that boots fine and strands a greenfield
+          # bring-up. post-build.sh skips the bake without this, so that a
+          # local build and the minimal fixture trees in test/ still work.
+          # geekdojo/geekdojo-brain#595.
+          RASPUTIN_REQUIRE_FIREWALL_MANIFEST: "1"
         run: |
           make -C buildroot BR2_EXTERNAL=${{ github.workspace }} \
             O=${{ github.workspace }}/output/${{ matrix.sku }} \
