@@ -82,6 +82,9 @@ jobs:
 
   build:
     needs: validate
+    permissions:
+      contents: write # matches the workflow default (the vendored-binary fetch reads the public control-plane repo)
+      actions: write  # prune superseded br-<sku>-* cache entries (10 GB repo budget)
     # Scaffold gate — see the header comment.
     # full_build arrives as a real boolean from the UI checkbox but as the
     # STRING "true" via the API / `gh -f`. Accept both. (Defaults to false
@@ -160,6 +163,42 @@ jobs:
       #
       # ccache lives at the default $HOME/.buildroot-ccache (BR2_CCACHE=y, no
       # dir override needed). dl is workspace-relative (BR2_DL_DIR).
+      # Key on real, checked-in files, computed once and reused by the restore,
+      # the save and the prune below.
+      #
+      # NOT buildroot/.git/HEAD — that's a submodule gitlink file, not a
+      # hashable path, and breaks hashFiles ("template is not valid").
+      #
+      # The key used to cover only the defconfig + the init script (which pins
+      # the Buildroot tag), and that quietly broke the cache. 5a9856c (#100)
+      # added CONFIG_PCI_HOST_GENERIC and CONFIG_VIRTIO_PCI/_BLK/_NET to
+      # board/rasputin/rpi/linux.fragment. A fragment change rewrites the
+      # generated autoconf.h, which nearly every kernel translation unit
+      # includes, so nearly every kernel object missed in ccache — but the KEY
+      # was unchanged, so the restore was an exact hit, so the save below was
+      # skipped by its own cache-hit condition and the newly compiled objects
+      # were thrown away at the end of the job. Every later rpi build repeated
+      # the full compile, forever. Measured across 5a9856c, same restored key
+      # br-rpi-39177704…: primary kernel Building 6m23s -> 19m24s, the second
+      # (bcm2711) kernel in post-build.sh 6m29s -> 19m06s, whole arm64 job
+      # 54m49s -> 81m15s. n100 escaped only because its fragment last changed
+      # before its defconfig did.
+      #
+      # So: the fragments and post-build.sh (which compiles the rpi's SECOND
+      # kernel) are part of the key now — it describes what actually determines
+      # the build — and the key carries the run id so the save always writes.
+      - name: Compute Buildroot cache key
+        id: brkey
+        env:
+          BR_CACHE_HASH: ${{ hashFiles(format('configs/{0}', matrix.defconfig), 'scripts/init-buildroot.sh', format('board/rasputin/{0}/*.fragment', matrix.sku), 'board/rasputin/common/post-build.sh') }}
+        run: |
+          set -euo pipefail
+          # hashFiles returns the empty string when NOTHING matched, which would
+          # silently produce a degenerate key. A typo'd path must stop the line.
+          test -n "${BR_CACHE_HASH}" \
+            || { echo "::error::Buildroot cache key hashed no files — a path in the key expression is wrong"; exit 1; }
+          echo "key=br-${{ matrix.sku }}-${BR_CACHE_HASH}" >> "$GITHUB_OUTPUT"
+
       - name: Restore Buildroot dl + ccache
         id: brcache
         uses: actions/cache/restore@v4
@@ -167,16 +206,19 @@ jobs:
           path: |
             dl
             ~/.buildroot-ccache
-          # Key on real, checked-in files: the defconfig + the init script
-          # (which pins the Buildroot tag). Both exist at checkout time.
-          # NOT buildroot/.git/HEAD — that's a submodule gitlink file, not a
-          # hashable path, and breaks hashFiles ("template is not valid").
-          key: br-${{ matrix.sku }}-${{ hashFiles(format('configs/{0}', matrix.defconfig), 'scripts/init-buildroot.sh') }}
-          # Fall back to the rpi cache for warm-start: pi4 shares the fork kernel
-          # tarball (dl/) + the glibc/A72 toolchain ccache with rpi, so it isn't
-          # a fully-cold ~2h build. Harmless for n100 (content-addressed ccache
-          # won't match the x86 toolchain).
+          # Rolling key: <sku>-<hash>-<run id>. The run id makes the primary key
+          # unique per run, so every run restores through restore-keys (a prefix
+          # match on the newest entry) and then writes its own objects back
+          # under a fresh key. That is what lets the ccache re-warm itself after
+          # a change that invalidates its contents without changing the hash.
+          key: ${{ steps.brkey.outputs.key }}-${{ github.run_id }}
+          # In order: the newest entry for this exact source state; then any
+          # entry for this SKU; then the rpi cache for warm-start — pi4 shares
+          # the fork kernel tarball (dl/) + the glibc/A72 toolchain ccache with
+          # rpi, so it isn't a fully-cold ~2h build. Harmless for n100
+          # (content-addressed ccache won't match the x86 toolchain).
           restore-keys: |
+            ${{ steps.brkey.outputs.key }}-
             br-${{ matrix.sku }}-
             br-rpi-
 
@@ -291,16 +333,57 @@ jobs:
             O=${{ github.workspace }}/output/${{ matrix.sku }}
 
       # Save even when Build fails (if: always) so the next bring-up iteration
-      # gets a warm ccache. Skip when restore was an exact key hit (nothing
-      # new to store under that key). See the Restore step's rationale.
+      # gets a warm ccache.
+      #
+      # There is deliberately NO cache-hit condition here any more. The old one
+      # (cache-hit != 'true') is what made the poisoned ccache permanent: an
+      # exact key hit meant "nothing new to store", which was false whenever the
+      # job had done real compilation under an unchanged key. A run that
+      # compiles always writes its objects back now. The rolling run id in the
+      # key means each save lands on a fresh entry rather than being refused,
+      # and the prune step below keeps that from accumulating.
       - name: Save Buildroot dl + ccache
-        if: always() && steps.brcache.outputs.cache-hit != 'true'
+        id: brsave
+        if: always()
         uses: actions/cache/save@v4
         with:
           path: |
             dl
             ~/.buildroot-ccache
-          key: br-${{ matrix.sku }}-${{ hashFiles(format('configs/{0}', matrix.defconfig), 'scripts/init-buildroot.sh') }}
+          key: ${{ steps.brkey.outputs.key }}-${{ github.run_id }}
+
+      # A repository gets 10 GB of Actions cache in total and these entries run
+      # ~2.5 GB each, so a key that writes every run has to clean up after
+      # itself — otherwise this fix would cause the very eviction it exists to
+      # prevent. Keep only the entry this run just wrote, per SKU; the two SKUs
+      # prune disjoint prefixes (br-n100-, br-rpi-) so the parallel matrix jobs
+      # cannot step on each other.
+      - name: Prune superseded Buildroot caches
+        if: always() && steps.brsave.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREFIX: br-${{ matrix.sku }}-
+          KEEP: ${{ steps.brkey.outputs.key }}-${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/caches?per_page=100" \
+            --jq '.actions_caches[] | [.id, .key] | @tsv' > caches.tsv
+          # Refuse to delete anything unless the entry we mean to keep is
+          # really listed — otherwise a bad KEEP would wipe this SKU's ccache.
+          if ! cut -f2 caches.tsv | grep -qxF "$KEEP"; then
+            echo "::warning::$KEEP is not in the cache list — pruning nothing"
+            exit 0
+          fi
+          while IFS="$(printf '\t')" read -r id key; do
+            case "$key" in
+              "$PREFIX"*)
+                if [ "$key" = "$KEEP" ]; then continue; fi
+                echo "deleting cache $key (id $id)"
+                gh api -X DELETE "repos/${GITHUB_REPOSITORY}/actions/caches/$id" >/dev/null
+                ;;
+            esac
+          done < caches.tsv
+          rm -f caches.tsv
 
       - name: Upload unsigned artifacts
         uses: actions/upload-artifact@v4
