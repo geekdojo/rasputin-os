@@ -366,8 +366,15 @@ jobs:
           KEEP: ${{ steps.brkey.outputs.key }}-${{ github.run_id }}
         run: |
           set -euo pipefail
+          # select(.ref == env.GITHUB_REF) is load-bearing. Actions caches are
+          # scoped per ref: a run on a branch or a tag can READ the default
+          # branch's entries, but the REST delete below is not ref-aware and
+          # would happily delete main's. Without this filter a single
+          # workflow_dispatch on a branch — a bench build, a CI experiment —
+          # silently destroys the cache main depends on, and main's next build
+          # runs fully cold. Only ever prune entries belonging to THIS ref.
           gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/caches?per_page=100" \
-            --jq '.actions_caches[] | [.id, .key] | @tsv' > caches.tsv
+            --jq '.actions_caches[] | select(.ref == env.GITHUB_REF) | [.id, .key] | @tsv' > caches.tsv
           # Refuse to delete anything unless the entry we mean to keep is
           # really listed — otherwise a bad KEEP would wipe this SKU's ccache.
           if ! cut -f2 caches.tsv | grep -qxF "$KEEP"; then
