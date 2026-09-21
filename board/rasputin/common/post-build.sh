@@ -217,6 +217,133 @@ fi
 ln -sf /etc/systemd/system/rasputin-mesh-images.service \
 	"$TARGET_DIR/etc/systemd/system/multi-user.target.wants/rasputin-mesh-images.service"
 
+# ── the PINNED firewall release manifest ─────────────────────────────────────
+#
+# Bake the firewall image DESCRIPTOR — manifest.json plus its detached CMS
+# signature, ~2.7 KB, NOT the 60 MB image — into the rootfs, so a controlplane
+# with no route to the internet can still tell a flashing laptop which firewall
+# image to write and what its checksum is.
+#
+# The loop this closes. rasputin-fallback-address.service hands a controlplane
+# 192.168.1.2/24 with NO default gateway, deliberately (rasputin-os#53): that
+# path exists for exactly the case where the firewall is not up yet and nothing
+# serves DHCP. On it the CP has no internet, and GET /api/cluster/firewall-image
+# is a pure lookup against api.github.com — so it fails, flash.sh dies fetching
+# the descriptor, and the operator cannot flash the firewall that would restore
+# the internet the lookup needed. The api reads this baked pair as its fallback
+# and populates manifestB64/manifestSigB64; flash.sh already verifies those
+# against a root CA pinned inside itself and refuses a checksum that disagrees,
+# so nothing on the client needs to change. geekdojo/geekdojo-brain#595.
+#
+# This is the same chicken-and-egg removal as the baked mesh images above, and
+# what design/principles.md:28 already requires: "Every component must stand
+# alone — no chicken-and-egg or hardware-coupled dependencies."
+#
+# WHY A PIN, NOT "latest at build time". "Latest" is the shape that burned
+# 2026.09.2 — an unversioned upstream URL moved between a green pre-flight and
+# the tag build, and because release tags are immutable the version was lost
+# (geekdojo/geekdojo-brain#208). It also makes the image non-reproducible and
+# records nowhere which firewall release a given OS image trusts. The pinned
+# version is the compatibility statement; see firewall-pin.txt for the bump
+# discipline.
+#
+# WHY THIS IS FAIL-CLOSED. An image that quietly ships without the descriptor
+# boots, looks identical, and fails only later, in front of an operator on an
+# isolated segment who now cannot flash anything — the invisible failure this
+# whole change exists to remove. So every step below is a hard build failure,
+# never a warning: no pin, a malformed pin, a failed fetch, a missing trust
+# root, a signature that does not verify, or a manifest for some other version.
+# That includes a LOCAL dev build with no root-ca.pem: drop the public root CA
+# at board/rasputin/common/rootfs-overlay/etc/rasputin/trust/root-ca.pem as
+# that directory's README already describes (CI injects it there from
+# vars.RASPUTIN_ROOT_CA_PEM before the build).
+#
+# The network fetch is not a new dependency for the build job — it already
+# downloads the vendored agent/api tarballs and the mesh images from the same
+# runner.
+FW_PIN="$SCRIPT_DIR/firewall-pin.txt"
+FW_ROOT_CA="$TARGET_DIR/etc/rasputin/trust/root-ca.pem"
+FW_DEST="$TARGET_DIR/usr/share/rasputin/firewall"
+FW_RELEASES="https://github.com/geekdojo/rasputin-openwrt-firewall/releases/download"
+FW_TMP=""
+
+fw_die() {
+	echo "post-build: ERROR — $1" >&2
+	echo "post-build:   Refusing to build an image whose offline firewall descriptor is missing: it would boot fine and strand a greenfield bring-up. geekdojo/geekdojo-brain#595." >&2
+	if [ -n "$FW_TMP" ]; then rm -rf "$FW_TMP"; fi
+	exit 1
+}
+
+[ -f "$FW_PIN" ] || fw_die "no firewall pin file at $FW_PIN — nothing says which firewall release this image trusts"
+
+# Exactly one non-comment, non-blank line. awk prints it stripped and exits
+# non-zero for any other count, so an empty pin and a pin somebody appended a
+# second version to both fail here rather than baking an arbitrary one.
+FW_VERSION="$(awk '
+	/^[ \t]*#/ { next }
+	/^[ \t]*$/ { next }
+	{ sub(/^[ \t]+/, ""); sub(/[ \t]+$/, ""); print; n++ }
+	END { exit (n == 1 ? 0 : 1) }' "$FW_PIN")" \
+	|| fw_die "$FW_PIN must hold exactly one non-comment, non-blank line naming the firewall version"
+
+# Bare CalVer, no leading "v" — the firewall's tags are bare and this string is
+# pasted into the asset URL verbatim, so a "v" here is a 404 at fetch time and
+# a wrong-looking version everywhere the api reports it.
+printf '%s\n' "$FW_VERSION" | grep -Eq '^[0-9]{4}\.[0-9]{2}\.[0-9]+(-dev\.[0-9]+)?$' \
+	|| fw_die "'$FW_VERSION' in $FW_PIN is not a bare CalVer firewall version (YYYY.MM.MICRO[-dev.N], no leading 'v')"
+
+if command -v curl >/dev/null 2>&1; then
+	fw_fetch() { curl -fsSL --retry 3 -o "$2" "$1"; }
+elif command -v wget >/dev/null 2>&1; then
+	fw_fetch() { wget -q -O "$2" "$1"; }
+else
+	fw_die "neither curl nor wget is on PATH; cannot fetch the pinned firewall descriptor"
+fi
+
+FW_TMP="$(mktemp -d)"
+for fw_asset in manifest.json manifest.json.sig; do
+	fw_fetch "$FW_RELEASES/$FW_VERSION/$fw_asset" "$FW_TMP/$fw_asset" \
+		|| fw_die "could not fetch $FW_RELEASES/$FW_VERSION/$fw_asset — the pinned firewall release may not exist, or may not publish that asset (releases before 2026.09.4-dev.127 have no manifest.json.sig)"
+	[ -s "$FW_TMP/$fw_asset" ] \
+		|| fw_die "$fw_asset for firewall $FW_VERSION downloaded empty from $FW_RELEASES/$FW_VERSION/$fw_asset"
+done
+
+# Verify BEFORE installing, against the very trust root this image ships — the
+# file /etc/rauc/system.conf names as its keyring, already copied into the
+# target by the rootfs overlay (Buildroot copies overlays immediately before it
+# runs this script). Verifying against the image's own root, rather than a copy
+# fetched alongside the manifest, is the point: it proves the descriptor chains
+# to the same publisher the node already trusts for its own updates.
+# manifest.json.sig is a detached DER CMS signature over manifest.json, the
+# same form release.yml emits for this repo's manifest.
+[ -s "$FW_ROOT_CA" ] \
+	|| fw_die "no trust root at $FW_ROOT_CA — the firewall manifest's signature cannot be checked, and an unverified descriptor is not going in the image"
+command -v openssl >/dev/null 2>&1 \
+	|| fw_die "openssl is not on PATH; cannot verify the firewall manifest signature"
+if ! openssl cms -verify -binary -inform DER \
+	-in "$FW_TMP/manifest.json.sig" \
+	-content "$FW_TMP/manifest.json" \
+	-CAfile "$FW_ROOT_CA" \
+	-out /dev/null 2>"$FW_TMP/verify.err"; then
+	sed 's/^/post-build:   openssl: /' "$FW_TMP/verify.err" >&2
+	fw_die "the firewall manifest for $FW_VERSION does not verify against $FW_ROOT_CA"
+fi
+
+# The pin is a compatibility statement, so the signed bytes must be for the
+# release the pin names. A correctly-signed manifest for some OTHER version
+# would otherwise install silently and quietly defeat the pin.
+grep -Eq "\"version\"[[:space:]]*:[[:space:]]*\"$FW_VERSION\"" "$FW_TMP/manifest.json" \
+	|| fw_die "the signed manifest fetched for $FW_VERSION does not name that version — it describes a different firewall release"
+
+mkdir -p "$FW_DEST"
+chmod 0755 "$FW_DEST"
+cp "$FW_TMP/manifest.json" "$FW_DEST/manifest.json"
+cp "$FW_TMP/manifest.json.sig" "$FW_DEST/manifest.json.sig"
+chmod 0644 "$FW_DEST/manifest.json" "$FW_DEST/manifest.json.sig"
+rm -rf "$FW_TMP"
+FW_TMP=""
+echo "post-build: baked the firewall image descriptor for $FW_VERSION into /usr/share/rasputin/firewall (signature verified against /etc/rasputin/trust/root-ca.pem) — an offline controlplane can still answer GET /api/cluster/firewall-image"
+
 # rasputin-api.service is intentionally NOT symlinked here — preset-all
 # enables it; the role.controlplane marker condition gates the actual start
 # (provisioning.md §2).

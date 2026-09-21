@@ -1,0 +1,45 @@
+# firewall-pin.txt — the ONE firewall release this OS image bakes a manifest for.
+#
+# Format: exactly one non-comment, non-blank line holding a bare CalVer version
+# — no leading "v", because the firewall's release tags are bare CalVer
+# (2026.09.4-dev.127, not v2026.09.4-dev.127) and the release asset URL is built
+# from this line verbatim. Anything else fails the build in post-build.sh.
+#
+# WHAT IT IS FOR
+#
+# post-build.sh fetches this release's manifest.json + manifest.json.sig,
+# verifies the signature against the image's own trust root, and bakes both into
+# the rootfs at /usr/share/rasputin/firewall/. The control plane serves that
+# baked descriptor from GET /api/cluster/firewall-image when it cannot reach
+# api.github.com — which is exactly the greenfield bring-up the no-DHCP fallback
+# address exists for: a controlplane on 192.168.1.2/24 with no default gateway
+# has no internet, so an unbaked image leaves the operator unable to flash the
+# firewall that would give it one. geekdojo/geekdojo-brain#595.
+#
+# WHY A PIN AND NOT "LATEST AT BUILD TIME"
+#
+# "Latest" is the shape that burned 2026.09.2: the firewall build followed an
+# unversioned Snort3 rules URL, Talos republished between a green pre-flight and
+# the tag build, the SHA mismatched, and because release tags are immutable the
+# version was lost and the line re-cut as 2026.09.3 (geekdojo/geekdojo-brain#208,
+# rasputin-openwrt-firewall PR #48). A build-time "latest" also makes the image
+# non-reproducible and records nowhere which firewall release a given OS image
+# actually trusts.
+#
+# SO THIS LINE IS A COMPATIBILITY STATEMENT, NOT A BUILD-TIME ACCIDENT:
+# *this OS release was validated against this firewall release.* Bump it
+# DELIBERATELY — as its own reviewed change, after the paired firewall release
+# has been flashed and exercised — never as a drive-by refresh to "pick up the
+# newest firewall", and never automatically.
+#
+# WHY THIS VALUE
+#
+# 2026.09.4-dev.127 (published 2026-09-20T18:03:17Z) is the FIRST firewall
+# release that publishes manifest.json.sig; dev.126 and earlier ship no sig
+# asset, so there is nothing for post-build.sh to verify and nothing the
+# flashing laptop could check. Its signature chains to the published Rasputin
+# root CA (leaf CN=Rasputin Bundle Signing leaf-003, release OID
+# 1.3.6.1.4.1.66587.1.1.1) — the same root this image bakes at
+# /etc/rasputin/trust/root-ca.pem.
+#
+2026.09.4-dev.127
