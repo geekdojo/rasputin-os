@@ -300,6 +300,31 @@ else
 	fw_die "neither curl nor wget is on PATH; cannot fetch the pinned firewall descriptor"
 fi
 
+# Whether an unverifiable manifest is FATAL is declared by the caller, not
+# inferred from the tree. release.yml's "Inject trust root" step is
+# unconditional in the build job, so every published image has one; what does
+# not is a local dev build, or a minimal fixture tree — test/rootfs-shadow-test.sh
+# hands this script one of those, and dying here failed four of its cases for a
+# reason that had nothing to do with /etc/shadow.
+#
+# So a release build sets RASPUTIN_REQUIRE_FIREWALL_MANIFEST=1 and an
+# unverifiable manifest stops it. Everywhere else it is a loud skip: refusing
+# to produce a dev image buys nothing, because the image that must carry the
+# descriptor is the one that gets published.
+FW_SKIP=0
+if [ ! -s "$FW_ROOT_CA" ]; then
+	if [ "${RASPUTIN_REQUIRE_FIREWALL_MANIFEST:-0}" = "1" ]; then
+		fw_die "no trust root at $FW_ROOT_CA — the firewall manifest's signature cannot be checked, and an unverified descriptor is not going in the image"
+	fi
+	FW_SKIP=1
+	echo "post-build: WARNING — no trust root at $FW_ROOT_CA; SKIPPING the firewall manifest bake." >&2
+	echo "post-build:   This image gets no offline firewall descriptor, so a control plane flashed" >&2
+	echo "post-build:   from it cannot name a firewall image with no internet. Expected for a local" >&2
+	echo "post-build:   build; a release build sets RASPUTIN_REQUIRE_FIREWALL_MANIFEST=1 and fails" >&2
+	echo "post-build:   instead. geekdojo/geekdojo-brain#595." >&2
+fi
+
+if [ "$FW_SKIP" = "0" ]; then
 FW_TMP="$(mktemp -d)"
 for fw_asset in manifest.json manifest.json.sig; do
 	fw_fetch "$FW_RELEASES/$FW_VERSION/$fw_asset" "$FW_TMP/$fw_asset" \
@@ -316,8 +341,6 @@ done
 # to the same publisher the node already trusts for its own updates.
 # manifest.json.sig is a detached DER CMS signature over manifest.json, the
 # same form release.yml emits for this repo's manifest.
-[ -s "$FW_ROOT_CA" ] \
-	|| fw_die "no trust root at $FW_ROOT_CA — the firewall manifest's signature cannot be checked, and an unverified descriptor is not going in the image"
 command -v openssl >/dev/null 2>&1 \
 	|| fw_die "openssl is not on PATH; cannot verify the firewall manifest signature"
 if ! openssl cms -verify -binary -inform DER \
@@ -343,6 +366,7 @@ chmod 0644 "$FW_DEST/manifest.json" "$FW_DEST/manifest.json.sig"
 rm -rf "$FW_TMP"
 FW_TMP=""
 echo "post-build: baked the firewall image descriptor for $FW_VERSION into /usr/share/rasputin/firewall (signature verified against /etc/rasputin/trust/root-ca.pem) — an offline controlplane can still answer GET /api/cluster/firewall-image"
+fi
 
 # rasputin-api.service is intentionally NOT symlinked here — preset-all
 # enables it; the role.controlplane marker condition gates the actual start

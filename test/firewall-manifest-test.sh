@@ -233,10 +233,26 @@ check "a manifest naming another version fails the build" \
 check "  and bakes nothing" "$(baked)" "no"
 
 # No trust root in the target: there is nothing to verify against, and an
-# unverified descriptor is not going in the image.
-prep noca "$PIN_VERSION" NOCA; out=$(run n100 "$GOOD"); rc=$?
-check "a missing trust root fails the build" "$([ "$rc" -ne 0 ] && echo yes || echo no)" "yes"
+# unverified descriptor is not going in a PUBLISHED image. Whether that stops
+# the build is DECLARED by the caller, not inferred from the tree.
+#
+# The first cut of this feature died here unconditionally, and failed four
+# unrelated cases in test/rootfs-shadow-test.sh -- that suite hands post-build
+# a minimal fixture tree with no trust root, for reasons that have nothing to
+# do with the firewall. release.yml's build job injects a trust root
+# unconditionally, so only a local build or a fixture ever lacks one.
+prep noca "$PIN_VERSION" NOCA
+out=$(RASPUTIN_REQUIRE_FIREWALL_MANIFEST=1 run n100 "$GOOD"); rc=$?
+check "a missing trust root fails a REQUIRED build" "$([ "$rc" -ne 0 ] && echo yes || echo no)" "yes"
 check "  and bakes nothing" "$(baked)" "no"
+
+prep noca2 "$PIN_VERSION" NOCA; out=$(run n100 "$GOOD"); rc=$?
+check "without the requirement it SKIPS instead of failing" "$rc" "0"
+check "  and still bakes nothing" "$(baked)" "no"
+case "$out" in
+	*"SKIPPING the firewall manifest bake"*) echo "ok   — and says loudly what that image will lack" ;;
+	*) echo "FAIL — and says loudly what that image will lack: got '$out'"; fails=$((fails + 1)) ;;
+esac
 
 echo
 echo "4. the wiring"
@@ -246,6 +262,10 @@ grep -q 'usr/share/rasputin/firewall' "$POSTBUILD" \
 	|| { echo "FAIL — post-build installs to the contract path the api reads"; fails=$((fails + 1)); }
 # Never "latest": that is the failure this pin exists to prevent, and it would
 # pass every case above.
+# The requirement has to actually be declared where published images are built.
+grep -q 'RASPUTIN_REQUIRE_FIREWALL_MANIFEST: "1"' "$ROOT/.github/workflows/release.yml" \
+	&& echo "ok   — release.yml requires the bake for published images" \
+	|| { echo "FAIL — release.yml requires the bake for published images"; fails=$((fails + 1)); }
 grep -q 'releases/latest' "$POSTBUILD" \
 	&& { echo "FAIL — post-build must never fetch the LATEST firewall release"; fails=$((fails + 1)); } \
 	|| echo "ok   — post-build fetches only the pinned tag, never 'latest'"
