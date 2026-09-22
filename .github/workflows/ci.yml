@@ -86,6 +86,21 @@ jobs:
           exit $fail
       - name: Controlplane fallback-address tests
         run: sh test/fallback-address-test.sh
+      # The wired uplink's DHCP client-id. /etc is a read-only squashfs, so the
+      # machine-id is transient and networkd's default DUID client-id changes on
+      # every reboot — the DHCP server sees a new client and hands out a new
+      # address (measured on the bench: one MAC, two live leases, .232 then
+      # .231). ClientIdentifier=mac is what stops it, and dropping it would look
+      # identical in a build and in a boot log, so it is pinned here.
+      - name: Wired uplink config tests
+        run: sh test/wired-network-test.sh
+      # The stock units this image masks. A mask is a /dev/null symlink, which
+      # is the easiest thing in the overlay to lose to a rebase or a copy that
+      # resolves links — and losing it looks identical in a build, while the
+      # unmasked unit goes back to failing on every boot and keeping
+      # `systemctl --failed` permanently non-empty.
+      - name: Masked-unit tests
+        run: sh test/masked-units-test.sh
       # The image's clock floor is an mtime on an empty file: a build that
       # silently stops baking it looks identical and puts every offline first
       # boot back to minting already-expired certificates
