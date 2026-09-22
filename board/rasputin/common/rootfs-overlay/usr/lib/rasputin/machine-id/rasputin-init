@@ -1,0 +1,218 @@
+#!/bin/sh
+#
+# rasputin-init — the PID 1 shim that hands systemd a PERSISTENT machine-id.
+#
+# post-build.sh points /sbin/init at this script, so the KERNEL runs it as PID 1
+# and it execs the real systemd as its last act. Nothing else about the boot
+# changes.
+#
+# ── why PID 1 and not a unit ──────────────────────────────────────────────────
+#
+# /etc is a read-only squashfs, so systemd cannot store a machine-id. It mints a
+# random one into /run/machine-id and bind-mounts it over /etc/machine-id, and it
+# does that in machine_id_setup() — BEFORE the manager exists, so before
+# generators run and long before the first unit. Measured on cp-compute2 across
+# three reboots: e0d5a650… → f1d7a2b2… → b98cc8fe… (geekdojo-brain#600).
+#
+# That ordering is the whole problem. Anything that runs as a unit — a generator,
+# a .mount ordered into sysinit.target, firstboot — is LATE: PID 1 has already
+# cached the transient id and journald has already opened
+# /run/log/journal/<transient>/system.journal and stamped _MACHINE_ID on every
+# entry so far. Replacing /etc/machine-id underneath them leaves PID 1 and
+# journald on the old value while later readers see the new one, which is worse
+# than today's at-least-consistent-per-boot behaviour. So the value has to be in
+# place before systemd starts, and on this image there are exactly two places
+# earlier than systemd: an initrd, and /sbin/init.
+#
+#   - initrd: there is none (`/proc/cmdline`: root=PARTUUID=… rootfstype=squashfs
+#     ro rootwait — no initrd=), and introducing one means changing the boot
+#     media, which RAUC does not update (post-image.sh puts only rootfs.img in
+#     the bundle) — so it would reach a node only at its next REFLASH.
+#   - systemd.machine_id= on the kernel command line: same problem, and worse,
+#     because the value is per-node, so the boot FAT / grub.cfg would have to be
+#     rewritten on a running node — bootloader surgery with no fallback on the Pi.
+#   - /sbin/init: lives in the rootfs, which is exactly what RAUC updates, and is
+#     covered by the existing A/B rollback if it ever breaks.
+#
+# systemd's own answer for a read-only /etc is systemd-machine-id-commit.service,
+# which commits the transient id once /etc becomes writable. Ours never does —
+# the unit is skipped on every boot with "ConditionPathIsReadWrite=/etc was not
+# met" (bench.local, 2026-09-22). This script plus
+# rasputin-machine-id-commit.service are the same idea with the persistent
+# partition standing in for a writable /etc.
+#
+# ── what it does ──────────────────────────────────────────────────────────────
+#
+# Mount the persistent partition read-only, read /var/lib/rasputin/machine-id,
+# unmount, and — if and only if that value is a well-formed machine-id — write it
+# to /run/machine-id and bind-mount that over /etc/machine-id. That is byte for
+# byte the end state systemd produces today (same path, same 0444, same bind);
+# only the VALUE is different, and systemd's machine_id_setup() then finds a
+# valid /etc/machine-id and mints nothing.
+#
+# It never creates, formats or writes the persistent partition. The id is put
+# there by rasputin-machine-id-commit.service, which runs as an ordinary unit
+# once the partition is properly mounted. So the FIRST boot of a node (and the
+# first boot after this lands on a fielded node) still uses a transient id —
+# that id is then committed and kept for the node's lifetime.
+#
+# ── the one rule ──────────────────────────────────────────────────────────────
+#
+# THIS SCRIPT MUST ALWAYS REACH THE HAND-OFF. It is PID 1: an exit, a hang or a
+# non-zero `set -e` trip is an unbootable node, and the kernel does not fall back
+# (it panics with "Requested init … failed"). So there is no `set -e`, no
+# `set -u`, every command is guarded, and every path through the script ends at
+# hand_off. A node whose persistent partition is missing, unformatted, wedged or
+# empty boots exactly as it does today, with a transient id. test/machine-id-test.sh
+# pins that, including the case where every helper binary is absent.
+#
+# Overrides are read ONLY when this is not PID 1 and RASPUTIN_INIT_TEST is set,
+# so the real boot path takes nothing from the environment. (The kernel passes
+# unrecognised cmdline key=value pairs to init as environment variables, and
+# anyone who can write the kernel command line can already pass init=/bin/sh —
+# but there is no reason to widen that.)
+
+SYSTEMD=/usr/lib/systemd/systemd
+
+hand_off() {
+	exec "$SYSTEMD" "$@"
+	# Unreachable unless exec itself failed (systemd deleted from the rootfs).
+	# Nothing useful is left to try; let the kernel report it.
+	exit 1
+}
+
+if [ "$$" -eq 1 ]; then
+	# The real boot. Fixed paths; nothing is taken from the environment.
+	ROOT=
+	MOUNT=/bin/mount
+	UMOUNT=/bin/umount
+	FINDFS=/usr/sbin/findfs
+	KMSG=/dev/kmsg
+elif [ -n "${RASPUTIN_INIT_TEST:-}" ]; then
+	# test/machine-id-test.sh runs this script unprivileged against a scratch
+	# tree with stub mount/umount/findfs and a stub hand-off target.
+	ROOT=${RASPUTIN_INIT_ROOT:-}
+	MOUNT=${RASPUTIN_INIT_MOUNT:-/bin/mount}
+	UMOUNT=${RASPUTIN_INIT_UMOUNT:-/bin/umount}
+	FINDFS=${RASPUTIN_INIT_FINDFS:-/usr/sbin/findfs}
+	KMSG=${RASPUTIN_INIT_KMSG:-/dev/null}
+	SYSTEMD=${RASPUTIN_INIT_SYSTEMD:-$SYSTEMD}
+else
+	# Somebody ran /sbin/init by hand. Behave exactly as the symlink used to.
+	hand_off "$@"
+fi
+
+PERSIST_LABEL=persistent
+PERSIST_MNT=$ROOT/var/lib/rasputin
+RUN=$ROOT/run
+RUN_MACHINE_ID=$RUN/machine-id
+ETC_MACHINE_ID=$ROOT/etc/machine-id
+PROC=$ROOT/proc
+
+# Log to /dev/kmsg: journald imports the kernel ring buffer, so these lines end
+# up in the journal even though nothing is running yet to receive them. stderr
+# is the console at this point, which is where a failed boot is read from.
+log() {
+	echo "rasputin-init: $*" >&2
+	echo "rasputin-init: $*" >"$KMSG" 2>/dev/null
+}
+
+# machine_id_valid VALUE — systemd's own rule: exactly 32 lowercase hex digits,
+# not all zeros. Anything else is refused rather than passed on, because a
+# malformed /etc/machine-id would make systemd mint a transient one anyway and
+# we would have spent a mount to arrive back where we started.
+machine_id_valid() {
+	[ "${#1}" -eq 32 ] || return 1
+	case "$1" in
+		*[!0123456789abcdef]*) return 1 ;;
+		00000000000000000000000000000000) return 1 ;;
+	esac
+	return 0
+}
+
+# is_mounted PATH — true when PATH is a mount point. Reads /proc/self/mounts
+# directly: `mountpoint` is not on this image and the kernel has not mounted
+# /proc for us.
+is_mounted() {
+	[ -r "$PROC/self/mounts" ] || return 1
+	while read -r _im_src _im_dst _im_rest; do
+		[ "$_im_dst" = "$1" ] && return 0
+	done <"$PROC/self/mounts"
+	return 1
+}
+
+# ── /proc ────────────────────────────────────────────────────────────────────
+# Needed twice: to see what is already mounted, and so libblkid (findfs) can
+# enumerate block devices from /proc/partitions — udev is not running, so
+# /dev/disk/by-label is empty. Mounted with systemd's own mount_setup() options
+# so that a failure to unmount it below leaves an end state identical to a
+# normal boot. /dev is already there: the kernel mounts devtmpfs itself
+# (CONFIG_DEVTMPFS_MOUNT=y, confirmed in /proc/config.gz on bench.local).
+proc_is_ours=
+if [ ! -r "$PROC/self/mounts" ]; then
+	if "$MOUNT" -t proc -o nosuid,nodev,noexec proc "$PROC" 2>/dev/null; then
+		proc_is_ours=yes
+	fi
+fi
+
+# ── read the stored id ───────────────────────────────────────────────────────
+# By filesystem LABEL, which post-image.sh's `mke2fs -L persistent` gives both
+# SKUs — so one lookup serves the n100's GPT and the rpi's MBR, whose fstabs
+# address the same partition differently (PARTLABEL vs PARTUUID). Mounted over
+# its own final mountpoint, which is baked and empty, so no scratch directory is
+# needed on a read-only rootfs; systemd's fstab unit mounts it properly (rw,
+# x-systemd.growfs) later in local-fs.target.
+stored_id=
+persist_dev=$("$FINDFS" "LABEL=$PERSIST_LABEL" 2>/dev/null)
+if [ -n "$persist_dev" ]; then
+	if "$MOUNT" -t ext4 -o ro,nosuid,nodev,noexec "$persist_dev" "$PERSIST_MNT" 2>/dev/null; then
+		# read -r, not cat: the file is one short line and this needs no fork.
+		# Guarded by -r because a redirection onto a missing file is an error
+		# the shell reports, not a value.
+		if [ -r "$PERSIST_MNT/machine-id" ]; then
+			read -r stored_id <"$PERSIST_MNT/machine-id" 2>/dev/null
+		fi
+		"$UMOUNT" "$PERSIST_MNT" 2>/dev/null
+	fi
+fi
+
+# ── deliver it ───────────────────────────────────────────────────────────────
+if [ -n "$stored_id" ] && machine_id_valid "$stored_id"; then
+	# /run is where systemd itself puts the machine-id, so put it there with
+	# systemd's exact mount_setup() options: it skips a /run that is already a
+	# mount point, and matching the options means it cannot tell the difference.
+	# Do not "simplify" these — a plain `mount -t tmpfs tmpfs /run` would ship a
+	# /run with no size limit, no nr_inodes limit and nosuid/nodev off.
+	if is_mounted "$RUN" || "$MOUNT" -t tmpfs \
+		-o mode=0755,nosuid,nodev,strictatime,size=20%,nr_inodes=800k \
+		tmpfs "$RUN" 2>/dev/null
+	then
+		# 0444 via umask rather than a chmod: same mode systemd gives its own
+		# /run/machine-id, and one fewer binary this has to find as PID 1.
+		if (umask 0222; printf '%s\n' "$stored_id" >"$RUN_MACHINE_ID") 2>/dev/null; then
+			# -o bind is understood by both busybox and util-linux mount
+			# (the idiom rasputin-coredump-store.service already uses).
+			if "$MOUNT" -o bind "$RUN_MACHINE_ID" "$ETC_MACHINE_ID" 2>/dev/null; then
+				log "machine-id $stored_id restored from the persistent partition"
+			else
+				# systemd will overwrite /run/machine-id with a transient value
+				# and bind that instead, which is exactly today's behaviour.
+				log "could not bind /run/machine-id over /etc/machine-id; falling back to a transient id"
+			fi
+		else
+			log "could not write /run/machine-id; falling back to a transient id"
+		fi
+	else
+		log "could not mount /run; falling back to a transient id"
+	fi
+else
+	# Expected on the first boot of a node and on the first boot after this
+	# image lands on a fielded one: rasputin-machine-id-commit.service has not
+	# written the store yet. It will, from this boot's transient id.
+	log "no stored machine-id yet; this boot uses a transient id"
+fi
+
+# Leave nothing behind that systemd would not have made itself.
+[ -n "$proc_is_ours" ] && "$UMOUNT" "$PROC" 2>/dev/null
+
+hand_off "$@"
