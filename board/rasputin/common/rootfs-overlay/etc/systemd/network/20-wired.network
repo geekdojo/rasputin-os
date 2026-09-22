@@ -23,3 +23,21 @@ MulticastDNS=yes
 LinkLocalAddressing=ipv4
 # Refuse router advertisements / SLAAC so no IPv6 address appears via RA.
 IPv6AcceptRA=no
+
+[DHCPv4]
+# Key the DHCPv4 lease on the MAC, not on a DUID derived from machine-id.
+# /etc is a read-only squashfs, so systemd cannot persist a machine-id: it
+# generates a TRANSIENT one into /run on every boot and mounts it over
+# /etc/machine-id (whose mtime is therefore boot time). networkd's default
+# ClientIdentifier=duid builds the DHCPv4 client-id from that machine-id, so
+# the client-id is different on EVERY reboot even though the IAID beside it
+# is stable. dnsmasq keys leases on the client-id, sees a brand-new client
+# and allocates a fresh address — measured on the bench 2026-09-22: one MAC,
+# two live leases, two client-ids, .232 before the reboot and .231 after.
+# So node addresses wander, the lease table collects a dead entry per node
+# per reboot, and anything holding a node's address is stranded when the
+# control plane moves out from under it (geekdojo/geekdojo-brain#547).
+# "mac" is the appliance answer: the client-id is the MAC, which a read-only
+# rootfs cannot destabilise, so a node keeps its address across reboots and
+# reflashes like every other device on the network.
+ClientIdentifier=mac
