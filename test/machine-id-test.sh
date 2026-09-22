@@ -216,6 +216,13 @@ commit() {
 handed_off() { [ -f "$W/handoff.args" ]; }
 bound() { grep -qF -- "-o bind $R/run/machine-id $R/etc/machine-id" "$W/mount.calls"; }
 out_has() { printf '%s\n' "$OUT" | grep -qF -- "$1"; }
+# reason_line — the single "…; this boot uses a transient id" line from $OUT.
+# Assertions about how a degrade READS must look at this and not at all of
+# $OUT, which also carries the scratch tree's mktemp path.
+reason_line() { printf '%s\n' "$OUT" | grep -- 'this boot uses a transient id'; }
+# reason_matches ERE — true when the reason line matches. A separate function
+# because `not` takes a command, not a pipeline.
+reason_matches() { reason_line | grep -Eq -- "$1"; }
 file_is() { [ -f "$1" ] && [ "$(cat "$1")" = "$2" ]; }
 perms() { ls -ld "$1" 2>/dev/null | cut -c1-10; }
 
@@ -235,7 +242,11 @@ cases() {
 	ok "restore: bound over /etc/machine-id" "$(yes_if bound)" "$(cat "$W/mount.calls")"
 	ok "restore: /etc/machine-id now reads the stored id" \
 		"$(yes_if file_is "$R/etc/machine-id" "$GOOD_ID")" "$(cat "$R/etc/machine-id" 2>/dev/null)"
-	ok "restore: says so on the console" "$(yes_if out_has "machine-id $GOOD_ID restored")" "$OUT"
+	# Names the device it restored FROM, not just "the persistent partition".
+	# That is the only thing in the log that distinguishes a restore off the
+	# node's own disk from one off a second Rasputin medium left attached.
+	ok "restore: says so on the console, naming the device" \
+		"$(yes_if out_has "machine-id $GOOD_ID restored from /dev/fake1 (LABEL=persistent)")" "$OUT"
 
 	# 2. The persistent partition is mounted READ-ONLY and put back. Leaving it
 	#    mounted would hand systemd's fstab unit a filesystem it did not mount,
@@ -325,11 +336,12 @@ cases() {
 	ok "no store: says a transient id is in use" "$(yes_if out_has 'this boot uses a transient id')" "$OUT"
 	ok "no store: names the partition it mounted and read" \
 		"$(yes_if out_has 'no machine-id stored on /dev/fake1 yet')" "$OUT"
-	# This one is the EXPECTED first boot, so it must not read as a fault —
-	# the fault messages below all say "but". An operator grepping a fresh
-	# node's log should not find one.
-	ok "no store: does not read as a fault" \
-		"$(yes_if not out_has 'but')" "$OUT"
+	# This one is the EXPECTED first boot, so its reason must not read as a
+	# fault. Checked on the REASON LINE alone, not on $OUT: $OUT carries the
+	# scratch tree's mktemp path, and a random temp component containing the
+	# needle would fail the run at random, which is a flake by construction.
+	ok "no store: the reason does not read as a fault" \
+		"$(yes_if not reason_matches 'but|could not|refus|unable|fail')" "$(reason_line)"
 
 	# 9. A malformed store is refused rather than passed on. systemd would mint
 	#    a transient id anyway, so binding garbage buys nothing and hides the
@@ -391,19 +403,27 @@ cases() {
 	ok "persistent will not unmount: says so" \
 		"$(yes_if out_has "could not unmount $R/var/lib/rasputin")" "$OUT"
 
-	# All five reasons differ from one another. ONE message that meant three
-	# things is what made this defect expensive to find, so distinctness is the
-	# property, not merely that something was printed.
+	# The five ways this can degrade, one run each.
 	setup; store "$GOOD_ID"; STUB_FINDFS_RC=1;  shim; m1=$OUT
 	setup; store "$GOOD_ID"; STUB_EXT4_RC=32;   shim; m2=$OUT
 	setup;                                      shim; m3=$OUT
 	setup; store '';                            shim; m4=$OUT
 	setup; store 'garbage';                     shim; m5=$OUT
-	# One "transient id" line per run, and five distinct ones across the five.
+	# Exactly one reason in EACH run — counted per run, because five lines
+	# across five runs is also what "one run printed two, another printed
+	# none" looks like, and that is the shape this assertion exists to reject.
+	ones=0
+	for m in "$m1" "$m2" "$m3" "$m4" "$m5"; do
+		n=$(printf '%s\n' "$m" | grep -c 'this boot uses a transient id')
+		[ "$n" = 1 ] && ones=$((ones + 1))
+	done
+	ok "each degrade prints exactly one reason" \
+		"$(yes_if test "$ones" = 5)" "runs printing exactly one reason: $ones of 5"
+	# ...and the five are five DIFFERENT messages. ONE message that meant three
+	# things is what made this defect expensive to find, so distinctness is the
+	# property, not merely that something was printed.
 	reasons=$(printf '%s\n%s\n%s\n%s\n%s\n' "$m1" "$m2" "$m3" "$m4" "$m5" \
 		| grep 'this boot uses a transient id')
-	ok "each degrade prints exactly one reason" \
-		"$(yes_if test "$(printf '%s\n' "$reasons" | wc -l | tr -d ' ')" = 5)" "$reasons"
 	ok "and the five reasons are five DIFFERENT messages" \
 		"$(yes_if test "$(printf '%s\n' "$reasons" | sort -u | wc -l | tr -d ' ')" = 5)" "$reasons"
 

@@ -150,11 +150,12 @@ is_mounted() {
 # without ever running mount(8). x-systemd.makefs and x-systemd.growfs would
 # never run — rasputin-growpart's expansion silently stops happening — and
 # ConditionPathIsMountPoint=/var/lib/rasputin would pass, so the commit unit
-# runs rather than skipping and then fails writing to a read-only filesystem.
-# Every one of those is silent, which is why the failure gets a line of its own.
+# runs rather than skipping and then fails writing to a read-only filesystem —
+# as does anything else that writes under /var/lib/rasputin this boot. Every
+# one of those is silent, which is why the failure gets a line of its own.
 unmount_persist() {
 	"$UMOUNT" "$PERSIST_MNT" 2>/dev/null && return 0
-	log "could not unmount $PERSIST_MNT; systemd will not mount it itself and the commit will fail"
+	log "could not unmount $PERSIST_MNT; it stays READ-ONLY for this whole boot, systemd will not mount it itself, and the commit will fail"
 	return 0
 }
 
@@ -221,7 +222,6 @@ fi
 # needed on a read-only rootfs; systemd's fstab unit mounts it properly (rw,
 # x-systemd.growfs) later in local-fs.target.
 #
-#
 # The key is no looser than the one the image already trusts: the rpi's fstab
 # uses PARTUUID=52415350-07, and genimage pins disk-signature = 0x52415350 so
 # that PARTUUID is identical on EVERY flashed medium; the n100's PARTLABEL is
@@ -229,9 +229,9 @@ fi
 # booted with a second Rasputin disk attached is ambiguous for systemd's own
 # /var/lib/rasputin mount exactly as it is here — and the persistent filesystem
 # baked into the image is empty, so the worst this lookup does with the wrong
-# one is read no id and degrade. The device that was actually chosen is named
-# in every message below, restore and degrade alike, so an ambiguous pick shows
-# up in the boot log rather than as a mystery.
+# one is read no id and degrade. Every message about the LOOKUP names the
+# device that was chosen, and so does the restore line, so an ambiguous pick
+# shows up in the boot log rather than as a mystery.
 #
 # store_why records WHICH step failed. dev.251 emitted one message — "no stored
 # machine-id yet" — for three different conditions (findfs found nothing, the
@@ -291,13 +291,13 @@ if [ -n "$stored_id" ]; then
 			else
 				# systemd will overwrite /run/machine-id with a transient value
 				# and bind that instead, which is exactly today's behaviour.
-				log "could not bind /run/machine-id over /etc/machine-id; falling back to a transient id"
+				log "read $stored_id from $persist_dev but could not bind /run/machine-id over /etc/machine-id; falling back to a transient id"
 			fi
 		else
-			log "could not write /run/machine-id; falling back to a transient id"
+			log "read $stored_id from $persist_dev but could not write /run/machine-id; falling back to a transient id"
 		fi
 	else
-		log "could not mount /run; falling back to a transient id"
+		log "read $stored_id from $persist_dev but could not mount /run; falling back to a transient id"
 	fi
 else
 	# store_why is set on every branch above, so the default is a backstop, not
