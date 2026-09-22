@@ -111,7 +111,7 @@ rm -f "$TARGET_DIR/etc/shadow"
 ln -s /var/lib/rasputin/console/shadow "$TARGET_DIR/etc/shadow"
 echo "post-fakeroot: /etc/shadow -> /var/lib/rasputin/console/shadow for $SOC (root locked; the control plane delivers the hash)"
 
-# ── the clock floor: /usr/share/factory/rasputin/timesync-clock ──────────────
+# ── the clock floor: two files, one stamp ────────────────────────────────────
 #
 # A board with no battery-backed RTC — every Pi — boots at the Unix epoch, and
 # systemd advances the clock to its OWN compiled-in build time, which is the
@@ -122,8 +122,52 @@ echo "post-fakeroot: /etc/shadow -> /var/lib/rasputin/console/shadow for $SOC (r
 #
 # On 2026.09.4-dev.238 that landed the node on 2025-06-25 — fifteen months
 # before the image was built — because Buildroot's systemd predates the image
-# that vendors it. (/usr/lib/clock-epoch is not a lever here: this systemd is
-# built without it, PID 1 has only clock_apply_epoch and the compiled constant.)
+# that vendors it.
+#
+# ── WHY TWO FILES ────────────────────────────────────────────────────────────
+#
+# /usr/lib/clock-epoch is PID 1's own floor and this build did not bake one.
+# The earlier note here said the lever did not exist — "this systemd is built
+# without it" — and that was wrong. systemd 256's clock_apply_epoch() stats
+# EPOCH_CLOCK_FILE and falls back to the compiled TIME_EPOCH only when the stat
+# fails; support is unconditional, not a build option. Measured on
+# cp-compute5.local (arm64, systemd 256.17, the image's version):
+#
+#     # strings /usr/lib/systemd/libsystemd-shared-256.so | grep clock-epoch
+#     /usr/lib/clock-epoch
+#     Cannot stat /usr/lib/clock-epoch: %m
+#     # ls -l /usr/lib/clock-epoch
+#     ls: /usr/lib/clock-epoch: No such file or directory
+#
+# So the string is compiled in, the file is simply absent from our image, and
+# PID 1 falls through to the systemd package's build date. Baking it is what
+# every other distro that ships a no-RTC board does, it costs one empty file,
+# and it needs NO ordering at all — PID 1 reads it before the manager exists,
+# so before any generator, any unit and any journal line.
+#
+# THE ONE INTERACTION WORTH KNOWING ABOUT, because it runs the other way.
+# clock_apply_epoch() moves the clock FORWARD to this mtime when the clock is
+# behind it, and it also moves it BACKWARD to this mtime when the clock is more
+# than CLOCK_VALID_RANGE_USEC_MAX ahead of it — "System time is further ahead
+# than %s after build time, resetting clock to build time.", which is in the
+# same library (strings, cp-compute5.local). That matters here because the PID 1
+# shim sets the clock from the persisted last-known-good time a moment BEFORE
+# systemd runs this, so a small enough range would silently undo the restore on
+# every boot. It is not small: systemd's meson_options.txt ships
+#
+#     option('clock-valid-range-usec-max', type : 'integer',
+#            value : 473364000000000, # 15 years
+#
+# and Buildroot 2025.02.17 — the pinned tag in scripts/init-buildroot.sh —
+# passes neither that option nor -Dtime-epoch in package/systemd/systemd.mk, so
+# the upstream default stands. The clamp therefore fires only on a node whose
+# clock is fifteen years past the build date of the image it is running, which
+# is a broken RTC and is exactly what the clamp is for. Re-check this if the
+# Buildroot pin moves.
+#
+# The second file, the timesyncd factory copy, is a different consumer with a
+# different constraint; see below. Both are stamped from the same BUILD_EPOCH
+# so the two floors can never disagree with each other.
 #
 # The control plane then mints its Mesh CA and HTTPS leaf against that clock.
 # rasputin-control-plane's clock gate waits up to 90s for NTP first, but it is
@@ -163,13 +207,28 @@ echo "post-fakeroot: /etc/shadow -> /var/lib/rasputin/console/shadow for $SOC (r
 # rootfs overlay: a file in the overlay carries its git CHECKOUT mtime, which
 # says nothing about when the image was built, and post-fakeroot is the last
 # thing to touch the tree before the image command, so nothing downstream
-# restamps it.
+# restamps it. The same two arguments are why /usr/lib/clock-epoch is baked
+# here as well.
+#
+# ── WHERE THESE TWO SIT IN THE ORDER ─────────────────────────────────────────
+#
+# Neither of them is the node's best floor any more; both are the BACKSTOP. The
+# node's real floor is the last-known-good time persisted across shutdown to
+# /var/lib/rasputin/clock and restored by the PID 1 shim
+# (rootfs-overlay/usr/lib/rasputin/machine-id/rasputin-init). These two files
+# are what a node has before that store exists — its first boot ever, and the
+# first boot after this image lands on a fielded node — and what it falls back
+# to if the persistent partition cannot be read. The image's build date is
+# always right for that job and is never more than one release old.
 CLOCK_FLOOR="$FACTORY_DIR/timesync-clock"
+CLOCK_EPOCH="$TARGET_DIR/usr/lib/clock-epoch"
 
-if [ -e "$CLOCK_FLOOR" ]; then
-	echo "post-fakeroot: ERROR — $CLOCK_FLOOR already exists; refusing to restamp a floor this script did not bake" >&2
-	exit 1
-fi
+for f in "$CLOCK_FLOOR" "$CLOCK_EPOCH"; do
+	if [ -e "$f" ]; then
+		echo "post-fakeroot: ERROR — $f already exists; refusing to restamp a floor this script did not bake" >&2
+		exit 1
+	fi
+done
 # Fail closed on a build host whose own clock is wrong: baking a floor from a
 # bad clock is worse than baking none, because it is invisible afterwards. Any
 # date before this repo could have produced the change means the builder's
@@ -183,4 +242,28 @@ fi
 
 : > "$CLOCK_FLOOR"
 chmod 644 "$CLOCK_FLOOR"
-echo "post-fakeroot: clock floor baked for $SOC — $CLOCK_FLOOR mtime $(date -u -d "@$BUILD_EPOCH" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u '+%Y-%m-%dT%H:%M:%SZ')"
+
+# PID 1's own floor. Empty for the same reason the factory copy is empty:
+# clock_apply_epoch() stats it and never reads it. 0644 because PID 1 reads it
+# as root and nothing on the node writes it — it is part of the image, and it is
+# the image's age, which is not a secret.
+#
+# IT HAS A SECOND CONSUMER, so do not think of it as systemd's file alone.
+# rasputin-clock-save.sh and the PID 1 shim both measure the persisted
+# last-known-good time against this mtime and refuse anything more than ten
+# years past it — the ceiling that stops one bad NTP answer from poisoning the
+# floor for the life of the node. Both halves FAIL CLOSED without it: an image
+# that stops baking this file does not merely lose PID 1's floor, it also stops
+# persisting and restoring the clock entirely. That is the intended direction to
+# fail in, and test/clock-floor-test.sh pins both halves of it.
+mkdir -p "$(dirname "$CLOCK_EPOCH")"
+: > "$CLOCK_EPOCH"
+chmod 644 "$CLOCK_EPOCH"
+
+# ONE stamp on both. Two `: >` redirections a few microseconds apart would
+# almost always agree and would disagree across a second boundary, and a floor
+# that is sometimes one second older than the other floor is a difference
+# nothing would ever explain. touch -r copies the mtime exactly.
+touch -r "$CLOCK_FLOOR" "$CLOCK_EPOCH"
+
+echo "post-fakeroot: clock floor baked for $SOC — $CLOCK_FLOOR and $CLOCK_EPOCH, mtime $(date -u -d "@$BUILD_EPOCH" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u '+%Y-%m-%dT%H:%M:%SZ')"

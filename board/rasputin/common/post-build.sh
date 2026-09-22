@@ -41,6 +41,22 @@ ln -sf /etc/systemd/system/rasputin-hostname.service \
 mkdir -p "$TARGET_DIR/etc/systemd/system/sysinit.target.wants"
 ln -sf /etc/systemd/system/rasputin-clock-floor.service \
 	"$TARGET_DIR/etc/systemd/system/sysinit.target.wants/rasputin-clock-floor.service"
+# Persist the clock across shutdown, so the PID 1 shim has a last-known-good
+# time to floor the next boot with — the fake-hwclock pattern, which is what a
+# no-RTC board needs and what the image did not have (geekdojo/geekdojo-brain#601,
+# the arm64 half). The RESTORE half is in /sbin/init, not a unit: journald
+# starts at mono ~8.6 and flushes at ~12.0, both before timesyncd corrects the
+# clock at ~12.9, so nothing that runs as a unit is early enough. See
+# rootfs-overlay/usr/lib/rasputin/machine-id/rasputin-init.
+#
+# Two units, because the save has two triggers that cannot share one unit: the
+# shutdown write needs RemainAfterExit + ExecStop, and a timer that started an
+# already-active unit would be a silent no-op on every tick.
+ln -sf /etc/systemd/system/rasputin-clock-save.service \
+	"$TARGET_DIR/etc/systemd/system/multi-user.target.wants/rasputin-clock-save.service"
+mkdir -p "$TARGET_DIR/etc/systemd/system/timers.target.wants"
+ln -sf /etc/systemd/system/rasputin-clock-tick.timer \
+	"$TARGET_DIR/etc/systemd/system/timers.target.wants/rasputin-clock-tick.timer"
 # Apply the seed's RASPUTIN_NTP_SERVER (if any) to systemd-timesyncd, every boot
 # (/run drop-in; /etc is read-only). No-op when unset — the baked numeric
 # FallbackNTP (usr/lib/systemd/timesyncd.conf.d) still gets a no-RTC node correct

@@ -95,6 +95,17 @@
 # modes this image does not set.
 0700  optional  /var/lib/rasputin/journal
 
+# ── NOT declared, and deliberately ─────────────────────────────────────────
+# /var/lib/rasputin/clock — the last-known-good time, written by
+# rasputin-clock-save.service and read by the PID 1 shim to floor the next boot
+# (geekdojo/geekdojo-brain#601). It is a ten-digit Unix timestamp and it is
+# 0644: the image's own record of how long the node has been alive, which is not
+# a credential and carries nothing about the installation. Declaring it would
+# mean asserting owner-only on it, which every entry in the list above gets
+# whatever its MODE says, and an owner-only timestamp would be stating a
+# security property this file does not have. Written here so the next reader
+# knows it was considered rather than forgotten.
+
 # ── swept trees ────────────────────────────────────────────────────────────
 # Scoped deliberately to the trees whose contents are credentials without
 # exception. docker, containerd and tailscale are not swept: their contents
