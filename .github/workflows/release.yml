@@ -249,17 +249,20 @@ jobs:
           echo "${{ vars.RASPUTIN_ROOT_CA_PEM }}" \
             > board/rasputin/common/rootfs-overlay/etc/rasputin/trust/root-ca.pem
 
-      # Buildroot (toolchain + kernel + Docker + rootfs) easily overflows the
-      # ~14 GB free on a stock hosted runner — that overflow is the likely
-      # cause of a Build step dying mid-compile with a truncated log. Reclaim
-      # the preinstalled toolchains we don't need (~25-30 GB).
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-            /opt/hostedtoolcache/CodeQL /usr/local/share/boost \
-            "$AGENT_TOOLSDIRECTORY" 2>/dev/null || true
-          sudo docker image prune --all --force 2>/dev/null || true
-          df -h /
+      # There used to be a "Free disk space" step here, deleting the
+      # preinstalled dotnet/android/ghc/CodeQL/boost trees (~25-30 GB) because
+      # Buildroot overflowed the free space on a stock hosted runner and died
+      # mid-compile with a truncated log. The 16-core larger runner this job
+      # now uses has a 600 GB disk: measured in run 35669561845, 581 GB total
+      # with 547 GB free even AFTER that reclaim, against a peak build usage
+      # well under 100 GB. The reclaim bought nothing and cost 2m16s of
+      # METERED runner time per job — ~4m30s per build across the two SKUs.
+      #
+      # Only the `df -h /` survives, as evidence for the postmortem if a build
+      # ever dies that way again. If this job is ever moved back to
+      # ubuntu-latest, check the headroom before trusting its absence.
+      - name: Report disk space
+        run: df -h /
 
       # The agent/api binaries live in the (now-public) control-plane release.
       # Pre-place the tarballs into Buildroot's dl/ cache here. Each package
