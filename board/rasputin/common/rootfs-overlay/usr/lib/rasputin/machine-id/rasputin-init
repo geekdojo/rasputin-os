@@ -43,8 +43,10 @@
 #
 # ── what it does ──────────────────────────────────────────────────────────────
 #
-# Mount the persistent partition read-only, read /var/lib/rasputin/machine-id,
-# unmount, and — if and only if that value is a well-formed machine-id — write it
+# Mount /proc and /sys (the kernel mounts neither before init, and findfs needs
+# sysfs to find a filesystem by LABEL with udev not yet running), mount the
+# persistent partition read-only, read /var/lib/rasputin/machine-id, unmount all
+# three, and — if and only if that value is a well-formed machine-id — write it
 # to /run/machine-id and bind-mount that over /etc/machine-id. That is byte for
 # byte the end state systemd produces today (same path, same 0444, same bind);
 # only the VALUE is different, and systemd's machine_id_setup() then finds a
@@ -108,6 +110,7 @@ RUN=$ROOT/run
 RUN_MACHINE_ID=$RUN/machine-id
 ETC_MACHINE_ID=$ROOT/etc/machine-id
 PROC=$ROOT/proc
+SYS=$ROOT/sys
 
 # Log to /dev/kmsg: journald imports the kernel ring buffer, so these lines end
 # up in the journal even though nothing is running yet to receive them. stderr
@@ -141,17 +144,58 @@ is_mounted() {
 	return 1
 }
 
-# ── /proc ────────────────────────────────────────────────────────────────────
-# Needed twice: to see what is already mounted, and so libblkid (findfs) can
-# enumerate block devices from /proc/partitions — udev is not running, so
-# /dev/disk/by-label is empty. Mounted with systemd's own mount_setup() options
-# so that a failure to unmount it below leaves an end state identical to a
-# normal boot. /dev is already there: the kernel mounts devtmpfs itself
-# (CONFIG_DEVTMPFS_MOUNT=y, confirmed in /proc/config.gz on bench.local).
+# ── the API filesystems ──────────────────────────────────────────────────────
+# The kernel mounts NEITHER /proc nor /sys before it runs init; systemd's
+# mount_setup() does that, and it runs after we have handed off. /dev is the one
+# exception — the kernel mounts devtmpfs itself (CONFIG_DEVTMPFS_MOUNT=y,
+# confirmed in /proc/config.gz on the rpi nodes; the n100 has no /proc/config.gz,
+# but this script's own log line reaches /dev/kmsg on BOTH SKUs, which is the
+# proof that matters).
+#
+# Both are mounted with systemd's own mount_setup() options, so that a failure
+# to unmount one below leaves an end state byte for byte what a normal boot
+# produces — systemd skips an API filesystem that is already a mount point.
+#
+# Neither mount is allowed to stop the hand-off: a failure is logged and the
+# script carries on to exec systemd with a transient id, exactly as it would on
+# a node with no persistent partition at all.
+
+# /proc — to see what is already mounted (is_mounted below reads
+# /proc/self/mounts; `mountpoint` is not on this image).
 proc_is_ours=
 if [ ! -r "$PROC/self/mounts" ]; then
 	if "$MOUNT" -t proc -o nosuid,nodev,noexec proc "$PROC" 2>/dev/null; then
 		proc_is_ours=yes
+	else
+		log "could not mount $PROC"
+	fi
+fi
+
+# /sys — this is what dev.251 was missing (geekdojo-brain#600). udev is not
+# running, so /dev/disk/by-label does not exist and libblkid cannot resolve a
+# LABEL= from it. Its fallback is a full device scan, and that scan is driven
+# from SYSFS, not from /proc/partitions: strace of util-linux 2.40.4 findfs —
+# the node's exact version — shows it opendir()s /sys/block and then reads
+# /sys/dev/block/<maj>:<min> for each entry. With /sys unmounted the first
+# openat() returns ENOENT, the scan yields nothing, and findfs exits 1 printing
+# nothing. That is precisely the empty $persist_dev observed on both SKUs.
+#
+# Tested in a container with udev absent and the libblkid cache removed (so a
+# cache hit cannot mask the dependency), on util-linux 2.38.1 and 2.40.4:
+# /sys mounted -> findfs resolves the label; /sys unmounted -> "unable to
+# resolve". `blkid` on the device node directly still reads the label without
+# /sys, so it is the ENUMERATION that needs sysfs, not the superblock read.
+#
+# Probed with /sys/block rather than is_mounted(), so this works even when the
+# /proc mount above failed. /sys/block exists in every mounted sysfs and cannot
+# exist in the baked, empty /sys of a read-only squashfs.
+sysfs_is_ours=
+if [ ! -d "$SYS/block" ]; then
+	if "$MOUNT" -t sysfs -o nosuid,nodev,noexec sysfs "$SYS" 2>/dev/null; then
+		sysfs_is_ours=yes
+		log "mounted $SYS for the block-device scan"
+	else
+		log "could not mount $SYS; findfs cannot enumerate block devices without it"
 	fi
 fi
 
@@ -162,22 +206,43 @@ fi
 # its own final mountpoint, which is baked and empty, so no scratch directory is
 # needed on a read-only rootfs; systemd's fstab unit mounts it properly (rw,
 # x-systemd.growfs) later in local-fs.target.
+#
+# store_why records WHICH step failed. dev.251 emitted one message — "no stored
+# machine-id yet" — for three different conditions (findfs found nothing, the
+# mount failed, the file was absent or unreadable), which is why the sysfs
+# defect had to be diagnosed by elimination instead of by reading a boot log
+# (geekdojo-brain#600). Exactly one of stored_id / store_why ends up set, and
+# the single fallback line below quotes store_why verbatim. A silent degrade is
+# the failure mode this component is most prone to, so every branch says its
+# piece, and names $persist_dev whenever findfs gave us one.
 stored_id=
+store_why=
 persist_dev=$("$FINDFS" "LABEL=$PERSIST_LABEL" 2>/dev/null)
-if [ -n "$persist_dev" ]; then
-	if "$MOUNT" -t ext4 -o ro,nosuid,nodev,noexec "$persist_dev" "$PERSIST_MNT" 2>/dev/null; then
-		# read -r, not cat: the file is one short line and this needs no fork.
-		# Guarded by -r because a redirection onto a missing file is an error
-		# the shell reports, not a value.
-		if [ -r "$PERSIST_MNT/machine-id" ]; then
-			read -r stored_id <"$PERSIST_MNT/machine-id" 2>/dev/null
-		fi
-		"$UMOUNT" "$PERSIST_MNT" 2>/dev/null
+if [ -z "$persist_dev" ]; then
+	store_why="findfs found no filesystem labelled $PERSIST_LABEL"
+elif ! "$MOUNT" -t ext4 -o ro,nosuid,nodev,noexec "$persist_dev" "$PERSIST_MNT" 2>/dev/null; then
+	store_why="found $persist_dev but could not mount it read-only on $PERSIST_MNT"
+elif [ ! -r "$PERSIST_MNT/machine-id" ]; then
+	# Guarded by -r because a redirection onto a missing file is an error the
+	# shell reports, not a value.
+	store_why="mounted $persist_dev but it holds no readable machine-id"
+	"$UMOUNT" "$PERSIST_MNT" 2>/dev/null
+else
+	# read -r, not cat: the file is one short line and this needs no fork.
+	read -r stored_id <"$PERSIST_MNT/machine-id" 2>/dev/null
+	"$UMOUNT" "$PERSIST_MNT" 2>/dev/null
+	if [ -z "$stored_id" ]; then
+		store_why="mounted $persist_dev but its machine-id is empty"
+	elif ! machine_id_valid "$stored_id"; then
+		# Refused rather than passed on: systemd would mint a transient id
+		# anyway, so binding garbage buys nothing and hides the fault.
+		store_why="mounted $persist_dev but its machine-id is malformed: $stored_id"
+		stored_id=
 	fi
 fi
 
 # ── deliver it ───────────────────────────────────────────────────────────────
-if [ -n "$stored_id" ] && machine_id_valid "$stored_id"; then
+if [ -n "$stored_id" ]; then
 	# /run is where systemd itself puts the machine-id, so put it there with
 	# systemd's exact mount_setup() options: it skips a /run that is already a
 	# mount point, and matching the options means it cannot tell the difference.
@@ -208,11 +273,15 @@ if [ -n "$stored_id" ] && machine_id_valid "$stored_id"; then
 else
 	# Expected on the first boot of a node and on the first boot after this
 	# image lands on a fielded one: rasputin-machine-id-commit.service has not
-	# written the store yet. It will, from this boot's transient id.
-	log "no stored machine-id yet; this boot uses a transient id"
+	# written the store yet. It will, from this boot's transient id. Anything
+	# else in store_why is a fault, and now says which one.
+	log "${store_why:-no stored machine-id yet}; this boot uses a transient id"
 fi
 
-# Leave nothing behind that systemd would not have made itself.
+# Leave nothing behind that systemd would not have made itself. Unmounted in
+# the reverse of the order they were mounted; a failure here is harmless,
+# because what stays behind is what systemd's mount_setup() would have made.
+[ -n "$sysfs_is_ours" ] && "$UMOUNT" "$SYS" 2>/dev/null
 [ -n "$proc_is_ours" ] && "$UMOUNT" "$PROC" 2>/dev/null
 
 hand_off "$@"

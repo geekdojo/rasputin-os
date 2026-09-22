@@ -97,7 +97,7 @@ not() { if "$@"; then return 1; else return 0; fi; }
 setup() {
 	W=$(mktemp -d "$TMP/w.XXXXXX")
 	R="$W/root"; PERSIST="$W/persist"; BIN="$W/bin"
-	mkdir -p "$R/etc" "$R/run" "$R/proc" "$R/var/lib/rasputin" "$PERSIST" "$BIN"
+	mkdir -p "$R/etc" "$R/run" "$R/proc" "$R/sys" "$R/var/lib/rasputin" "$PERSIST" "$BIN"
 	# The baked, empty /etc/machine-id a bind mount lands on.
 	: >"$R/etc/machine-id"
 	: >"$W/mount.calls"; : >"$W/umount.calls"; : >"$W/findfs.calls"
@@ -113,6 +113,13 @@ case " $* " in
 	*" -t ext4 "*)
 		[ "${STUB_EXT4_RC:-0}" = 0 ] || exit "$STUB_EXT4_RC"
 		mkdir -p "$dst" && cp -R "$STUB_PERSIST/." "$dst/" 2>/dev/null
+		;;
+	*" -t sysfs "*)
+		[ "${STUB_SYSFS_RC:-0}" = 0 ] || exit "$STUB_SYSFS_RC"
+		# A mounted sysfs always has block/ in it; that directory is how
+		# the shim tells a mounted /sys from the baked, empty one, and
+		# how the findfs stub below tells whether it could scan.
+		mkdir -p "$dst/block"
 		;;
 	*" -t tmpfs "*|*" -t proc "*)
 		mkdir -p "$dst"
@@ -133,10 +140,24 @@ case "$dst" in
 esac
 exit 0
 STUB
+	# findfs, modelled on the real one. With udev not running there is no
+	# /dev/disk/by-label, so util-linux's findfs resolves a LABEL= by scanning
+	# sysfs — opendir("/sys/block"), then /sys/dev/block/<maj>:<min> per entry
+	# (strace, util-linux 2.38.1 and 2.40.4; 2.40.4 is what the image ships).
+	# With /sys unmounted that first opendir is ENOENT, the scan yields
+	# nothing, and findfs exits 1 having printed nothing. dev.251 shipped
+	# without mounting /sys and landed in exactly that branch on both SKUs
+	# (geekdojo/geekdojo-brain#600), so the stub refuses the same way: this is
+	# what makes the ordering — sysfs BEFORE findfs — a tested property rather
+	# than a comment.
 	cat >"$BIN/findfs" <<'STUB'
 #!/bin/sh
 printf '%s\n' "$*" >> "$STUB_FINDFS_CALLS"
 [ "${STUB_FINDFS_RC:-0}" = 0 ] || exit "$STUB_FINDFS_RC"
+if [ -n "${STUB_FINDFS_NEEDS_SYS:-}" ] && [ ! -d "${STUB_SYSFS_MARK:-/nonexistent}" ]; then
+	echo "findfs: unable to resolve '$*'" >&2
+	exit 1
+fi
 printf '%s\n' "${STUB_FINDFS_DEV:-/dev/fake1}"
 STUB
 	# The hand-off target. Records that it was reached and with which
@@ -148,7 +169,9 @@ printf '%s\n' "$*" > "$STUB_HANDOFF_ARGS"
 exit 0
 STUB
 	chmod +x "$BIN/mount" "$BIN/umount" "$BIN/findfs" "$BIN/systemd"
-	STUB_MOUNT_RC=0; STUB_EXT4_RC=0; STUB_FINDFS_RC=0
+	STUB_MOUNT_RC=0; STUB_EXT4_RC=0; STUB_FINDFS_RC=0; STUB_SYSFS_RC=0
+	# On by default: a findfs that needs sysfs is the one the image has.
+	STUB_FINDFS_NEEDS_SYS=1
 	MOUNT_BIN="$BIN/mount"; UMOUNT_BIN="$BIN/umount"; FINDFS_BIN="$BIN/findfs"
 }
 
@@ -165,6 +188,8 @@ shim() {
 		STUB_FINDFS_CALLS="$W/findfs.calls" STUB_HANDOFF_ARGS="$W/handoff.args" \
 		STUB_PERSIST="$PERSIST" STUB_MOUNT_RC="$STUB_MOUNT_RC" \
 		STUB_EXT4_RC="$STUB_EXT4_RC" STUB_FINDFS_RC="$STUB_FINDFS_RC" \
+		STUB_SYSFS_RC="$STUB_SYSFS_RC" STUB_SYSFS_MARK="$R/sys/block" \
+		STUB_FINDFS_NEEDS_SYS="$STUB_FINDFS_NEEDS_SYS" \
 		RASPUTIN_INIT_TEST=1 \
 		RASPUTIN_INIT_ROOT="$R" \
 		RASPUTIN_INIT_MOUNT="$MOUNT_BIN" \
@@ -244,15 +269,64 @@ cases() {
 		"$(yes_if not grep -q -- '-t proc' "$W/mount.calls")" "$(cat "$W/mount.calls")"
 	ok "mounted /run: still restores" "$(yes_if bound)" "$(cat "$W/mount.calls")"
 
-	# 5. No store yet — the first boot of a node, and the first boot after this
+	# 5. /sys. THE dev.251 DEFECT (geekdojo/geekdojo-brain#600). The kernel
+	#    mounts neither /proc nor /sys before init, and with udev not running
+	#    findfs resolves a LABEL= only by scanning sysfs. dev.251 never mounted
+	#    /sys, so findfs returned nothing on every boot of every node and the
+	#    restore silently degraded. The mount has to happen, with systemd's own
+	#    options, and BEFORE findfs is called — the ordering is the fix.
+	setup; store "$GOOD_ID"; shim
+	ok "sysfs: mounted, since the kernel does not mount it for init" \
+		"$(yes_if grep -q -- '-t sysfs' "$W/mount.calls")" "$(cat "$W/mount.calls")"
+	ok "sysfs: gets systemd's exact mount_setup() options" \
+		"$(yes_if grep -q -- '-t sysfs -o nosuid,nodev,noexec sysfs '"$R/sys" "$W/mount.calls")" \
+		"$(cat "$W/mount.calls")"
+	# The stub findfs refuses while $R/sys/block is absent, the way the real one
+	# does. So these two passing IS the ordering assertion: sysfs is mounted
+	# first, or findfs resolves nothing and neither of them holds.
+	ok "sysfs: mounted first, so findfs resolves the label" \
+		"$(yes_if grep -q -- '-t ext4 -o ro,nosuid,nodev,noexec /dev/fake1' "$W/mount.calls")" \
+		"$(cat "$W/mount.calls")"
+	ok "sysfs: and the id is restored (this is the whole bug)" \
+		"$(yes_if bound)" "$OUT"
+	ok "sysfs: unmounted again, leaving what systemd would have made" \
+		"$(yes_if grep -qxF "$R/sys" "$W/umount.calls")" "$(cat "$W/umount.calls")"
+	ok "sysfs: says it mounted it" "$(yes_if out_has "mounted $R/sys")" "$OUT"
+
+	# 6. A /sys that is already mounted is left alone — not re-mounted, and NOT
+	#    unmounted on the way out, because it was not ours to remove. (What
+	#    happens if systemd ever grows an earlier /sys, or on a re-exec.)
+	setup; store "$GOOD_ID"; mkdir -p "$R/sys/block"; shim
+	ok "mounted /sys: not re-mounted" \
+		"$(yes_if not grep -q -- '-t sysfs' "$W/mount.calls")" "$(cat "$W/mount.calls")"
+	ok "mounted /sys: not unmounted either" \
+		"$(yes_if not grep -qxF "$R/sys" "$W/umount.calls")" "$(cat "$W/umount.calls")"
+	ok "mounted /sys: still restores" "$(yes_if bound)" "$(cat "$W/mount.calls")"
+
+	# 7. A /sys that will NOT mount. findfs then finds nothing, exactly as in
+	#    dev.251 — but the node still boots, and the log now names both steps
+	#    instead of one message that could mean any of three things.
+	setup; store "$GOOD_ID"; STUB_SYSFS_RC=32; shim
+	ok "sysfs will not mount: hands off" "$(yes_if handed_off)" "$OUT"
+	ok "sysfs will not mount: nothing bound" "$(yes_if not bound)" "$(cat "$W/mount.calls")"
+	ok "sysfs will not mount: says so" \
+		"$(yes_if out_has "could not mount $R/sys")" "$OUT"
+	ok "sysfs will not mount: and says findfs found nothing" \
+		"$(yes_if out_has 'findfs found no filesystem labelled persistent')" "$OUT"
+	ok "sysfs will not mount: nothing is unmounted that was never mounted" \
+		"$(yes_if not grep -qxF "$R/sys" "$W/umount.calls")" "$(cat "$W/umount.calls")"
+
+	# 8. No store yet — the first boot of a node, and the first boot after this
 	#    image lands on a fielded one. Nothing is bound and the boot continues.
 	setup; shim
 	ok "no store: hands off" "$(yes_if handed_off)" "$OUT"
 	ok "no store: nothing bound" "$(yes_if not bound)" "$(cat "$W/mount.calls")"
 	ok "no store: no /run/machine-id written" "$(yes_if not test -e "$R/run/machine-id")"
-	ok "no store: says a transient id is in use" "$(yes_if out_has 'no stored machine-id yet')" "$OUT"
+	ok "no store: says a transient id is in use" "$(yes_if out_has 'this boot uses a transient id')" "$OUT"
+	ok "no store: names the partition it mounted and read" \
+		"$(yes_if out_has 'mounted /dev/fake1 but it holds no readable machine-id')" "$OUT"
 
-	# 6. A malformed store is refused rather than passed on. systemd would mint
+	# 9. A malformed store is refused rather than passed on. systemd would mint
 	#    a transient id anyway, so binding garbage buys nothing and hides the
 	#    fault.
 	for bad in 'not-a-machine-id' '4F2C1AB97D3E46B08C5D1E9F7A63B204' '4f2c1ab97d3e46b08c5d1e9f7a63b20' \
@@ -263,20 +337,58 @@ cases() {
 		ok "bad store '$bad': nothing bound" "$(yes_if not bound)" "$(cat "$W/mount.calls")"
 	done
 
-	# 7. Every way the read can fail still boots.
+	# 10. Every way the read can fail still boots — and each one now says which
+	#     step failed. dev.251 emitted "no stored machine-id yet" for all
+	#     of them, so a boot log could not tell a first boot apart from a broken
+	#     findfs, a wedged partition or an unreadable file, and the sysfs defect
+	#     above had to be found by elimination instead. These assertions exist
+	#     so that never costs a hardware round trip again: the messages must be
+	#     distinct, and must name $persist_dev once findfs has produced one.
 	setup; store "$GOOD_ID"; STUB_FINDFS_RC=1; shim
 	ok "findfs fails: hands off" "$(yes_if handed_off)" "$OUT"
 	ok "findfs fails: nothing mounted from it" \
 		"$(yes_if not grep -q -- '-t ext4' "$W/mount.calls")" "$(cat "$W/mount.calls")"
+	ok "findfs fails: says findfs found nothing" \
+		"$(yes_if out_has 'findfs found no filesystem labelled persistent')" "$OUT"
 
 	setup; store "$GOOD_ID"; STUB_EXT4_RC=32; shim
 	ok "persistent will not mount: hands off" "$(yes_if handed_off)" "$OUT"
 	ok "persistent will not mount: nothing bound" "$(yes_if not bound)" "$(cat "$W/mount.calls")"
+	ok "persistent will not mount: names the device and the mountpoint" \
+		"$(yes_if out_has "found /dev/fake1 but could not mount it read-only on $R/var/lib/rasputin")" "$OUT"
 
 	setup; store "$GOOD_ID"; STUB_MOUNT_RC=1; shim
 	ok "every mount fails: hands off" "$(yes_if handed_off)" "$OUT"
+	ok "every mount fails: says /sys could not be mounted" \
+		"$(yes_if out_has "could not mount $R/sys")" "$OUT"
 
-	# 8. THE ONE RULE. With no mount, no umount and no findfs on the machine at
+	# The store is there and readable but empty, versus not there at all: two
+	# different faults on disk, two different messages.
+	setup; store ''; shim
+	ok "empty store: hands off" "$(yes_if handed_off)" "$OUT"
+	ok "empty store: says the file is empty, not that it is missing" \
+		"$(yes_if out_has 'mounted /dev/fake1 but its machine-id is empty')" "$OUT"
+
+	setup; store 'not-a-machine-id'; shim
+	ok "malformed store: hands off" "$(yes_if handed_off)" "$OUT"
+	ok "malformed store: says it is malformed and quotes it" \
+		"$(yes_if out_has 'its machine-id is malformed: not-a-machine-id')" "$OUT"
+
+	# All four reasons differ from one another. A message that meant three
+	# things is what made this defect expensive to find.
+	setup; store "$GOOD_ID"; STUB_FINDFS_RC=1; shim; m1=$OUT
+	setup; store "$GOOD_ID"; STUB_EXT4_RC=32; shim; m2=$OUT
+	setup; shim; m3=$OUT
+	setup; store 'garbage'; shim; m4=$OUT
+	ok "the four degrade reasons are four different messages" \
+		"$(yes_if test "$(printf '%s\n%s\n%s\n%s\n' "$m1" "$m2" "$m3" "$m4" \
+			| grep -c 'this boot uses a transient id')" = 4)" ""
+	ok "and none of them is reused" \
+		"$(yes_if test "$(printf '%s\n%s\n%s\n%s\n' "$m1" "$m2" "$m3" "$m4" \
+			| grep 'this boot uses a transient id' | sort -u | wc -l | tr -d ' ')" = 4)" \
+		"$(printf '%s\n%s\n%s\n%s\n' "$m1" "$m2" "$m3" "$m4" | grep 'transient id')"
+
+	# 11. THE ONE RULE. With no mount, no umount and no findfs on the machine at
 	#    all, PID 1 still reaches systemd. This is the case that separates a
 	#    degraded boot from a dark node.
 	setup; store "$GOOD_ID"
@@ -287,7 +399,7 @@ cases() {
 	ok "no helper binaries at all: kernel args survive" \
 		"$(yes_if file_is "$W/handoff.args" "single")" "$(cat "$W/handoff.args" 2>/dev/null)"
 
-	# 9. Run by hand rather than by the kernel, the shim is what the symlink it
+	# 12. Run by hand rather than by the kernel, the shim is what the symlink it
 	#    replaced was: it execs systemd and touches nothing. (RASPUTIN_INIT_TEST
 	#    unset is the real-world case; the overrides exist only for this file.)
 	setup; store "$GOOD_ID"
@@ -301,7 +413,7 @@ cases() {
 
 	# --- the commit half ------------------------------------------------------
 
-	# 10. First boot: whatever id the node is running with becomes the stored
+	# 13. First boot: whatever id the node is running with becomes the stored
 	#     one. The node KEEPS the identity it already has rather than being
 	#     handed a new one, so a fielded node changes id exactly once.
 	setup; printf '%s\n' "$GOOD_ID" >"$R/etc/machine-id"; commit
@@ -313,13 +425,13 @@ cases() {
 	ok "commit: leaves no temp file" "$(yes_if not test -e "$PERSIST/machine-id.tmp")"
 	ok "commit: says it takes effect next boot" "$(yes_if out_has 'next boot')" "$OUT"
 
-	# 11. Every boot after: a no-op.
+	# 14. Every boot after: a no-op.
 	commit
 	ok "commit again: still 0" "$(yes_if test "$RC" = 0)" "$OUT"
 	ok "commit again: unchanged" "$(yes_if file_is "$PERSIST/machine-id" "$GOOD_ID")"
 	ok "commit again: says already committed" "$(yes_if out_has 'already committed')" "$OUT"
 
-	# 12. THE SECOND RULE. A store that disagrees with the running id means the
+	# 15. THE SECOND RULE. A store that disagrees with the running id means the
 	#     restore did not happen — /sbin/init reverted, findfs gone, partition
 	#     unreadable. Overwriting would restart the churn and write a new id to
 	#     disk on every boot. Report, change nothing.
@@ -330,7 +442,7 @@ cases() {
 	ok "disagreement: warns that the restore did not happen" \
 		"$(yes_if out_has 'was NOT restored this boot')" "$OUT"
 
-	# 13. A running id that is not a machine-id is never written to the store.
+	# 16. A running id that is not a machine-id is never written to the store.
 	setup; printf 'uninitialized\n' >"$R/etc/machine-id"; commit
 	ok "bad running id: exits 0" "$(yes_if test "$RC" = 0)" "$OUT"
 	ok "bad running id: nothing stored" "$(yes_if not test -e "$PERSIST/machine-id")"
@@ -340,7 +452,7 @@ cases() {
 	ok "no running id: exits 0" "$(yes_if test "$RC" = 0)" "$OUT"
 	ok "no running id: nothing stored" "$(yes_if not test -e "$PERSIST/machine-id")"
 
-	# 14. An unusable store IS replaced — it is not an identity, it is damage.
+	# 17. An unusable store IS replaced — it is not an identity, it is damage.
 	setup; store 'garbage'; printf '%s\n' "$GOOD_ID" >"$R/etc/machine-id"; commit
 	ok "unusable store: replaced" \
 		"$(yes_if file_is "$PERSIST/machine-id" "$GOOD_ID")" "$(cat "$PERSIST/machine-id" 2>/dev/null)"
