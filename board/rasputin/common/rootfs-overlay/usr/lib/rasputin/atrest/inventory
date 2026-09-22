@@ -77,6 +77,24 @@
 # root-only and everything in it is owner-only.
 0700  optional  /var/lib/rasputin/coredump
 
+# ── the system journal ─────────────────────────────────────────────────────
+# Bind-mounted over /var/log/journal by rasputin-journal-store.service so node
+# history survives a reboot (geekdojo/geekdojo-brain#601). Declared because it
+# is new writable state on this partition and this list is the gate for that
+# (#494). 0700 root:root rather than journald's stock 2755 root:systemd-journal:
+# that mode is world-listable, /var/log is 0777 on this image, and the group
+# half buys nothing when systemd-journal has no members and root is the only
+# reader. usr/lib/tmpfiles.d/zz-rasputin-journal.conf is what holds it there
+# against stock systemd.conf; the unit sets it first, for the window before
+# tmpfiles runs.
+#
+# NOT swept, for the same reason docker/, containerd/ and tailscale/ are not:
+# the contents belong to journald and carry its modes (the machine-id
+# directory, and system.journal at 0640 root:systemd-journal). The directory
+# mode is what keeps them unreachable, and a sweep here would be asserting
+# modes this image does not set.
+0700  optional  /var/lib/rasputin/journal
+
 # ── swept trees ────────────────────────────────────────────────────────────
 # Scoped deliberately to the trees whose contents are credentials without
 # exception. docker, containerd and tailscale are not swept: their contents

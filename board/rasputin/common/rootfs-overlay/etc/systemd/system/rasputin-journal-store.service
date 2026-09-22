@@ -1,0 +1,96 @@
+# Back /var/log/journal with the persistent partition, before journald flushes.
+#
+# /var/log/journal EXISTS in the image, but it is on the read-only squashfs
+# rootfs (/dev/root, 100% full by construction), so journald's Storage=auto
+# decision came out "volatile": it wrote to /run/log/journal and every reboot
+# destroyed the whole history. Measured identically on bench.local and
+# cp-compute4.local — `journalctl --header` reported
+# /run/log/journal/<machine-id>/system.journal and `journalctl --list-boots`
+# showed exactly one boot. geekdojo/geekdojo-brain#601; the 22-hour firewall
+# outage in #547 had to be diagnosed from live socket state because of it, and
+# #500's eviction audit trail is a journald line, so that record was volatile
+# too.
+#
+# THE PATTERN is rasputin-coredump-store.service's: bind-mount a
+# persistent-partition directory over a baked, read-only mountpoint. A baked
+# symlink cannot be used (it fails makedevs at build time, see that unit), and
+# the mountpoint is already in the image, so nothing has to change in the build.
+#
+# THE ORDERING IS NOT THAT UNIT'S. rasputin-coredump-store.service is
+# WantedBy=multi-user.target, which is far too late here: journald flushes
+# /run -> /var exactly once, from systemd-journal-flush.service, and that unit
+# runs in early boot (DefaultDependencies=no, Before=systemd-tmpfiles-setup.service,
+# WantedBy=sysinit.target — read off cp-compute4). A mount that lands at
+# multi-user.target arrives after the flush has already decided there is no
+# persistent store, so the boot's own log — the part an investigation wants
+# most — would still be lost. Hence:
+#
+#   DefaultDependencies=no       REQUIRED, not tidiness. A service with default
+#                                dependencies gets After=sysinit.target, and
+#                                systemd-journal-flush.service is ordered
+#                                BEFORE systemd-tmpfiles-setup.service, which
+#                                is part of sysinit.target. That is an ordering
+#                                cycle, and systemd resolves a cycle by
+#                                dropping an edge of its own choosing — so the
+#                                unit would appear to work and then not.
+#   RequiresMountsFor=           Requires + After var-lib-rasputin.mount. The
+#                                store cannot exist before the partition does.
+#   Before=systemd-journal-flush.service
+#                                the whole point: the bind mount is in place
+#                                before journald is told to flush.
+#   WantedBy=sysinit.target      the same target systemd-journal-flush.service
+#                                is installed into, so both jobs are in the
+#                                initial boot transaction and the Before= edge
+#                                above is what decides the order.
+#
+# THE COST, stated rather than discovered later. /var/lib/rasputin is `nofail`
+# in fstab, so today nothing in the boot path waits for it (var-lib-rasputin.mount
+# is WantedBy=local-fs.target with no Before=local-fs.target — measured). This
+# unit puts that mount in front of systemd-journal-flush.service, and therefore
+# in front of systemd-tmpfiles-setup.service and sysinit.target. On a node whose
+# persistent device never appears, the boot now waits for the device unit to
+# time out — DefaultDeviceTimeoutUSec=1min 30s on these nodes — before
+# continuing. That is the price of never silently losing the journal again, and
+# it is paid only by a node that has no identity, no join token and no console
+# shadow either, i.e. one that is not serving anyway. If the mount fails the
+# unit's job fails with it; Before= is ordering only, so the flush still
+# proceeds and journald stays on /run exactly as it does today.
+#
+# NO ExecStop=umount, deliberately, and unlike the coredump unit.
+# systemd-journal-flush.service is Conflicts=soft-reboot.target only (measured),
+# so on an ordinary reboot its ExecStop=journalctl --smart-relinquish-var never
+# runs and journald still holds system.journal open. An umount here would
+# return EBUSY and leave this unit `failed`, which the QEMU smoke asserts is
+# empty. Leaving the mount up is also the better behaviour: journald keeps
+# writing persistently through the shutdown, so the shutdown is in the journal,
+# and systemd-shutdown's own unmount sweep tears the bind mount down at the end
+# the same way it tears down var-lib-rasputin.mount.
+#
+# Mode: see usr/lib/tmpfiles.d/zz-rasputin-journal.conf. The chmod below covers
+# the window before systemd-tmpfiles-setup.service runs; that file is what
+# keeps the mode 0700 afterwards, because stock systemd.conf resets
+# /var/log/journal to 2755 root:systemd-journal on every boot.
+[Unit]
+Description=Persistent-partition backing store for the system journal
+Documentation=man:systemd-journald.service(8) man:journald.conf(5)
+DefaultDependencies=no
+RequiresMountsFor=/var/lib/rasputin
+ConditionPathIsMountPoint=/var/lib/rasputin
+Before=systemd-journal-flush.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/mkdir -p /var/lib/rasputin/journal
+# 0700 root:root, unconditional rather than a mkdir mode: a directory left
+# behind by an older image would keep whatever mode it already had. The journal
+# is every log line on the node, which on this image includes the eviction
+# audit trail (#500) and whatever a failing unit printed — nothing on the
+# persistent partition that holds that kind of record is group- or
+# world-reachable (see usr/lib/rasputin/atrest/inventory).
+ExecStart=/bin/chmod 0700 /var/lib/rasputin/journal
+# -o bind is understood by both busybox and util-linux mount.
+ExecStart=/bin/mount -o bind /var/lib/rasputin/journal /var/log/journal
+
+[Install]
+WantedBy=sysinit.target

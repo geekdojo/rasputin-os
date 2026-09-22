@@ -72,6 +72,16 @@ ln -sf /etc/systemd/system/rasputin-coredump-store.service \
 # and a logged no-op after. geekdojo/geekdojo-brain#600.
 ln -sf /etc/systemd/system/rasputin-machine-id-commit.service \
 	"$TARGET_DIR/etc/systemd/system/multi-user.target.wants/rasputin-machine-id-commit.service"
+# Bind the persistent journal store over /var/log/journal so journald's flush
+# lands on the persistent partition and node history survives a reboot
+# (geekdojo/geekdojo-brain#601). sysinit.target.wants, NOT multi-user: journald
+# flushes /run -> /var exactly once, from systemd-journal-flush.service, which
+# runs inside sysinit — a mount that arrives at multi-user.target arrives after
+# the flush has already concluded there is no persistent store, and the boot's
+# own log is the part an investigation wants most. See the unit for the full
+# ordering argument and its one cost.
+ln -sf /etc/systemd/system/rasputin-journal-store.service \
+	"$TARGET_DIR/etc/systemd/system/sysinit.target.wants/rasputin-journal-store.service"
 
 # ── /sbin/init ───────────────────────────────────────────────────────────────
 #
