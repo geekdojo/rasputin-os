@@ -144,6 +144,20 @@ is_mounted() {
 	return 1
 }
 
+# unmount_persist — put the persistent partition back, and SAY SO if it will
+# not go. Leaving it mounted is not harmless: systemd derives .mount state from
+# /proc/self/mountinfo, so var-lib-rasputin.mount would come up "mounted"
+# without ever running mount(8). x-systemd.makefs and x-systemd.growfs would
+# never run — rasputin-growpart's expansion silently stops happening — and
+# ConditionPathIsMountPoint=/var/lib/rasputin would pass, so the commit unit
+# runs rather than skipping and then fails writing to a read-only filesystem.
+# Every one of those is silent, which is why the failure gets a line of its own.
+unmount_persist() {
+	"$UMOUNT" "$PERSIST_MNT" 2>/dev/null && return 0
+	log "could not unmount $PERSIST_MNT; systemd will not mount it itself and the commit will fail"
+	return 0
+}
+
 # ── the API filesystems ──────────────────────────────────────────────────────
 # The kernel mounts NEITHER /proc nor /sys before it runs init; systemd's
 # mount_setup() does that, and it runs after we have handed off. /dev is the one
@@ -207,6 +221,18 @@ fi
 # needed on a read-only rootfs; systemd's fstab unit mounts it properly (rw,
 # x-systemd.growfs) later in local-fs.target.
 #
+#
+# The key is no looser than the one the image already trusts: the rpi's fstab
+# uses PARTUUID=52415350-07, and genimage pins disk-signature = 0x52415350 so
+# that PARTUUID is identical on EVERY flashed medium; the n100's PARTLABEL is
+# likewise the genimage partition name, identical on every medium. So a node
+# booted with a second Rasputin disk attached is ambiguous for systemd's own
+# /var/lib/rasputin mount exactly as it is here — and the persistent filesystem
+# baked into the image is empty, so the worst this lookup does with the wrong
+# one is read no id and degrade. The device that was actually chosen is named
+# in every message below, restore and degrade alike, so an ambiguous pick shows
+# up in the boot log rather than as a mystery.
+#
 # store_why records WHICH step failed. dev.251 emitted one message — "no stored
 # machine-id yet" — for three different conditions (findfs found nothing, the
 # mount failed, the file was absent or unreadable), which is why the sysfs
@@ -223,14 +249,17 @@ if [ -z "$persist_dev" ]; then
 elif ! "$MOUNT" -t ext4 -o ro,nosuid,nodev,noexec "$persist_dev" "$PERSIST_MNT" 2>/dev/null; then
 	store_why="found $persist_dev but could not mount it read-only on $PERSIST_MNT"
 elif [ ! -r "$PERSIST_MNT/machine-id" ]; then
+	# The EXPECTED case on a node's first boot and on the first boot after this
+	# image lands on a fielded one: the commit unit has not written the store
+	# yet. Worded so it does not read like a fault, because it is not one.
 	# Guarded by -r because a redirection onto a missing file is an error the
 	# shell reports, not a value.
-	store_why="mounted $persist_dev but it holds no readable machine-id"
-	"$UMOUNT" "$PERSIST_MNT" 2>/dev/null
+	store_why="no machine-id stored on $persist_dev yet"
+	unmount_persist
 else
 	# read -r, not cat: the file is one short line and this needs no fork.
 	read -r stored_id <"$PERSIST_MNT/machine-id" 2>/dev/null
-	"$UMOUNT" "$PERSIST_MNT" 2>/dev/null
+	unmount_persist
 	if [ -z "$stored_id" ]; then
 		store_why="mounted $persist_dev but its machine-id is empty"
 	elif ! machine_id_valid "$stored_id"; then
@@ -258,7 +287,7 @@ if [ -n "$stored_id" ]; then
 			# -o bind is understood by both busybox and util-linux mount
 			# (the idiom rasputin-coredump-store.service already uses).
 			if "$MOUNT" -o bind "$RUN_MACHINE_ID" "$ETC_MACHINE_ID" 2>/dev/null; then
-				log "machine-id $stored_id restored from the persistent partition"
+				log "machine-id $stored_id restored from $persist_dev (LABEL=$PERSIST_LABEL)"
 			else
 				# systemd will overwrite /run/machine-id with a transient value
 				# and bind that instead, which is exactly today's behaviour.
@@ -271,10 +300,12 @@ if [ -n "$stored_id" ]; then
 		log "could not mount /run; falling back to a transient id"
 	fi
 else
-	# Expected on the first boot of a node and on the first boot after this
-	# image lands on a fielded one: rasputin-machine-id-commit.service has not
-	# written the store yet. It will, from this boot's transient id. Anything
-	# else in store_why is a fault, and now says which one.
+	# store_why is set on every branch above, so the default is a backstop, not
+	# a case: it is here so that a branch added later without a message still
+	# produces a line rather than degrading in silence, which is the whole
+	# defect this half of the change exists to end. The benign reason — the
+	# commit unit has not written the store yet — is the "no machine-id stored
+	# on … yet" one; every other reason is a fault and names its step.
 	log "${store_why:-no stored machine-id yet}; this boot uses a transient id"
 fi
 

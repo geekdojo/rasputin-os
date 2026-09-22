@@ -324,7 +324,12 @@ cases() {
 	ok "no store: no /run/machine-id written" "$(yes_if not test -e "$R/run/machine-id")"
 	ok "no store: says a transient id is in use" "$(yes_if out_has 'this boot uses a transient id')" "$OUT"
 	ok "no store: names the partition it mounted and read" \
-		"$(yes_if out_has 'mounted /dev/fake1 but it holds no readable machine-id')" "$OUT"
+		"$(yes_if out_has 'no machine-id stored on /dev/fake1 yet')" "$OUT"
+	# This one is the EXPECTED first boot, so it must not read as a fault —
+	# the fault messages below all say "but". An operator grepping a fresh
+	# node's log should not find one.
+	ok "no store: does not read as a fault" \
+		"$(yes_if not out_has 'but')" "$OUT"
 
 	# 9. A malformed store is refused rather than passed on. systemd would mint
 	#    a transient id anyway, so binding garbage buys nothing and hides the
@@ -374,19 +379,33 @@ cases() {
 	ok "malformed store: says it is malformed and quotes it" \
 		"$(yes_if out_has 'its machine-id is malformed: not-a-machine-id')" "$OUT"
 
-	# All four reasons differ from one another. A message that meant three
-	# things is what made this defect expensive to find.
-	setup; store "$GOOD_ID"; STUB_FINDFS_RC=1; shim; m1=$OUT
-	setup; store "$GOOD_ID"; STUB_EXT4_RC=32; shim; m2=$OUT
-	setup; shim; m3=$OUT
-	setup; store 'garbage'; shim; m4=$OUT
-	ok "the four degrade reasons are four different messages" \
-		"$(yes_if test "$(printf '%s\n%s\n%s\n%s\n' "$m1" "$m2" "$m3" "$m4" \
-			| grep -c 'this boot uses a transient id')" = 4)" ""
-	ok "and none of them is reused" \
-		"$(yes_if test "$(printf '%s\n%s\n%s\n%s\n' "$m1" "$m2" "$m3" "$m4" \
-			| grep 'this boot uses a transient id' | sort -u | wc -l | tr -d ' ')" = 4)" \
-		"$(printf '%s\n%s\n%s\n%s\n' "$m1" "$m2" "$m3" "$m4" | grep 'transient id')"
+	# A partition that will not unmount. systemd derives .mount state from
+	# /proc/self/mountinfo, so one left mounted here comes up "mounted" without
+	# systemd ever running mount(8): x-systemd.growfs never runs and
+	# rasputin-growpart's expansion silently stops happening, while the commit
+	# unit's ConditionPathIsMountPoint passes and it then fails writing to a
+	# read-only filesystem. All of that is silent, so the shim has to say it.
+	setup; store "$GOOD_ID"; UMOUNT_BIN="$W/nonexistent-umount"; shim
+	ok "persistent will not unmount: hands off anyway" "$(yes_if handed_off)" "$OUT"
+	ok "persistent will not unmount: still restores the id" "$(yes_if bound)" "$(cat "$W/mount.calls")"
+	ok "persistent will not unmount: says so" \
+		"$(yes_if out_has "could not unmount $R/var/lib/rasputin")" "$OUT"
+
+	# All five reasons differ from one another. ONE message that meant three
+	# things is what made this defect expensive to find, so distinctness is the
+	# property, not merely that something was printed.
+	setup; store "$GOOD_ID"; STUB_FINDFS_RC=1;  shim; m1=$OUT
+	setup; store "$GOOD_ID"; STUB_EXT4_RC=32;   shim; m2=$OUT
+	setup;                                      shim; m3=$OUT
+	setup; store '';                            shim; m4=$OUT
+	setup; store 'garbage';                     shim; m5=$OUT
+	# One "transient id" line per run, and five distinct ones across the five.
+	reasons=$(printf '%s\n%s\n%s\n%s\n%s\n' "$m1" "$m2" "$m3" "$m4" "$m5" \
+		| grep 'this boot uses a transient id')
+	ok "each degrade prints exactly one reason" \
+		"$(yes_if test "$(printf '%s\n' "$reasons" | wc -l | tr -d ' ')" = 5)" "$reasons"
+	ok "and the five reasons are five DIFFERENT messages" \
+		"$(yes_if test "$(printf '%s\n' "$reasons" | sort -u | wc -l | tr -d ' ')" = 5)" "$reasons"
 
 	# 11. THE ONE RULE. With no mount, no umount and no findfs on the machine at
 	#    all, PID 1 still reaches systemd. This is the case that separates a
