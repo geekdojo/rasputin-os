@@ -90,7 +90,26 @@ jobs:
     # STRING "true" via the API / `gh -f`. Accept both. (Defaults to false
     # if the input wasn't set at all.)
     if: ${{ startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && (inputs.full_build == true || inputs.full_build == 'true' || inputs.publish == true || inputs.publish == 'true')) }}
-    runs-on: ubuntu-latest   # amd64; Buildroot cross-compiles arm64 fine
+    # Both SKUs build on the 16-core larger runner (16 vCPU / 64 GiB / 600 GB,
+    # x86-64 — Buildroot cross-compiles arm64 fine, nothing is emulated).
+    #
+    # Measured A/B, run 35664766508 (stock) vs 35669561845 (16-core), both
+    # restoring the same warm ccache:
+    #   rpi   Build 3158s -> 1782s,  job 3282s -> 1989s
+    #   n100  Build 2418s -> ~1510s (estimated; n100 was the stock control)
+    # Scaling by phase: kernels 3.07x, host-go 1.82x, host-gcc ~1.4x.
+    #
+    # This is METERED compute — $0.042/min per job, no included minutes, and
+    # not free even though this repo is public. At the current ~62 builds/mo
+    # that is roughly $150-180/mo, bought deliberately to hold the release
+    # wall clock near 35m instead of 55m. Revert by setting this back to
+    # ubuntu-latest; nothing else depends on the runner size (BR2_JLEVEL is
+    # unset, so Buildroot derives -j from the host CPU count on its own).
+    #
+    # The runner is an org-level GitHub-hosted larger runner in the
+    # "public-larger-runners" group, which is scoped to this repository and is
+    # the only group with allows_public_repositories set.
+    runs-on: ubuntu-24-16core
     strategy:
       fail-fast: false
       matrix:
