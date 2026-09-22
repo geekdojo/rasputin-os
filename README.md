@@ -47,6 +47,15 @@ this image — see
   the persistent partition, puts it where systemd expects to find it, and execs
   the real systemd. It always execs systemd — a node with no readable
   persistent partition boots exactly as it did before, with a transient id.
+- **Journals that survive a reboot.** `/var/log/journal` is baked into the
+  image but sits on the read-only squashfs, so journald used to fall back to
+  volatile `/run` and every reboot destroyed the node's whole history.
+  `rasputin-journal-store.service` bind-mounts `/var/lib/rasputin/journal` over
+  it, ordered before `systemd-journal-flush.service` so the boot's own log
+  lands on disk too, and `journald.conf.d/rasputin.conf` sets
+  `Storage=persistent` with absolute retention caps rather than journald's
+  filesystem-derived defaults — the data partition grows on first boot, so a
+  percentage would mean a different retention on every unit.
 - **RAUC atomic A/B updates** with rollback, driven by the control plane's
   update saga (stage → reboot into the new slot → health check → commit or
   roll back). Bundles are verified against a CA baked into every image.

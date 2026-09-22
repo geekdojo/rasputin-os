@@ -13,7 +13,9 @@ name: ci
 # at-rest mode audit against synthetic trees, plus the fallback-address suite,
 # which fakes networkd's lease directory and /sys/class/net so a boot-time
 # decision is testable without a network, a root shell, or a DHCP server to
-# take away.
+# take away. Persistent journal storage is in there too — no script on the
+# node, just the shape of the unit, the journald drop-in, the tmpfiles file and
+# the at-rest declaration that have to agree with each other.
 #
 # One job goes further than the overlay scripts: rootfs-shadow checks out the
 # pinned Buildroot and runs its own mkusers over a target dir prepared by
@@ -25,7 +27,10 @@ name: ci
 # because what went wrong in geekdojo-brain#427 lives between networkd, the
 # kernel and systemd's path units, and no stub can show it. The core-dump
 # policy gets one for the same reason: it is nothing but systemd configuration,
-# so only real systemd can say whether it means what it says.
+# so only real systemd can say whether it means what it says. Persistent
+# journal storage gets one on the same grounds, and it goes one further by
+# reproducing the defect it fixes — journald falling back to volatile /run —
+# so the fix is demonstrated against the failure rather than asserted.
 
 on:
   pull_request:
@@ -199,6 +204,19 @@ jobs:
         env:
           REQUIRE_BUSYBOX: "1"
         run: sh test/atrest-modes-test.sh
+      # Persistent journal storage (geekdojo/geekdojo-brain#601). Node journals
+      # lived on the read-only squashfs, so journald fell back to /run and every
+      # reboot destroyed the history — which is why the 22-hour firewall outage
+      # in #547 had to be diagnosed from live socket state. The fix is four
+      # declarative files, and every way it can be wrong is silent: the unit
+      # enabled at multi-user.target instead of sysinit.target still mounts the
+      # store, just after the flush has concluded there is nowhere to flush to;
+      # without DefaultDependencies=no it is in an ordering cycle systemd
+      # resolves by dropping an edge it picks; the mode line in the wrong
+      # tmpfiles file loses to stock systemd.conf. No REQUIRE_BUSYBOX: this
+      # change adds no shell script to the node, so there is no shell to vary.
+      - name: Persistent journal tests
+        run: sh test/persistent-journal-test.sh
       # release.yml's publish step runs scripts/release-target-guard.sh before
       # and after `gh release create` to prove the tag is on the commit the
       # images were built from. Every exit status, against a throwaway git
@@ -278,3 +296,21 @@ jobs:
       - uses: actions/checkout@v4
       - name: Coredump policy against real systemd (limit scoping, store and core modes)
         run: sh test/coredump-functional.sh
+
+  # Persistent journal storage is configuration only — a bind mount, a journald
+  # drop-in and a tmpfiles line — so nothing in the build can say whether
+  # systemd reads it the way we do, and two of its claims are readings of a
+  # manual page. One is the DEFECT itself ("journald stays on /run when
+  # /var/log/journal is not writable"), which a test that cannot reproduce it
+  # cannot show the fix for. The other is that a tmpfiles file sorting after
+  # stock systemd.conf overrides systemd.conf's mode for the same path — wrong,
+  # and /var/log/journal is world-listable on every node under a /var/log that
+  # is 0777, with the at-rest audit failing every boot. Runs real
+  # systemd-journald and systemd-tmpfiles 256.17, the image's version, in a
+  # privileged container.
+  persistent-journal-functional:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Persistent journal against real journald + tmpfiles (fallback, flush, mode, caps)
+        run: sh test/persistent-journal-functional.sh

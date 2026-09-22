@@ -132,7 +132,7 @@ world() {
 	mkdir -p "$V"
 	umask 077
 	: >"$V/node.env"; chmod 0600 "$V/node.env"
-	for d in bus agent-state trust mesh tailscale rauc dropbear coredump console; do
+	for d in bus agent-state trust mesh tailscale rauc dropbear coredump console journal; do
 		mkdir -p "$V/$d"; chmod 0700 "$V/$d"
 	done
 	# /etc/shadow lives here: a baked-in symlink points at it so the control
@@ -347,6 +347,17 @@ ok "the coredump store unit sets an explicit mode" \
 	"$(yes_if grep -qE '^ExecStart=/bin/chmod 0700 /var/lib/rasputin/coredump' \
 		"$UNITDIR/rasputin-coredump-store.service")" \
 	"$(grep -n ExecStart "$UNITDIR/rasputin-coredump-store.service")"
+
+# The journal store is the same shape: its own unit creates it, because it has
+# to exist before systemd-journal-flush.service and tmpfiles-setup runs after
+# that. So the mode has to be set in the unit — and then HELD there by a
+# tmpfiles file that sorts after stock systemd.conf, which resets
+# /var/log/journal (the same inode) to 2755 root:systemd-journal on every boot.
+# test/persistent-journal-test.sh covers the rest of that arrangement.
+ok "the journal store unit sets an explicit mode" \
+	"$(yes_if grep -qE '^ExecStart=/bin/chmod 0700 /var/lib/rasputin/journal' \
+		"$UNITDIR/rasputin-journal-store.service" 2>/dev/null)" \
+	"$(grep -n ExecStart "$UNITDIR/rasputin-journal-store.service" 2>&1)"
 
 # The audit runs on every boot and must never take a boot down with it.
 ok "the audit unit is a oneshot" \
