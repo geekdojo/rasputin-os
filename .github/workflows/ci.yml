@@ -94,6 +94,13 @@ jobs:
       # identical in a build and in a boot log, so it is pinned here.
       - name: Wired uplink config tests
         run: sh test/wired-network-test.sh
+      # The stock units this image masks. A mask is a /dev/null symlink, which
+      # is the easiest thing in the overlay to lose to a rebase or a copy that
+      # resolves links — and losing it looks identical in a build, while the
+      # unmasked unit goes back to failing on every boot and keeping
+      # `systemctl --failed` permanently non-empty.
+      - name: Masked-unit tests
+        run: sh test/masked-units-test.sh
       # The image's clock floor is an mtime on an empty file: a build that
       # silently stops baking it looks identical and puts every offline first
       # boot back to minting already-expired certificates
