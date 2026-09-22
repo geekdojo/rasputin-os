@@ -1,0 +1,35 @@
+# Commit this node's machine-id to the persistent partition.
+#
+# The other half of the machine-id fix (geekdojo/geekdojo-brain#600); /sbin/init
+# → usr/lib/rasputin/machine-id/rasputin-init is the half that restores it,
+# before systemd starts. Read that script first — it carries the reasoning for
+# why the restore cannot be a unit.
+#
+# This half CAN be a unit, because it only has to run once the persistent
+# partition is properly mounted, and it writes a value that takes effect on the
+# NEXT boot. So it is ordered nowhere in particular and blocks nothing.
+#
+# It is systemd-machine-id-commit.service for an /etc that never becomes
+# writable: that unit is skipped on every boot of every node
+# ("ConditionPathIsReadWrite=/etc was not met"), which is what leaves the id
+# transient in the first place.
+#
+# Idempotent: it writes the store once and is a logged no-op on every boot
+# after. It never replaces a stored id — if the store and the running id
+# disagree, the restore failed and the script says so rather than starting the
+# churn again.
+[Unit]
+Description=Commit the machine-id to the persistent partition
+Documentation=man:systemd-machine-id-commit.service(8)
+# Everything it writes lands on the persistent partition; nofail in fstab means
+# it can be absent, and then there is nowhere to commit to.
+RequiresMountsFor=/var/lib/rasputin
+ConditionPathIsMountPoint=/var/lib/rasputin
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/rasputin/machine-id/rasputin-machine-id-commit.sh
+
+[Install]
+WantedBy=multi-user.target

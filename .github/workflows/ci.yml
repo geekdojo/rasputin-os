@@ -74,7 +74,11 @@ jobs:
         # step exists to end.
         run: |
           fail=0
-          for f in $(find board test -name '*.sh' -type f); do
+          # -name rasputin-init as well as *.sh: that one is a shell script
+          # with no extension because it IS /sbin/init on the node, and it is
+          # PID 1 — a parse error in it is a kernel panic with no rollback, so
+          # it is the LAST file in the tree that may go unchecked.
+          for f in $(find board test \( -name '*.sh' -o -name 'rasputin-init' \) -type f); do
             shebang=$(head -1 "$f")
             case "$shebang" in
               '#!/bin/sh') checker=dash ;;
@@ -158,6 +162,23 @@ jobs:
         env:
           REQUIRE_BUSYBOX: "1"
         run: sh test/jointoken-file-test.sh
+      # The persistent machine-id (geekdojo/geekdojo-brain#600). Two halves, both
+      # invisible when wrong. The PID 1 shim is /sbin/init: it runs before
+      # systemd, under busybox ash, with no unit manager to report anything, and
+      # an exit or an unguarded non-zero there is a kernel panic — "Requested
+      # init ... failed" — which on the Pi happens far too early for the tryboot
+      # one-shot to roll it back. So what is pinned is that EVERY path through it
+      # reaches the hand-off, including with no mount, no umount and no findfs on
+      # the machine. The commit half is pinned for the opposite reason: it must
+      # never replace a stored id, or a broken restore becomes a new identity
+      # written to disk on every boot, which is the defect with extra steps. The
+      # build step is run for real against a target dir, because its refusals are
+      # what stop an upstream move of /sbin/init from shipping an unbootable
+      # image.
+      - name: Machine-id persistence tests
+        env:
+          REQUIRE_BUSYBOX: "1"
+        run: sh test/machine-id-test.sh
       # The console root password (geekdojo/geekdojo-brain#546): the helper the
       # control plane's push invokes, and the image declarations that make it
       # able to work at all. Two failure modes here are silent — a console that

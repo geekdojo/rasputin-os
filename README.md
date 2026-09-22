@@ -37,6 +37,16 @@ this image — see
 - **Read-only squashfs rootfs, A/B slots + a persistent data partition.**
   One build emits both a flashable `.img` and a signed **RAUC** `.raucb` OTA
   bundle. The data partition grows to fill the medium on first boot.
+- **A stable machine-id, established before systemd starts.** `/etc` is
+  read-only, so stock systemd mints a fresh machine-id into tmpfs on every boot
+  and a node's identity changes each time it reboots. It does that in
+  `machine_id_setup()`, before any unit or generator exists, so nothing that
+  runs as a unit can fix it without leaving PID 1 and journald on the old
+  value. `/sbin/init` is therefore a small shell shim
+  (`usr/lib/rasputin/machine-id/rasputin-init`) that reads the id committed to
+  the persistent partition, puts it where systemd expects to find it, and execs
+  the real systemd. It always execs systemd — a node with no readable
+  persistent partition boots exactly as it did before, with a transient id.
 - **RAUC atomic A/B updates** with rollback, driven by the control plane's
   update saga (stage → reboot into the new slot → health check → commit or
   roll back). Bundles are verified against a CA baked into every image.

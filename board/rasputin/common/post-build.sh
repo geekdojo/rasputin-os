@@ -67,6 +67,59 @@ ln -sf /etc/systemd/system/rasputin-jointoken-file.service \
 # didn't mount, and it's a plain Wants — a failure never blocks boot.
 ln -sf /etc/systemd/system/rasputin-coredump-store.service \
 	"$TARGET_DIR/etc/systemd/system/multi-user.target.wants/rasputin-coredump-store.service"
+# Commit this node's machine-id to the persistent partition, so the PID 1 shim
+# below can hand the same value back to systemd on the next boot. Once per node
+# and a logged no-op after. geekdojo/geekdojo-brain#600.
+ln -sf /etc/systemd/system/rasputin-machine-id-commit.service \
+	"$TARGET_DIR/etc/systemd/system/multi-user.target.wants/rasputin-machine-id-commit.service"
+
+# ── /sbin/init ───────────────────────────────────────────────────────────────
+#
+# Point the KERNEL's default init at our shim, which restores the committed
+# machine-id and then execs the real systemd. See
+# rootfs-overlay/usr/lib/rasputin/machine-id/rasputin-init for why this has to
+# happen before systemd rather than in a unit: /etc is a read-only squashfs, so
+# PID 1 mints a fresh machine-id into tmpfs and bind-mounts it over
+# /etc/machine-id in machine_id_setup(), before any generator or unit exists —
+# so nothing that runs as a unit can change the value without leaving PID 1 and
+# journald on the old one. There is no initrd on this image and the boot media
+# is not OTA-updatable, which rules out every other hook earlier than systemd.
+#
+# WHY HERE and not a symlink in the rootfs overlay: this way the build can
+# REFUSE to ship a rootfs whose /sbin/init is not what we think it is. A silent
+# overlay symlink would still look right after systemd moved its binary, and
+# would hand PID 1 to a shim that execs a path that no longer exists — which is
+# an unbootable node with no fallback (the kernel panics with "Requested init
+# … failed"). Fail the build instead.
+INIT_LINK="$TARGET_DIR/sbin/init"
+INIT_SHIM=/usr/lib/rasputin/machine-id/rasputin-init
+INIT_REAL=/usr/lib/systemd/systemd
+if [ ! -L "$INIT_LINK" ]; then
+	echo "post-build: $INIT_LINK is not a symlink — refusing to replace it" >&2
+	exit 1
+fi
+init_target="$(readlink "$INIT_LINK")"
+case "$init_target" in
+	../lib/systemd/systemd|/lib/systemd/systemd|../usr/lib/systemd/systemd|/usr/lib/systemd/systemd) ;;
+	# An incremental `make` re-runs target-finalize over a tree this script has
+	# already swapped, and the systemd package is not reinstalled, so the link
+	# is already ours. That is the expected state, not a tampered one.
+	"$INIT_SHIM") ;;
+	*)
+		echo "post-build: /sbin/init points at '$init_target', not systemd — refusing to replace it" >&2
+		exit 1
+		;;
+esac
+if [ ! -x "$TARGET_DIR$INIT_SHIM" ]; then
+	echo "post-build: missing or non-executable $INIT_SHIM in the rootfs" >&2
+	exit 1
+fi
+if [ ! -x "$TARGET_DIR$INIT_REAL" ]; then
+	echo "post-build: $INIT_REAL is not an executable — the shim would exec nothing" >&2
+	exit 1
+fi
+ln -sf "$INIT_SHIM" "$INIT_LINK"
+echo "post-build: /sbin/init -> $INIT_SHIM (execs $INIT_REAL)"
 
 # RAUC system config (A/B slots + GRUB backend + keyring). Per-SoC, so it's
 # copied from the board dir rather than the shared overlay. rauc errors without

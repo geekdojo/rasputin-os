@@ -102,6 +102,19 @@ make_target() {
 	_rootfield="${2-*}"
 	rm -rf "$_d"
 	mkdir -p "$_d/etc" "$_d/usr/lib/systemd/system" "$_d/var/lib"
+	# post-build.sh also repoints /sbin/init at the machine-id shim, and it
+	# REFUSES a tree where /sbin/init is not the systemd symlink or the shim is
+	# not there (geekdojo/geekdojo-brain#600) — a guard that exists because a
+	# shim exec'ing a path that moved is a kernel panic on the first boot. So a
+	# target dir has to carry those three things for post-build to run at all.
+	# What the guard does on its own is test/machine-id-test.sh's business.
+	mkdir -p "$_d/sbin" "$_d/usr/lib/rasputin/machine-id"
+	printf '#!/bin/sh\nexit 0\n' > "$_d/usr/lib/systemd/systemd"
+	chmod +x "$_d/usr/lib/systemd/systemd"
+	cp "$ROOT/board/rasputin/common/rootfs-overlay/usr/lib/rasputin/machine-id/rasputin-init" \
+		"$_d/usr/lib/rasputin/machine-id/rasputin-init"
+	chmod +x "$_d/usr/lib/rasputin/machine-id/rasputin-init"
+	ln -s ../lib/systemd/systemd "$_d/sbin/init"
 	printf 'root:x:0:0:root:/root:/bin/sh\nnobody:x:65534:65534:nobody:/:/bin/false\n' \
 		> "$_d/etc/passwd"
 	printf 'root:%s:20000:0:99999:7:::\nnobody:!:20000:0:99999:7:::\n' "$_rootfield" \

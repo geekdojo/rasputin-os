@@ -115,6 +115,18 @@ prep() { # prep <case> <pin text | NOPIN> [NOCA]
 	C="$TMP/$1"; rm -rf "$C"
 	mkdir -p "$C/board/rasputin/common" "$C/target/etc/rasputin/trust"
 	cp "$POSTBUILD" "$C/board/rasputin/common/post-build.sh"
+	# post-build.sh also repoints /sbin/init at the machine-id shim and REFUSES
+	# a target dir that does not look like a finalized Buildroot tree
+	# (geekdojo/geekdojo-brain#600) — it would stop before reaching the bake.
+	# Give every case the three files that guard looks at; what the guard does
+	# on its own is test/machine-id-test.sh's business.
+	mkdir -p "$C/target/sbin" "$C/target/usr/lib/systemd" "$C/target/usr/lib/rasputin/machine-id"
+	printf '#!/bin/sh\nexit 0\n' > "$C/target/usr/lib/systemd/systemd"
+	chmod +x "$C/target/usr/lib/systemd/systemd"
+	cp "$ROOT/board/rasputin/common/rootfs-overlay/usr/lib/rasputin/machine-id/rasputin-init" \
+		"$C/target/usr/lib/rasputin/machine-id/rasputin-init"
+	chmod +x "$C/target/usr/lib/rasputin/machine-id/rasputin-init"
+	ln -s ../lib/systemd/systemd "$C/target/sbin/init"
 	[ "$2" = NOPIN ] || printf '%s' "$2" > "$C/board/rasputin/common/firewall-pin.txt"
 	[ "${3:-}" = NOCA ] || cp "$W/root.pem" "$C/target/etc/rasputin/trust/root-ca.pem"
 	TGT="$C/target"
