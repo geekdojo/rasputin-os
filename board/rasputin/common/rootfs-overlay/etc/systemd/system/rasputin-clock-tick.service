@@ -1,0 +1,21 @@
+# The periodic half of the clock save. Started only by
+# rasputin-clock-tick.timer; it has no [Install] section and nothing else pulls
+# it in.
+#
+# WHY A SECOND UNIT RATHER THAN THE TIMER DRIVING rasputin-clock-save.service.
+# That unit is RemainAfterExit=yes, because it has to stay active for its
+# ExecStop to run at shutdown. A timer that started an already-active unit would
+# be a no-op on every tick, silently — the tick would look wired and would never
+# write. So the periodic path gets its own unit, which runs the same script and
+# holds no state.
+#
+# It deliberately does NOT RemainAfterExit: each tick is a complete action.
+[Unit]
+Description=Periodic clock save for the next boot's floor
+Documentation=https://github.com/geekdojo/rasputin-os
+RequiresMountsFor=/var/lib/rasputin
+ConditionPathIsMountPoint=/var/lib/rasputin
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/rasputin/clock/rasputin-clock-save.sh

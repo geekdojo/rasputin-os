@@ -1,0 +1,40 @@
+# Persist the node's time across shutdown, so a no-RTC board has a floor to
+# restore on the next boot. geekdojo/geekdojo-brain#601 (the arm64 half).
+#
+# The SAVE half of the clock floor. The restore is in the PID 1 shim,
+# usr/lib/rasputin/machine-id/rasputin-init, because nothing that runs as a unit
+# is early enough: journald starts at mono ~8.6 and the flush runs at ~12.0,
+# both before systemd-timesyncd corrects the clock at ~12.9 (measured on
+# cp-compute5.local). See that script for the full ordering argument.
+#
+# TWO WRITES FROM ONE UNIT. ExecStart covers the boot — it costs nothing and it
+# means a node that is power-cut before the first tick still has a floor no
+# older than its own boot. ExecStop is the one that matters: it is the last
+# thing that knows what time it is before the node goes dark.
+#
+# THE SHUTDOWN WRITE IS WHY THERE IS NO DefaultDependencies=no HERE, unlike the
+# other units in this image that touch the persistent partition. The default
+# dependencies are exactly what is wanted: Conflicts=shutdown.target plus
+# Before=shutdown.target means systemd stops this unit — and therefore runs
+# ExecStop — as part of the shutdown transaction. RequiresMountsFor adds
+# After=var-lib-rasputin.mount, and systemd stops units in the reverse of the
+# order it started them, so ExecStop runs while the partition is still mounted.
+#
+# NO TIMEOUT WORTH NAMING: the ExecStop is a `date`, a compare and a 4-byte
+# write, and systemd's own default stop timeout bounds it. Nothing waits on it.
+[Unit]
+Description=Persist the system clock for the next boot's floor
+Documentation=https://github.com/geekdojo/rasputin-os
+# Everything it writes lands on the persistent partition; nofail in fstab means
+# it can be absent, and then there is nowhere to save to.
+RequiresMountsFor=/var/lib/rasputin
+ConditionPathIsMountPoint=/var/lib/rasputin
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/rasputin/clock/rasputin-clock-save.sh
+ExecStop=/usr/lib/rasputin/clock/rasputin-clock-save.sh
+
+[Install]
+WantedBy=multi-user.target

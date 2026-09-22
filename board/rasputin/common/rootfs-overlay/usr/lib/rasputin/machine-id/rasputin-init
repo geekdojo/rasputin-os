@@ -1,6 +1,13 @@
 #!/bin/sh
 #
-# rasputin-init — the PID 1 shim that hands systemd a PERSISTENT machine-id.
+# rasputin-init — the PID 1 shim that hands systemd a PERSISTENT machine-id and
+# a PERSISTENT clock floor.
+#
+# It restores two things, for the same reason and out of the same read: both
+# have to be in place BEFORE systemd starts, and the persistent partition is the
+# only place either value can come from. The machine-id half is
+# geekdojo-brain#600; the clock half is geekdojo-brain#601's arm64 side, and
+# there is a section on it below the machine-id reasoning.
 #
 # post-build.sh points /sbin/init at this script, so the KERNEL runs it as PID 1
 # and it execs the real systemd as its last act. Nothing else about the boot
@@ -45,18 +52,85 @@
 #
 # Mount /proc and /sys (the kernel mounts neither before init, and findfs needs
 # sysfs to find a filesystem by LABEL with udev not yet running), mount the
-# persistent partition read-only, read /var/lib/rasputin/machine-id, unmount all
-# three, and — if and only if that value is a well-formed machine-id — write it
-# to /run/machine-id and bind-mount that over /etc/machine-id. That is byte for
-# byte the end state systemd produces today (same path, same 0444, same bind);
-# only the VALUE is different, and systemd's machine_id_setup() then finds a
-# valid /etc/machine-id and mints nothing.
+# persistent partition read-only, read /var/lib/rasputin/machine-id and
+# /var/lib/rasputin/clock, unmount all three, and then:
+#
+#   - if and only if the id is a well-formed machine-id — write it to
+#     /run/machine-id and bind-mount that over /etc/machine-id. That is byte for
+#     byte the end state systemd produces today (same path, same 0444, same
+#     bind); only the VALUE is different, and systemd's machine_id_setup() then
+#     finds a valid /etc/machine-id and mints nothing;
+#   - if and only if the stored clock is a plausible Unix timestamp AND is LATER
+#     than what the kernel's clock currently reads — set the clock to it.
+#
+# ONE mount serves both. Reading a second file off a partition that is already
+# mounted costs nothing, and doing it anywhere else would mean mounting it
+# twice or waiting for the real mount, which is far too late (see the clock
+# section above).
 #
 # It never creates, formats or writes the persistent partition. The id is put
-# there by rasputin-machine-id-commit.service, which runs as an ordinary unit
-# once the partition is properly mounted. So the FIRST boot of a node (and the
-# first boot after this lands on a fielded node) still uses a transient id —
-# that id is then committed and kept for the node's lifetime.
+# there by rasputin-machine-id-commit.service and the timestamp by
+# rasputin-clock-save.service, both ordinary units that run once the partition
+# is properly mounted. So the FIRST boot of a node (and the first boot after
+# this lands on a fielded node) still uses a transient id and the image's baked
+# /usr/lib/clock-epoch — both are then written to the store and kept.
+#
+# ── the clock floor, and why it is here too ───────────────────────────────────
+#
+# A node with no battery RTC — the Pi SKU — boots with no clock at all. PID 1
+# advances time to a floor and systemd-timesyncd corrects it several seconds
+# later. Measured on cp-compute5.local, wall clock against monotonic:
+#
+#   systemd[1]                      [ 5.861] "System time before build time,
+#                                             advancing clock."  -> 2025-06-25
+#   systemd-journald.service        2025-06-25 17:17:44 UTC   mono  8.588
+#   rasputin-journal-store.service  2025-06-25 17:17:47 UTC   mono 11.522
+#   systemd-journal-flush.service   2025-06-25 17:17:48 UTC   mono 12.004
+#   systemd-timesyncd.service       2026-09-22 21:14:18 UTC   mono 12.868
+#
+# journald therefore flushes /run into the persistent store 0.8 s BEFORE the
+# clock is corrected, stamping that boot's entries fifteen months in the past,
+# and force-rotates the moment time moves — "Realtime clock jumped backwards
+# relative to last journal entry, rotating." The Pi loses its previous boot's
+# journal on every boot while the amd64 node, which has an RTC, keeps it. So
+# persistent journals (#601) work on one SKU and not the other.
+#
+# WHY THE FLOOR HAS TO BE HERE AND NOT IN A UNIT. Everything above happens
+# before the first unit that could help. rasputin-clock-floor.service runs at
+# mono ~12, i.e. after journald has already written four seconds of entries that
+# the flush will copy; it cannot fix anything earlier than itself, and neither
+# can rasputin-journal-store.service, which is ordered before the flush but well
+# after journald started. The only hook earlier than journald is the one earlier
+# than systemd, and that is this script — which is already mounting the
+# persistent partition read-only and already reading a file off it.
+#
+# WHAT IT READS: /var/lib/rasputin/clock, a decimal Unix timestamp written at
+# shutdown and hourly by rasputin-clock-save.service. This is the fake-hwclock
+# pattern every no-RTC distro ships, moved one stage earlier than a unit can
+# reach.
+#
+# IT IS A FLOOR, NOT A CLOCK. The stored value is applied ONLY when the current
+# time is earlier than it. So on the n100, whose RTC has already given the
+# kernel a correct time, this is a no-op by construction; on the Pi it replaces
+# a 15-month-stale guess with the node's own last-known-good time. It does not
+# make an offline node's time correct and it replaces nothing about NTP.
+#
+# IT IS NOT THE ONLY FLOOR, AND THE THREE DO NOT COMPETE:
+#
+#   1. this, from /var/lib/rasputin/clock — the newest source, and the only one
+#      early enough to be in front of journald;
+#   2. /usr/lib/clock-epoch, stamped with the IMAGE build date by
+#      post-fakeroot.sh — PID 1's own backstop, read by systemd's
+#      clock_apply_epoch() a moment after we hand off. It applies when this
+#      script found no store: a node's first boot ever, or one whose persistent
+#      partition could not be read;
+#   3. the timesyncd timestamp file, seeded by rasputin-clock-floor.service —
+#      no longer a floor at all. It exists so timesyncd has a WRITABLE state
+#      directory on a read-only rootfs, and it is stamped from whatever the
+#      clock already reads, so it can never pull time backwards.
+#
+# Each one is strictly older than the one above it, so whichever applies, the
+# result is a monotone floor and never a fight.
 #
 # ── the one rule ──────────────────────────────────────────────────────────────
 #
@@ -89,6 +163,12 @@ if [ "$$" -eq 1 ]; then
 	MOUNT=/bin/mount
 	UMOUNT=/bin/umount
 	FINDFS=/usr/sbin/findfs
+	# busybox date. Both `-u +%s` and `-u -s @SECONDS` are busybox 1.37.0
+	# applets on this image (`date --help` on cp-compute5.local lists
+	# "@seconds_since_1970" among the recognised TIME formats). It is invoked
+	# ONLY when a stored clock was read, so a node with no store never touches
+	# it — see the clock block near the end.
+	DATE=/bin/date
 	KMSG=/dev/kmsg
 elif [ -n "${RASPUTIN_INIT_TEST:-}" ]; then
 	# test/machine-id-test.sh runs this script unprivileged against a scratch
@@ -97,6 +177,10 @@ elif [ -n "${RASPUTIN_INIT_TEST:-}" ]; then
 	MOUNT=${RASPUTIN_INIT_MOUNT:-/bin/mount}
 	UMOUNT=${RASPUTIN_INIT_UMOUNT:-/bin/umount}
 	FINDFS=${RASPUTIN_INIT_FINDFS:-/usr/sbin/findfs}
+	# test/clock-floor-test.sh ALWAYS overrides this with a stub that records
+	# the call instead of making it: a suite that let the real `date -s` through
+	# would set the clock of whatever machine ran it the moment it ran as root.
+	DATE=${RASPUTIN_INIT_DATE:-/bin/date}
 	KMSG=${RASPUTIN_INIT_KMSG:-/dev/null}
 	SYSTEMD=${RASPUTIN_INIT_SYSTEMD:-$SYSTEMD}
 else
@@ -106,6 +190,10 @@ fi
 
 PERSIST_LABEL=persistent
 PERSIST_MNT=$ROOT/var/lib/rasputin
+# The last-known-good time, written by rasputin-clock-save.service. Named
+# "clock" to match the file systemd-timesyncd keeps for the same purpose; the
+# two are read by different things at different stages and never share a path.
+CLOCK_STORE_NAME=clock
 RUN=$ROOT/run
 RUN_MACHINE_ID=$RUN/machine-id
 ETC_MACHINE_ID=$ROOT/etc/machine-id
@@ -129,6 +217,27 @@ machine_id_valid() {
 	case "$1" in
 		*[!0123456789abcdef]*) return 1 ;;
 		00000000000000000000000000000000) return 1 ;;
+	esac
+	return 0
+}
+
+# clock_valid VALUE — a plausible stored Unix timestamp: EXACTLY ten decimal
+# digits, which is 2001-09-09 through 2286-11-20.
+#
+# Ten and not "ten or more". The value goes into `[ "$a" -ge "$b" ]`, and this
+# runs under busybox ash, whose test applet is not a place to find out how wide
+# an integer is; ten digits cannot overflow anything and eleven might. The cost
+# is that this stops working in 2286, which is stated rather than discovered:
+# the node then degrades to /usr/lib/clock-epoch, exactly as one with no store.
+#
+# Nothing narrower is needed at the low end. The value is only ever applied when
+# it is LATER than the current clock, so a stale-but-well-formed one is a no-op
+# rather than a wrong answer, and a corrupt one that is not ten digits is
+# refused here before `date` ever sees it.
+clock_valid() {
+	[ "${#1}" -eq 10 ] || return 1
+	case "$1" in
+		*[!0123456789]*) return 1 ;;
 	esac
 	return 0
 }
@@ -241,33 +350,61 @@ fi
 # the single fallback line below quotes store_why verbatim. A silent degrade is
 # the failure mode this component is most prone to, so every branch says its
 # piece, and names $persist_dev whenever findfs gave us one.
+#
+# The clock is read in the SAME mount window and reported the same way, with
+# its own why-line, because its failure modes are its own: a node can perfectly
+# well have a committed machine-id and no stored clock (the first boot after
+# this change lands on a fielded node) or the other way round.
 stored_id=
 store_why=
+stored_clock=
+clock_why=
 persist_dev=$("$FINDFS" "LABEL=$PERSIST_LABEL" 2>/dev/null)
 if [ -z "$persist_dev" ]; then
 	store_why="findfs found no filesystem labelled $PERSIST_LABEL"
+	clock_why="$store_why"
 elif ! "$MOUNT" -t ext4 -o ro,nosuid,nodev,noexec "$persist_dev" "$PERSIST_MNT" 2>/dev/null; then
 	store_why="found $persist_dev but could not mount it read-only on $PERSIST_MNT"
-elif [ ! -r "$PERSIST_MNT/machine-id" ]; then
-	# The EXPECTED case on a node's first boot and on the first boot after this
-	# image lands on a fielded one: the commit unit has not written the store
-	# yet. Worded so it does not read like a fault, because it is not one.
-	# Guarded by -r because a redirection onto a missing file is an error the
-	# shell reports, not a value.
-	store_why="no machine-id stored on $persist_dev yet"
-	unmount_persist
+	clock_why="$store_why"
 else
-	# read -r, not cat: the file is one short line and this needs no fork.
-	read -r stored_id <"$PERSIST_MNT/machine-id" 2>/dev/null
-	unmount_persist
-	if [ -z "$stored_id" ]; then
-		store_why="mounted $persist_dev but its machine-id is empty"
-	elif ! machine_id_valid "$stored_id"; then
-		# Refused rather than passed on: systemd would mint a transient id
-		# anyway, so binding garbage buys nothing and hides the fault.
-		store_why="mounted $persist_dev but its machine-id is malformed: $stored_id"
-		stored_id=
+	if [ ! -r "$PERSIST_MNT/machine-id" ]; then
+		# The EXPECTED case on a node's first boot and on the first boot after
+		# this image lands on a fielded one: the commit unit has not written the
+		# store yet. Worded so it does not read like a fault, because it is not
+		# one. Guarded by -r because a redirection onto a missing file is an
+		# error the shell reports, not a value.
+		store_why="no machine-id stored on $persist_dev yet"
+	else
+		# read -r, not cat: the file is one short line and this needs no fork.
+		read -r stored_id <"$PERSIST_MNT/machine-id" 2>/dev/null
+		if [ -z "$stored_id" ]; then
+			store_why="mounted $persist_dev but its machine-id is empty"
+		elif ! machine_id_valid "$stored_id"; then
+			# Refused rather than passed on: systemd would mint a transient id
+			# anyway, so binding garbage buys nothing and hides the fault.
+			store_why="mounted $persist_dev but its machine-id is malformed: $stored_id"
+			stored_id=
+		fi
 	fi
+
+	if [ ! -r "$PERSIST_MNT/$CLOCK_STORE_NAME" ]; then
+		# Expected on a first boot and on the first boot after this change
+		# reaches a fielded node; systemd's own /usr/lib/clock-epoch covers it.
+		clock_why="no clock stored on $persist_dev yet"
+	else
+		read -r stored_clock <"$PERSIST_MNT/$CLOCK_STORE_NAME" 2>/dev/null
+		if [ -z "$stored_clock" ]; then
+			clock_why="mounted $persist_dev but its clock is empty"
+		elif ! clock_valid "$stored_clock"; then
+			clock_why="mounted $persist_dev but its clock is malformed: $stored_clock"
+			stored_clock=
+		fi
+	fi
+
+	# ONE unmount for both reads. Everything above this line only reads; the
+	# partition goes back before anything is delivered, so a delivery that goes
+	# wrong cannot leave it mounted.
+	unmount_persist
 fi
 
 # ── deliver it ───────────────────────────────────────────────────────────────
@@ -307,6 +444,41 @@ else
 	# commit unit has not written the store yet — is the "no machine-id stored
 	# on … yet" one; every other reason is a fault and names its step.
 	log "${store_why:-no stored machine-id yet}; this boot uses a transient id"
+fi
+
+# ── deliver the clock floor ──────────────────────────────────────────────────
+# ONLY FORWARDS. The stored value is applied when, and only when, the kernel's
+# clock currently reads earlier than it. On the n100, whose RTC has already put
+# the kernel at the right time, every boot takes the "already ahead" branch and
+# nothing is set — the whole block is a no-op on that SKU by construction.
+#
+# $DATE is not touched at all unless a stored clock was read, so a node with no
+# store, an unreadable partition or no date binary behaves exactly as it does
+# today, and so does any harness that does not stub $DATE.
+if [ -n "$stored_clock" ]; then
+	now=$("$DATE" -u +%s 2>/dev/null)
+	if ! clock_valid "$now"; then
+		# A date binary that is missing, or that answered something this cannot
+		# compare, is not a reason to guess: leaving the clock alone puts the
+		# boot back to systemd's own /usr/lib/clock-epoch, which is the backstop
+		# this is layered on top of.
+		log "read clock $stored_clock from $persist_dev but $DATE would not report the current time ('${now:-<nothing>}'); leaving the clock alone"
+	elif [ "$now" -ge "$stored_clock" ]; then
+		# The n100's every boot, and any Pi that somehow already has the time.
+		log "clock floor: already at $now, at or ahead of the $stored_clock stored on $persist_dev; leaving it alone"
+	elif "$DATE" -u -s "@$stored_clock" >/dev/null 2>&1; then
+		log "clock advanced from $now to $stored_clock, restored from $persist_dev (LABEL=$PERSIST_LABEL)"
+	else
+		# systemd's clock_apply_epoch() still runs a moment from now and will
+		# apply /usr/lib/clock-epoch, so this degrades to the image build date
+		# rather than to 1970.
+		log "read clock $stored_clock from $persist_dev but $DATE could not set the clock; falling back to the image's baked /usr/lib/clock-epoch"
+	fi
+else
+	# Same backstop shape as the machine-id line above: every branch that leaves
+	# $stored_clock empty sets $clock_why, and the default is here so a branch
+	# added later without a message still produces a line.
+	log "${clock_why:-no stored clock yet}; this boot's floor is the image's baked /usr/lib/clock-epoch"
 fi
 
 # Leave nothing behind that systemd would not have made itself. Unmounted in

@@ -1,0 +1,44 @@
+# Re-save the clock every hour, so an UNCLEAN power loss cannot leave the floor
+# at the node's last clean shutdown. geekdojo/geekdojo-brain#601.
+#
+# WHY A TIMER AT ALL, when a state change on this image is supposed to be
+# triggered by a checkable fact rather than by the clock. Nothing is being
+# decided here. The quantity being sampled IS the clock, it only ever increases,
+# and there is no fact that says "the time is now worth recording" — which is
+# precisely why fake-hwclock, the pattern every no-RTC distro ships, is driven
+# by cron on those systems too. What the cadence buys is a bound: after a power
+# cut the floor is at most one hour older than the moment the power went, rather
+# than as old as the last clean shutdown, which on an appliance that has been up
+# for three months is three months.
+#
+# WHY AN HOUR. The write is one 4 KiB ext4 block. journald writes to the same
+# partition continuously — 9.6 KB per five minutes on an idle cp-compute4 —
+# so an hourly 4 KiB write is roughly two orders of magnitude below the traffic
+# already on that medium and the flash-wear argument does not bind. An hour is
+# then simply the coarsest cadence whose worst case no operator would notice.
+#
+# OnBootSec=5min, not 0: the boot write is already done by
+# rasputin-clock-save.service's ExecStart, and this first tick exists to capture
+# the time AFTER systemd-timesyncd has corrected it — which it does within
+# ~20 s of boot on a node that can reach NTP (mono 19.402 on cp-compute5). Five
+# minutes is comfortably past that and nothing waits on it; it is a sampling
+# offset, not a deadline.
+#
+# NO Persistent=true. That option needs a writable /var/lib/systemd/timers, and
+# /var/lib/systemd is on the read-only squashfs rootfs on this image. It would
+# also be meaningless here: a missed tick is not work to catch up on, it is a
+# sample that no longer exists.
+[Unit]
+Description=Hourly clock save for the next boot's floor
+Documentation=https://github.com/geekdojo/rasputin-os
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=1h
+# The tick has no deadline of its own, so let systemd coalesce it with other
+# timers rather than waking the node for it.
+AccuracySec=1min
+Unit=rasputin-clock-tick.service
+
+[Install]
+WantedBy=timers.target
