@@ -33,11 +33,21 @@
 # ── the node's identity and its credentials ────────────────────────────────
 # node.env NAMES the token file; the token itself lives in its own 0600 file
 # (agent.token on a controlplane, join.token on every other role).
+#
+# bus/ is declared file by file and NOT swept, for the same reason trust/,
+# mesh/ and tailscale/ are not: it holds bus.crt and agent.pin — an X.509
+# certificate and a public-key pin, both public by construction — next to the
+# key, the token and the issuer key that are not. The directory is 0700, so no
+# non-root uid can traverse in regardless, and tightening a file that is public
+# by design would contradict the per-file rule this inventory exists to state.
+# Every secret in the tree is named below, so nothing the sweep covered is
+# uncovered by the exemption.
 0600  required  /var/lib/rasputin/node.env
 0700  optional  /var/lib/rasputin/bus
 0600  optional  /var/lib/rasputin/bus/bus.key
 0600  optional  /var/lib/rasputin/bus/agent.token
 0600  optional  /var/lib/rasputin/bus/join.token
+0600  optional  /var/lib/rasputin/bus/issuer.nk
 0700  optional  /var/lib/rasputin/agent-state
 
 # ── trust material ─────────────────────────────────────────────────────────
@@ -70,8 +80,9 @@
 # ── swept trees ────────────────────────────────────────────────────────────
 # Scoped deliberately to the trees whose contents are credentials without
 # exception. docker, containerd and tailscale are not swept: their contents
-# belong to those daemons and carry their own modes.
-sweep  /var/lib/rasputin/bus
+# belong to those daemons and carry their own modes. bus/ is not swept either
+# — see the exemption above it: it is a certificate and a pin next to the keys,
+# and the keys are declared by name.
 sweep  /var/lib/rasputin/console
 sweep  /var/lib/rasputin/agent-state
 sweep  /var/lib/rasputin/coredump

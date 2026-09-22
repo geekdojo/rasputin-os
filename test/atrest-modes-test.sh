@@ -94,6 +94,34 @@ run_audit_as() {
 	fi
 }
 
+# stub_without TOOL... — a directory holding a stub for each named tool that
+# exits 127, which is what calling a binary the image does not ship looks like
+# to this script. Prepended to PATH rather than replacing it, so the audit's
+# other tools (mktemp, wc, head) still resolve: what is staged is the absence
+# of one binary, not a bare environment.
+stub_without() {
+	_s=$(mktemp -d "$TMP/stub.XXXXXX")
+	for _t in "$@"; do
+		printf '#!/bin/sh\nexit 127\n' >"$_s/$_t"
+		chmod 0755 "$_s/$_t"
+	done
+	echo "$_s"
+}
+
+# run_audit_without ROOTDIR TOOL... — the audit with those tools unavailable.
+run_audit_without() {
+	d="$1"; shift
+	s=$(stub_without "$@")
+	if [ "$SH" = busybox_sh ]; then
+		PATH="$s:$PATH" busybox sh "$AUDIT" -i "$INVENTORY" -r "$d" -u "$ME" -q 2>&1
+	else
+		PATH="$s:$PATH" "$SH" "$AUDIT" -i "$INVENTORY" -r "$d" -u "$ME" -q 2>&1
+	fi
+}
+audit_rc_without() {
+	run_audit_without "$@" >/dev/null 2>&1
+}
+
 # world — a tree that passes: every declared path present with its declared
 # mode. Each case below then breaks exactly one thing, so a refusal is
 # attributable to that one thing.
@@ -133,7 +161,7 @@ cases() {
 	out=$(run_audit "$R")
 	ok "node.env at 0644 is refused" "$(yes_if not audit_rc "$R")" "$out"
 	ok "node.env failure names the path and what it became" \
-		"$(yes_if says 'node.env is 644, declared 0600' "$out")" "$out"
+		"$(yes_if says 'node.env is 0644, declared 0600' "$out")" "$out"
 
 	R=$(world); chmod 0640 "$R/var/lib/rasputin/bus/bus.key"
 	ok "a group-readable bus key is refused" "$(yes_if not audit_rc "$R")" "$(run_audit "$R")"
@@ -157,19 +185,21 @@ cases() {
 	ok "a world-readable trust directory is refused" "$(yes_if not audit_rc "$R")" "$(run_audit "$R")"
 
 	# ── the sweep: a file nobody declared ───────────────────────────────────
-	R=$(world); : >"$R/var/lib/rasputin/bus/preseed.json"
-	chmod 0644 "$R/var/lib/rasputin/bus/preseed.json"
+	R=$(world); : >"$R/var/lib/rasputin/agent-state/undeclared.json"
+	chmod 0644 "$R/var/lib/rasputin/agent-state/undeclared.json"
 	out=$(run_audit "$R")
 	ok "an undeclared readable file in a swept tree is refused" \
 		"$(yes_if not audit_rc "$R")" "$out"
 	ok "the sweep names the file it found" \
-		"$(yes_if says 'preseed.json is 644' "$out")" "$out"
+		"$(yes_if says 'undeclared.json is 0644' "$out")" "$out"
 
-	R=$(world); mkdir -p "$R/var/lib/rasputin/bus/sub"
-	: >"$R/var/lib/rasputin/bus/sub/deep.key"; chmod 0644 "$R/var/lib/rasputin/bus/sub/deep.key"
+	R=$(world); mkdir -p "$R/var/lib/rasputin/agent-state/sub"
+	: >"$R/var/lib/rasputin/agent-state/sub/deep.key"
+	chmod 0644 "$R/var/lib/rasputin/agent-state/sub/deep.key"
 	ok "the sweep reaches a nested file" "$(yes_if not audit_rc "$R")" "$(run_audit "$R")"
 
-	R=$(world); : >"$R/var/lib/rasputin/bus/quiet"; chmod 0600 "$R/var/lib/rasputin/bus/quiet"
+	R=$(world); : >"$R/var/lib/rasputin/agent-state/quiet"
+	chmod 0600 "$R/var/lib/rasputin/agent-state/quiet"
 	ok "an owner-only file in a swept tree passes" "$(yes_if audit_rc "$R")" "$(run_audit "$R")"
 
 	# A tree that is NOT swept may hold a readable file: trust/ carries a
@@ -177,6 +207,55 @@ cases() {
 	R=$(world); : >"$R/var/lib/rasputin/trust/mesh-ca.pem"
 	chmod 0644 "$R/var/lib/rasputin/trust/mesh-ca.pem"
 	ok "a readable certificate in an unswept tree passes" "$(yes_if audit_rc "$R")" "$(run_audit "$R")"
+
+	# bus/ carries the same shape and now the same exemption: bus.crt is an
+	# X.509 certificate and agent.pin a public-key pin, both public by
+	# construction, sitting next to the key and the token that are not. The
+	# 0700 directory is what keeps those unreachable, and each of them is
+	# declared by name above, so the exemption uncovers nothing.
+	R=$(world)
+	: >"$R/var/lib/rasputin/bus/bus.crt"; chmod 0644 "$R/var/lib/rasputin/bus/bus.crt"
+	: >"$R/var/lib/rasputin/bus/agent.pin"; chmod 0644 "$R/var/lib/rasputin/bus/agent.pin"
+	ok "the bus certificate and agent pin pass — public by construction" \
+		"$(yes_if audit_rc "$R")" "$(run_audit "$R")"
+
+	R=$(world); : >"$R/var/lib/rasputin/bus/issuer.nk"
+	chmod 0644 "$R/var/lib/rasputin/bus/issuer.nk"
+	ok "the bus issuer key is still refused at 0644 — the exemption is per file" \
+		"$(yes_if not audit_rc "$R")" "$(run_audit "$R")"
+
+	# ── the mode reader must not need stat(1) ───────────────────────────────
+	# The image ships no stat at all: busybox is built without the applet and
+	# there is no coreutils. The reader that shipped probed for GNU stat and
+	# fell back to the BSD spelling, so on the image both branches called a
+	# missing binary, every mode came back empty, and every node logged
+	# "is , declared 0600" on every boot (geekdojo/geekdojo-brain#494). This
+	# runner HAS stat, which is exactly why the bug was unreachable here, so
+	# the absence is staged with a stub that exits 127.
+	R=$(world)
+	out=$(run_audit_without "$R" stat)
+	ok "a correct tree passes with no stat(1) available" \
+		"$(yes_if audit_rc_without "$R" stat)" "$out"
+	ok "with no stat(1) the verdict is still PASS" \
+		"$(yes_if says 'rasputin-atrest: PASS' "$out")" "$out"
+
+	R=$(world); chmod 0644 "$R/var/lib/rasputin/node.env"
+	out=$(run_audit_without "$R" stat)
+	ok "with no stat(1) a widened declared mode is still refused" \
+		"$(yes_if not audit_rc_without "$R" stat)" "$out"
+	ok "with no stat(1) the mode is still read, not left empty" \
+		"$(yes_if says 'node.env is 0644, declared 0600' "$out")" "$out"
+
+	R=$(world); : >"$R/var/lib/rasputin/agent-state/nostat.json"
+	chmod 0644 "$R/var/lib/rasputin/agent-state/nostat.json"
+	out=$(run_audit_without "$R" stat)
+	ok "with no stat(1) the sweep still catches an undeclared readable file" \
+		"$(yes_if says 'nostat.json is 0644' "$out")" "$out"
+
+	# A setuid bit must not read as an ordinary mode, or a setuid root binary
+	# dropped into a declared path would compare equal to its declaration.
+	R=$(world); chmod 4600 "$R/var/lib/rasputin/node.env"
+	ok "a setuid declared path is refused" "$(yes_if not audit_rc "$R")" "$(run_audit "$R")"
 
 	# ── presence ────────────────────────────────────────────────────────────
 	R=$(world); rm -f "$R/var/lib/rasputin/node.env"
@@ -220,6 +299,29 @@ for SH in $TEST_SHELLS; do
 	echo "== $SH"
 	cases
 done
+
+# ── an unreadable mode is a FAIL, never an empty one ───────────────────────
+# With no reader at all the audit must say so, and say which path. What shipped
+# instead compared "" against a declared mode — "is , declared 0600", a message
+# that points at the modes rather than at the reader — and skipped every swept
+# file outright.
+#
+# One run, not one per shell: what this pins is what the script does with a
+# reader that answered nothing, which is shell-independent. It is deliberately
+# not run under busybox ash, because taking a tool away from busybox's own
+# shell is not something PATH can be relied on to do — busybox may resolve its
+# applets internally — and a case whose setup might silently not take effect is
+# worse than no case at all.
+SH=reader
+R=$(world)
+out=$(PATH="$(stub_without stat find):$PATH" \
+	sh "$AUDIT" -i "$INVENTORY" -r "$R" -u "$ME" -q 2>&1)
+ok "a mode that cannot be read is a FAIL" \
+	"$(yes_if says 'rasputin-atrest: FAIL' "$out")" "$out"
+ok "the failure says the mode could not be read and names the path" \
+	"$(yes_if says 'node.env mode could not be read' "$out")" "$out"
+ok "an unreadable mode is never rendered as an empty mode" \
+	"$(yes_if not says 'is , declared' "$out")" "$out"
 
 # ── the image's own declarations, shell-independent ─────────────────────────
 SH=unit

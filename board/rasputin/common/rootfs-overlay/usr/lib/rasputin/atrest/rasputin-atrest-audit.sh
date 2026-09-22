@@ -60,20 +60,59 @@ if [ ! -r "$INVENTORY" ]; then
 	exit 1
 fi
 
-# mode PATH — the octal mode, or empty when the path does not exist.
+# mode PATH  — the four-digit octal mode, or empty when it cannot be read.
+# owner PATH — the numeric owner uid, or empty when it cannot be read.
 #
-# `stat -c` is what busybox and coreutils understand, which covers the
-# appliance and the CI runner. The BSD spelling is probed once so that
-# test/atrest-modes-test.sh also runs on a Mac: a gate that can only be run in
-# CI is one nobody runs before pushing, and this script's logic is the part the
-# test exercises.
-if stat -c '%a' / >/dev/null 2>&1; then
-	mode() { stat -c '%a' "$1" 2>/dev/null; }
-	owner() { stat -c '%u' "$1" 2>/dev/null; }
-else
-	mode() { stat -f '%Lp' "$1" 2>/dev/null; }
-	owner() { stat -f '%u' "$1" 2>/dev/null; }
-fi
+# WHY NOT stat(1). The appliance image ships no stat at all: busybox is built
+# without the applet and there is no coreutils. The first version of this
+# script probed for GNU `stat -c` and fell back to the BSD spelling so the test
+# would also run on a Mac — so on the image BOTH branches called a binary that
+# is not there, every path's mode came back empty, and the verdict read
+# "is , declared 0600" on every node for as long as it shipped
+# (geekdojo/geekdojo-brain#494). The lesson is not that the fallback had the
+# wrong spelling. It is that a reader with two branches gets exercised on
+# whichever branch CI happens to take, and CI is the machine that has stat. So
+# there is one branch now, and it uses only what the image has.
+#
+# WHY find. busybox find carries -maxdepth and -perm, and `-perm -BITS` asks
+# the kernel "are all of these bits set". That is a fact rather than a
+# rendering: no locale, no column alignment, and none of the suffix characters
+# that make `ls -l`'s first column unsafe to parse (macOS prints '@' for
+# extended attributes, GNU '+' or '.' for an ACL or an SELinux label). Twelve
+# bit tests compose the mode, including the setuid, setgid and sticky bits, so
+# a setuid file cannot read as an ordinary one. Cost, measured on the slowest
+# bench node: 0.22s for 288 tests, in a unit that runs once per boot.
+#
+# THE GOTCHA. find exits 0 when nothing matched, so a bit is decided by whether
+# the path was PRINTED, never by exit status.
+mode() {
+	# The existence probe is load-bearing, not a convenience. Without it a
+	# reader that cannot run at all would answer "0000" for every path —
+	# a real mode, indistinguishable from a real answer. Empty means "could
+	# not be read", and every caller treats that as a failure.
+	[ -n "$(find "$1" -maxdepth 0 2>/dev/null)" ] || return 0
+	_out=
+	for _digit in '4000 2000 1000' '0400 0200 0100' '0040 0020 0010' '0004 0002 0001'; do
+		_val=0
+		_weight=4
+		for _bit in $_digit; do
+			if [ -n "$(find "$1" -maxdepth 0 -perm -"$_bit" 2>/dev/null)" ]; then
+				_val=$(( _val + _weight ))
+			fi
+			_weight=$(( _weight / 2 ))
+		done
+		_out="$_out$_val"
+	done
+	echo "$_out"
+}
+
+owner() {
+	# Column 3 of `ls -ldn` is the numeric uid. Its POSITION is stable across
+	# busybox, coreutils and BSD ls, and the suffix characters that make
+	# column 1 unsafe to parse do not shift it. -d so a symlink is reported
+	# rather than its target, which is what the mode reader above does too.
+	ls -ldn "$1" 2>/dev/null | awk 'NR == 1 { print $3 }'
+}
 
 # Failures are collected in a file rather than a variable: the sweep reads
 # `find` through a pipe, and a `while read` on the far side of a pipe runs in a
@@ -96,9 +135,14 @@ fail() {
 counted() { echo x >>"$CHECKED"; }
 
 # A mode is owner-only when neither the group bits nor the other bits grant
-# anything. Arithmetic, not string matching: `stat` prints 000 as "0", and a
-# text comparison against "00" would call that mode group-readable.
+# anything. Arithmetic, not string matching, so that a mode written with or
+# without its leading zero reads the same.
+#
+# An empty mode is NOT owner-only. `0$1` on an empty string is 0, so this used
+# to answer "compliant" for a mode it had failed to read — which is how a
+# broken reader made every swept file look clean.
 owner_only() {
+	[ -n "$1" ] || return 1
 	[ "$(( 0$1 & 0077 ))" -eq 0 ]
 }
 
@@ -118,7 +162,14 @@ while read -r col1 col2 col3 _rest; do
 		find "$dir" -type f 2>/dev/null | while IFS= read -r f; do
 			counted
 			m="$(mode "$f")"
-			if [ -n "$m" ] && ! owner_only "$m"; then
+			if [ -z "$m" ]; then
+				# Never a skip. This branch used to be guarded by
+				# `[ -n "$m" ] &&`, so a reader that answered
+				# nothing turned the half of this audit that
+				# catches an UNDECLARED secret into a no-op that
+				# still reported its count.
+				fail "FAIL $f mode could not be read in a swept tree; every file under $col2 is owner-only"
+			elif ! owner_only "$m"; then
 				fail "FAIL $f is $m in a swept tree; every file under $col2 is owner-only"
 			fi
 		done
@@ -138,10 +189,18 @@ while read -r col1 col2 col3 _rest; do
 
 	counted
 	got="$(mode "$path")"
-	# stat prints 600 where the inventory writes 0600; compare without the
-	# leading zero rather than teaching the inventory to drop it, because an
-	# inventory that writes modes the way chmod does is the one people get
-	# right.
+	if [ -z "$got" ]; then
+		# A mode this audit could not read is a failure that says so.
+		# The alternative is what shipped: an empty string compared
+		# against a declared mode, which fails every path with the
+		# unreadable message "is , declared 0600" and points at the
+		# modes instead of at the reader.
+		fail "FAIL $path mode could not be read; declared $want"
+		continue
+	fi
+	# The reader and the inventory both write four digits, but the leading
+	# zero is stripped from both sides anyway so that an inventory line
+	# written the way chmod takes it still compares equal.
 	if [ "${got#0}" != "${want#0}" ]; then
 		fail "FAIL $path is $got, declared $want"
 		continue
@@ -151,7 +210,9 @@ while read -r col1 col2 col3 _rest; do
 		continue
 	fi
 	o="$(owner "$path")"
-	if [ "$o" != "$WANT_UID" ]; then
+	if [ -z "$o" ]; then
+		fail "FAIL $path owner could not be read"
+	elif [ "$o" != "$WANT_UID" ]; then
 		fail "FAIL $path is owned by uid $o, not $WANT_UID"
 	fi
 done <"$INVENTORY"
