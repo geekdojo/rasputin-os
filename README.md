@@ -182,7 +182,7 @@ the same arrangement since its api started minting its token into
 
 ## Releases
 
-CI builds both SKUs, boot-smokes the amd64 image under QEMU, signs the RAUC
+CI builds both SKUs, boot-smokes both images under QEMU, signs the RAUC
 bundles, and publishes `.raucb` + `.img.xz` + `manifest.json` to GitHub
 Releases. Versioning is CalVer (`YYYY.MM.MICRO`, `-dev.N` suffix for
 prereleases), shared with the sibling repos so users see one Rasputin

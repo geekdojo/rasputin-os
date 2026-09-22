@@ -5,12 +5,15 @@ name: ci
 # scripts on a pull request, so a syntax error or a silently-inverted boot
 # decision could only be found by flashing hardware.
 #
-# Scope is deliberately narrow: POSIX-sh syntax on every overlay script, the
-# node-id helper table tests, firstboot's seed handling and the join-token file
-# migration run against a scratch directory, the at-rest mode audit against
-# synthetic trees, plus the fallback-address suite, which fakes networkd's lease
-# directory and /sys/class/net so a boot-time decision is testable without a
-# network, a root shell, or a DHCP server to take away.
+# Scope is deliberately narrow: syntax on every overlay and test script (POSIX
+# sh for the overlay, and each test script under the shell its shebang names —
+# test/boot-smoke.sh is the one that needs the check, because nothing on a pull
+# request runs it), the node-id helper table tests, firstboot's seed handling
+# and the join-token file migration run against a scratch directory, the
+# at-rest mode audit against synthetic trees, plus the fallback-address suite,
+# which fakes networkd's lease directory and /sys/class/net so a boot-time
+# decision is testable without a network, a root shell, or a DHCP server to
+# take away.
 #
 # One job goes further than the overlay scripts: rootfs-shadow checks out the
 # pinned Buildroot and runs its own mkusers over a target dir prepared by
@@ -40,13 +43,45 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Syntax-check the rootfs-overlay scripts
+      - name: Syntax-check the rootfs-overlay and test scripts
         # The image's /bin/sh is not bash; check with dash so a bashism fails
         # here rather than at boot on the node.
+        #
+        # test/ is checked for a different reason. Most suites in there are run
+        # by a step below, so their syntax is checked as a side effect of
+        # running them — but test/boot-smoke.sh is not run by anything on a
+        # pull request. It needs QEMU and a built image, so it executes only on
+        # a tag push or a full_build/publish dispatch of release.yml, which
+        # means a typo in it used to be discovered by a release build: the one
+        # run where a stopped pipeline costs the most, and the run that is
+        # least convenient to repeat.
+        #
+        # THE CHECKER FOLLOWS THE SHEBANG, and it has to. board/ is entirely
+        # #!/bin/sh and must stay that way, but two of the test scripts are bash
+        # on purpose — release-target-guard-test.sh and verify-bundle-test.sh
+        # are CI-side and never run on a node — and dash -n rejects both of
+        # them outright today, on a process substitution and on an array
+        # literal. A flat `dash -n` over test/ would simply be red.
+        #
+        # What this buys, stated exactly so nobody over-reads it: -n is a PARSE
+        # check. It catches an unbalanced case/if/quote, and it catches the
+        # bashisms that are syntax to dash (arrays, <<<, <(...), `function`).
+        # It does NOT catch the ones that parse and only fail when run, [[ ]]
+        # and ${a[0]} among them. It is a syntax gate, not a POSIX-purity gate.
+        #
+        # A shebang this step does not recognise is a failure rather than a
+        # skip: it means nothing checked that file, which is the state this
+        # step exists to end.
         run: |
           fail=0
-          for f in $(find board -name '*.sh' -type f); do
-            dash -n "$f" || { echo "::error file=$f::sh syntax error"; fail=1; }
+          for f in $(find board test -name '*.sh' -type f); do
+            shebang=$(head -1 "$f")
+            case "$shebang" in
+              '#!/bin/sh') checker=dash ;;
+              *bash) checker=bash ;;
+              *) echo "::error file=$f::unrecognised shebang '$shebang' — this step does not know which shell to syntax-check it with"; fail=1; continue ;;
+            esac
+            "$checker" -n "$f" || { echo "::error file=$f::$checker syntax error"; fail=1; }
           done
           exit $fail
       - name: Controlplane fallback-address tests

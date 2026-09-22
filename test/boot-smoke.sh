@@ -56,7 +56,12 @@ DNS_PORT=15353
 # (The arm64 job also DOESN'T need the rope for a different reason: a dead qemu
 # is now detected directly, see die_if_qemu_gone, so the budget is only ever
 # reached by a guest that is genuinely stuck.)
-BOOT_BUDGET=900 ; MU_TRIES=120 ; FB_TRIES=60 ; API_TRIES=48
+# ATREST_TRIES is the at-rest audit verdict poll (2s apart → 120s ceiling). The
+# worst case is still inside BOOT_BUDGET: 240 (multi-user) + 120 (firstboot) +
+# 240 (api) + 70 (soak) + 120 = 790s against the 900s qemu timeout, so a stuck
+# audit is reported by the assertion below rather than by qemu being killed
+# out from under the script.
+BOOT_BUDGET=900 ; MU_TRIES=120 ; FB_TRIES=60 ; API_TRIES=48 ; ATREST_TRIES=60
 case "$ARCH" in
   amd64|arm64) ;;
   *) echo "::error::unknown arch '$ARCH' (expected amd64 or arm64)"; exit 1 ;;
@@ -370,12 +375,42 @@ if [ "$api" = 1 ]; then
     i=$((i + 1))
   done
 fi
+# At-rest file modes (geekdojo/geekdojo-brain#494, gate 7). The audit runs once
+# per boot and writes ONE verdict line to /dev/kmsg, which is why it is
+# greppable here at all — it has no other channel into this script, which has no
+# shell into the guest.
+#
+# WAITED FOR, NOT ASSUMED PRESENT. rasputin-atrest-audit.service is
+# WantedBy=multi-user.target and ordered After=rasputin-api.service, so its
+# verdict can land well after every assertion above: on a controlplane boot it
+# does not even start until the api has, and it audits the files the api wrote.
+# Polled like everything else here — the instant the line appears this stops
+# waiting — and it is polled BEFORE the qemu kill below, because a verdict that
+# had not arrived yet would otherwise be indistinguishable from one that never
+# will.
+#
+# Only the ARRIVAL is polled. The line itself is read back out of the console
+# after the kill, with qemu no longer appending to it: a grep against a file
+# being written can catch a half-flushed line, and "checked=2" out of a
+# still-arriving "checked=20" would be a real-looking number that nothing else
+# would contradict.
+atrest=0
+if [ "$ok" = 1 ]; then
+  i=0
+  while [ "$i" -lt "$ATREST_TRIES" ]; do
+    if grep -qE "rasputin-atrest: (PASS|FAIL)" "$CONSOLE_LOG"; then atrest=1; break; fi
+    die_if_qemu_gone "the at-rest audit verdict"
+    i=$((i + 1)); sleep 2
+  done
+fi
+ATREST_AT=$(( $(date +%s) - START ))
+
 TOTAL=$(( $(date +%s) - START ))
 
 kill "$QPID" 2>/dev/null || true
 echo "----- last 60 lines of console -----"; tail -60 "$CONSOLE_LOG" || true
 echo "----- $ARCH smoke timings (seconds from qemu start) -----"
-echo "multi-user=${MU_AT}s firstboot=${FB_AT}s api+ui+dns=${API_AT}s total(incl. 70s soak)=${TOTAL}s"
+echo "multi-user=${MU_AT}s firstboot=${FB_AT}s api+ui+dns=${API_AT}s atrest-verdict=${ATREST_AT}s total(incl. 70s soak)=${TOTAL}s"
 
 # ------------------------------------------------------------ assertions ------
 [ "$ok" = 1 ] || { echo "::error::$ARCH image did not reach multi-user in QEMU"; exit 1; }
@@ -468,3 +503,71 @@ if grep -q "Watchdog timeout" "$CONSOLE_LOG"; then
   echo "::error::systemd watchdog killed a rasputin unit during the smoke — sd_notify petting regressed (see the v0.4.3 sdnotify package)"; exit 1
 fi
 echo "api healthz + web UI + 70s uptime soak confirmed over hostfwd"
+
+# At-rest file modes on the persistent partition (geekdojo/geekdojo-brain#494,
+# gate 7). rasputin-atrest-audit.service checks every path the inventory
+# declares and sweeps the trees that hold nothing but credentials, then reports
+# one verdict line. Both the unit and the inventory have said all along that
+# this smoke greps that verdict "so a change that widens a mode fails a release
+# build instead of shipping". Until now nothing did: the audit ran on every
+# boot, printed its verdict, and no build ever read it.
+#
+# Read off the console rather than over a hostfwd because the audit has no
+# port. It is a boot-time shell script, the smoke has no shell into the guest,
+# and only /dev/kmsg is mirrored to the serial console (journald's output is
+# not) — the same channel firstboot and the hostname unit are asserted through
+# above. Exactly ONE "rasputin-atrest:" line arrives that way: the verdict. The
+# audit's per-finding lines go to its stdout, which systemd captures into the
+# guest's journal, so they are not readable from here. The check below is
+# nevertheless written to refuse ANY FAIL line among whatever it finds, rather
+# than to trust the first line it sees, so it stays correct if that changes.
+#
+# THREE OUTCOMES, AND ONLY ONE OF THEM IS GREEN.
+#
+#   PASS checked=N   the only pass, and N must be non-zero.
+#   FAIL ...         a declared path is not its declared mode, a swept file is
+#                    group- or world-accessible, a mode could not be read, or
+#                    the inventory itself was unreadable.
+#   nothing          the verdict never arrived.
+#
+# The absent case FAILS AS LOUDLY AS A FAIL LINE, and that is the whole point
+# of splitting it out. A boot where the unit was masked, renamed, dropped from
+# multi-user.target, ordered behind something that never started, or removed
+# from the overlay altogether produces no verdict at all — and a bare
+# `grep -q FAIL || pass` would read that silence as success, leaving a green
+# build over a machine nobody checked. That is the failure mode the audit's own
+# header warns about: a verdict that said PASS while a key sat at 0644 would be
+# worse than having no audit at all, and so would a smoke that accepted no
+# verdict as one.
+#
+# A PASS over checked=0 is refused for the same reason. It is what an empty or
+# fully-commented inventory produces: a real PASS line, over nothing.
+#
+# The captured line is echoed into the failure output on purpose. The verdict
+# carries the first failing path and its actual mode, so a red build says WHICH
+# file widened rather than only that an assertion failed.
+#
+# Read back AFTER the kill, so qemu is no longer appending to the file while
+# this greps it (the arrival was polled above, before the kill).
+ATREST_LINES="$(grep -o 'rasputin-atrest: .*' "$CONSOLE_LOG" | tr -d '\r')"
+if [ "$atrest" != 1 ] || [ -z "$ATREST_LINES" ]; then
+  echo "::error::no 'rasputin-atrest:' verdict reached the serial console in ${ATREST_AT}s — the at-rest mode audit never reported, so NOTHING checked the modes on the persistent partition on this boot. Treated exactly like a FAIL: check that rasputin-atrest-audit.service is still in the overlay, still WantedBy=multi-user.target, not masked, and that its ordering (After=rasputin-api.service) did not leave it behind a unit that never started; check too that the verdict still goes to /dev/kmsg, since journald's output does not reach this console."
+  echo "----- any atrest-related console lines (if one appears here, the verdict's own wording changed and this assertion has drifted from rasputin-atrest-audit.sh) -----"
+  atrest_ctx="$(grep -nE "atrest" "$CONSOLE_LOG" | tail -20)"
+  echo "${atrest_ctx:-(not one line mentions the audit — the unit did not run at all)}"
+  exit 1
+fi
+if printf '%s\n' "$ATREST_LINES" | grep -q "rasputin-atrest: FAIL"; then
+  echo "::error::the at-rest mode audit FAILED on the booted machine — a path on the persistent partition is not the mode /usr/lib/rasputin/atrest/inventory declares for it, or a swept tree holds a group/world-accessible file. The verdict below carries the count and the FIRST offending path with its actual mode; the remaining findings are printed on the audit's stdout, which systemd captures into the guest's journal and which therefore does NOT reach this console — reproduce them with test/atrest-modes-test.sh or on a node. Either the mode regressed or the inventory is out of date — do not widen the inventory to match a widened file."
+  printf '%s\n' "$ATREST_LINES" | sed 's/^/  /'
+  exit 1
+fi
+ATREST_CHECKED="$(printf '%s\n' "$ATREST_LINES" \
+  | sed -n 's/^rasputin-atrest: PASS checked=\([0-9][0-9]*\).*$/\1/p' | head -1)"
+case "$ATREST_CHECKED" in
+  ''|0)
+    echo "::error::the at-rest verdict is neither a usable PASS nor a FAIL: '$(printf '%s\n' "$ATREST_LINES" | head -1)'. A PASS must carry checked=N with N greater than zero — 'PASS checked=0' is what an empty or entirely-commented inventory reports, a green verdict over nothing. If the verdict's wording changed, this assertion and rasputin-atrest-audit.sh have drifted apart."
+    printf '%s\n' "$ATREST_LINES" | sed 's/^/  /'
+    exit 1 ;;
+esac
+echo "at-rest modes audited clean on the booted machine (PASS checked=$ATREST_CHECKED)"
