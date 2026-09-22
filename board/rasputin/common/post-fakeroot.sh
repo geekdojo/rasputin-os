@@ -247,6 +247,15 @@ chmod 644 "$CLOCK_FLOOR"
 # clock_apply_epoch() stats it and never reads it. 0644 because PID 1 reads it
 # as root and nothing on the node writes it — it is part of the image, and it is
 # the image's age, which is not a secret.
+#
+# IT HAS A SECOND CONSUMER, so do not think of it as systemd's file alone.
+# rasputin-clock-save.sh and the PID 1 shim both measure the persisted
+# last-known-good time against this mtime and refuse anything more than ten
+# years past it — the ceiling that stops one bad NTP answer from poisoning the
+# floor for the life of the node. Both halves FAIL CLOSED without it: an image
+# that stops baking this file does not merely lose PID 1's floor, it also stops
+# persisting and restoring the clock entirely. That is the intended direction to
+# fail in, and test/clock-floor-test.sh pins both halves of it.
 mkdir -p "$(dirname "$CLOCK_EPOCH")"
 : > "$CLOCK_EPOCH"
 chmod 644 "$CLOCK_EPOCH"

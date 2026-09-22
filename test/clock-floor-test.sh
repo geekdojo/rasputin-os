@@ -187,13 +187,30 @@ check "and the epoch file on n100 too" \
 echo
 echo "2. what the SAVE half persists"
 
-# save STORE NOW -> sets out/rc. The script's only two inputs.
+# The ceiling: ten years past the image build date, as 10 * 365.25 * 86400.
+# Named once here and used by both the save cases and the shim cases, because
+# the whole point of the ceiling is that the two halves agree on it.
+CEILING=315576000
+# A build date to measure against — the mtime of a fake /usr/lib/clock-epoch.
+BUILD_EPOCH=1790000000          # 2026-09-22
+IN_CEILING=$((BUILD_EPOCH + CEILING - 86400))
+OVER_CEILING=$((BUILD_EPOCH + CEILING + 86400))
+
+# save STORE NOW [EPOCH_FILE] -> sets out/rc. The script's inputs.
 save() {
 	out=$(RASPUTIN_CLOCK_STORE="$1" RASPUTIN_CLOCK_DATE="$STUB_DATE" STUB_NOW="$2" \
+		RASPUTIN_CLOCK_EPOCH="${3:-$EPOCHF}" \
 		STUB_DATE_CALLS="$TMP/date.calls" sh "$SAVE" 2>&1); rc=$?
 }
 STUB_DATE="$TMP/date-stub"; make_date_stub "$STUB_DATE"
 S="$TMP/store"; mkdir -p "$S"
+# The ceiling reference the save half reads: an empty file whose MTIME is the
+# image build date, exactly as post-fakeroot.sh bakes it.
+EPOCHF="$TMP/clock-epoch"; : > "$EPOCHF"
+touch -d "@$BUILD_EPOCH" "$EPOCHF" 2>/dev/null || touch -t 202609221333.20 "$EPOCHF"
+BUILD_EPOCH=$(mtime_of "$EPOCHF")
+IN_CEILING=$((BUILD_EPOCH + CEILING - 86400))
+OVER_CEILING=$((BUILD_EPOCH + CEILING + 86400))
 
 save "$S/clock" 1758579000
 check "a fresh store is written" "$rc" "0"
@@ -232,6 +249,51 @@ save "$S/nonexistent-dir/clock" 1758579000
 check "an unwritable store path does not exit 0 silently pretending it saved" \
 	"$(printf '%s' "$out" | grep -c 'saved clock')" "0"
 
+# ── the ceiling ──────────────────────────────────────────────────────────────
+# NTP is unauthenticated, and this floor only ever moves FORWARD, so a hostile
+# or broken server that timesyncd accepts would otherwise be persisted and
+# carried for the life of the node: certificates minted years ahead, and a node
+# that can never again accept a correct time. The ceiling bounds it relative to
+# something the network cannot move — the image's own build date.
+#
+# Note what it is not: gating on /run/systemd/timesync/synchronized would not
+# help, because that flag is SET by timesyncd accepting the bad answer.
+rm -f "$S/clock"
+save "$S/clock" "$IN_CEILING"
+check "a clock just inside the ceiling is saved" "$(cat "$S/clock" 2>/dev/null)" "$IN_CEILING"
+
+rm -f "$S/clock"
+save "$S/clock" "$OVER_CEILING"
+check "a clock beyond the ceiling is REFUSED" \
+	"$([ -e "$S/clock" ] && echo yes || echo no)" "no"
+check "  and the refusal is logged distinctly" \
+	"$(printf '%s' "$out" | grep -c 'REFUSING to save clock')" "1"
+check "  and it names the build date it measured against" \
+	"$(printf '%s' "$out" | grep -c "build date $BUILD_EPOCH")" "1"
+check "  and does not fail the unit over it" "$rc" "0"
+
+# An existing good store is not destroyed by a poisoned clock either.
+printf '%s\n' "$IN_CEILING" > "$S/clock"
+save "$S/clock" "$OVER_CEILING"
+check "a poisoned clock leaves a good store intact" "$(cat "$S/clock")" "$IN_CEILING"
+
+# FAIL CLOSED with no reference. No epoch file means no ceiling, and an
+# unbounded value is precisely what this check exists to refuse.
+rm -f "$S/clock"
+save "$S/clock" 1758579000 "$TMP/no-such-epoch-file"
+check "no epoch file to measure against: nothing is saved" \
+	"$([ -e "$S/clock" ] && echo yes || echo no)" "no"
+check "  and it says why rather than degrading silently" \
+	"$(printf '%s' "$out" | grep -c 'gave no image build date')" "1"
+check "  and still exits 0" "$rc" "0"
+
+# A clock BEFORE the build date is not a ceiling case — the difference is
+# negative — and must fall through to the ordinary not-ahead-of-the-store rule.
+rm -f "$S/clock"
+save "$S/clock" 1758579000
+check "a clock before the build date is not caught by the ceiling" \
+	"$(cat "$S/clock" 2>/dev/null)" "1758579000"
+
 echo
 echo "3. what the PID 1 SHIM restores"
 
@@ -243,8 +305,12 @@ echo "3. what the PID 1 SHIM restores"
 shim_setup() {
 	W=$(mktemp -d "$TMP/shim.XXXXXX")
 	R="$W/root"; PERSIST="$W/persist"; BIN="$W/bin"
-	mkdir -p "$R/etc" "$R/run" "$R/proc" "$R/sys/block" "$R/var/lib/rasputin" "$PERSIST" "$BIN"
+	mkdir -p "$R/etc" "$R/run" "$R/proc" "$R/sys/block" "$R/var/lib/rasputin" "$PERSIST" "$BIN" "$R/usr/lib"
 	: >"$R/etc/machine-id"
+	# The ceiling reference, exactly as post-fakeroot.sh bakes it: an empty file
+	# whose MTIME is the image build date. shim_no_epoch() removes it.
+	: >"$R/usr/lib/clock-epoch"
+	touch -r "$EPOCHF" "$R/usr/lib/clock-epoch"
 	: >"$W/date.calls"
 	rm -f "$W/handoff.args"
 	cat >"$BIN/mount" <<'STUB'
@@ -333,6 +399,35 @@ shim_setup; printf '1758579000\n' >"$PERSIST/clock"; STUB_SET_RC=1; shim 1750000
 check "date refuses to set: hands off anyway" "$(handed_off)" "yes"
 check "  and says it is falling back to the baked epoch" \
 	"$(out_has 'falling back to the image')" "yes"
+
+# ── the ceiling, on the READ side ────────────────────────────────────────────
+# The save half's ceiling only protects stores THIS image wrote. The shim is the
+# point of use, and what it reads is a plain file on a partition: filesystem
+# damage can turn a good timestamp into a plausible ten-digit one, an older or
+# forked image could write the store without the rule, and anything with root on
+# the node can edit it. So the ceiling is checked again on read, the same way
+# clock_valid() already is.
+shim_setup; printf '%s\n' "$IN_CEILING" >"$PERSIST/clock"; shim 1750000000
+check "a store just inside the ceiling is honoured" "$(set_calls)" "1"
+check "  and set to exactly that value" "$(set_to)" "$IN_CEILING"
+
+shim_setup; printf '%s\n' "$OVER_CEILING" >"$PERSIST/clock"; shim 1750000000
+check "a store beyond the ceiling is REFUSED on read" "$(set_calls)" "0"
+check "  and the node still boots" "$(handed_off)" "yes"
+check "  and the refusal is logged distinctly" "$(out_has 'REFUSING clock')" "yes"
+check "  and it names the build date it measured against" \
+	"$(out_has "past this image's build date $BUILD_EPOCH")" "yes"
+check "  and says NTP is why the ceiling exists" "$(out_has 'NTP is unauthenticated')" "yes"
+
+# FAIL CLOSED: no reference means no ceiling, and an unbounded value is what
+# this refuses. The node degrades to whatever PID 1 applies, which on a rootfs
+# with no epoch file is exactly where this image was before any of this shipped.
+shim_setup; printf '%s\n' "$IN_CEILING" >"$PERSIST/clock"
+rm -f "$R/usr/lib/clock-epoch"; shim 1750000000
+check "no epoch file to measure against: the store is NOT applied" "$(set_calls)" "0"
+check "  and the node still boots" "$(handed_off)" "yes"
+check "  and it says why rather than degrading silently" \
+	"$(out_has 'gave no image build date')" "yes"
 
 # The machine-id half is read from the same mount and must be untouched by any
 # of this — a regression here would be an identity change on every boot.
@@ -482,6 +577,30 @@ grep_ok "post-build enables the timer in timers.target.wants" \
 # ── the save script itself ───────────────────────────────────────────────────
 check "the save script is executable" "$([ -x "$SAVE" ] && echo yes || echo no)" "yes"
 check "the save script is /bin/sh, the image's shell" "$(head -1 "$SAVE")" "#!/bin/sh"
+
+# ── the ceiling, as a cross-file contract ────────────────────────────────────
+# The save half and the shim have to bound against the SAME number and the SAME
+# reference file. If they drift apart, one of them silently stops being a
+# control: a looser saver writes values the shim then refuses on every boot (the
+# floor quietly stops working), and a looser shim honours values the saver would
+# never have written (the ceiling is not a ceiling). Neither shows up in a build
+# or a boot log, so the agreement is pinned here rather than left to a comment.
+save_ceiling=$(sed -n 's/^CEILING_SECS=\([0-9]*\).*/\1/p' "$SAVE")
+shim_ceiling=$(sed -n 's/^CLOCK_CEILING_SECS=\([0-9]*\).*/\1/p' "$SHIM")
+check "the save half declares a ceiling" "$([ -n "$save_ceiling" ] && echo yes || echo no)" "yes"
+check "the shim declares a ceiling" "$([ -n "$shim_ceiling" ] && echo yes || echo no)" "yes"
+check "and the two are the same number" "$save_ceiling" "$shim_ceiling"
+# Ten years, as 10 * 365.25 * 86400. Pinned as a literal because the reasoning
+# brackets it from both sides: it must stay UNDER systemd's own 15-year backward
+# clamp (clock-valid-range-usec-max, which Buildroot does not override) or it
+# could never fire, and OVER the service life of a node still running one image.
+check "and it is the ten years the reasoning bracketed" "$shim_ceiling" "315576000"
+# Both halves must measure against the file post-fakeroot.sh bakes, not a second
+# source of truth someone introduced later.
+grep_ok "the save half measures against /usr/lib/clock-epoch" \
+	'^EPOCH_FILE=.*/usr/lib/clock-epoch' "$SAVE"
+grep_ok "the shim measures against /usr/lib/clock-epoch" \
+	'^CLOCK_EPOCH_FILE=.*/usr/lib/clock-epoch' "$SHIM"
 
 # ── the shim ─────────────────────────────────────────────────────────────────
 # Restated here rather than left to test/machine-id-test.sh: the clock path adds

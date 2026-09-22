@@ -194,6 +194,14 @@ PERSIST_MNT=$ROOT/var/lib/rasputin
 # "clock" to match the file systemd-timesyncd keeps for the same purpose; the
 # two are read by different things at different stages and never share a path.
 CLOCK_STORE_NAME=clock
+# The ceiling reference: this image's build date, which is the mtime of the very
+# file systemd is about to read for its own epoch. One source of truth for both
+# floors, already in the rootfs, and nothing has to bake a second copy of it.
+CLOCK_EPOCH_FILE=$ROOT/usr/lib/clock-epoch
+# How far past the image build date a stored clock may be and still be believed:
+# ten years, as 10 * 365.25 * 86400. See the ceiling block near the end of this
+# script for why this number.
+CLOCK_CEILING_SECS=315576000
 RUN=$ROOT/run
 RUN_MACHINE_ID=$RUN/machine-id
 ETC_MACHINE_ID=$ROOT/etc/machine-id
@@ -455,14 +463,78 @@ fi
 # $DATE is not touched at all unless a stored clock was read, so a node with no
 # store, an unreadable partition or no date binary behaves exactly as it does
 # today, and so does any harness that does not stub $DATE.
+#
+# ── THE CEILING, AND WHY THE READ SIDE HAS ONE TOO ───────────────────────────
+#
+# A floor that only moves forward is exactly the shape that cannot recover from
+# one bad answer. NTP is unauthenticated: a hostile or broken server that
+# timesyncd accepts can put the clock far in the future, the save half records
+# it, and from then on every boot starts there — certificates minted years
+# ahead, and a node that will never again accept a correct time because "only
+# forwards" refuses it. That is the failure worth engineering against, and it is
+# why gating the SAVE on /run/systemd/timesync/synchronized would have been the
+# wrong control: that flag is set precisely when timesyncd has accepted an NTP
+# answer, so the hostile answer sets it and sails through.
+#
+# What bounds it is a ceiling relative to something an attacker on the network
+# cannot move: the image's own build date, baked into /usr/lib/clock-epoch by
+# post-fakeroot.sh. A stored clock more than CLOCK_CEILING_SECS past it is
+# refused, which turns "permanently poisoned" into "bounded", and costs an
+# offline node nothing.
+#
+# WHY TEN YEARS.
+#   - It has to be under systemd's own backward clamp to mean anything.
+#     clock_apply_epoch() resets the clock back to /usr/lib/clock-epoch once it
+#     is more than clock-valid-range-usec-max ahead, and that defaults to 15
+#     years (systemd v256 meson_options.txt; Buildroot 2025.02.17 does not
+#     override it). Above 15 years systemd has already pulled the clock back to
+#     the build date, so a ceiling there would never fire.
+#   - It has to be over the longest plausible life of a node still running ONE
+#     image. This is an appliance: the hardware's service life is on the order
+#     of five to eight years and a node that never takes an OTA is the worst
+#     case, so ten leaves real margin above it.
+#   - The cost of being wrong is asymmetric and mild in one direction only. Too
+#     tight caps a LEGITIMATE clock on an old image, and all that costs is a
+#     floor that stops advancing — NTP still corrects the running clock on every
+#     boot that can reach it. Too loose and the ceiling does nothing at all.
+#
+# WHY THE READ SIDE CHECKS IT AS WELL as the save side. The save side alone
+# would only protect stores this image wrote. The shim is the point of USE, and
+# what it reads is a plain file on a partition: filesystem damage can turn a
+# good timestamp into a plausible ten-digit one, an older or forked image could
+# write the store without this rule, and anything with root on the node can edit
+# it. The two halves already duplicate clock_valid() for exactly this reason, so
+# the ceiling is duplicated the same way and for the same reason.
+#
+# FAIL CLOSED when the reference is missing. With no /usr/lib/clock-epoch there
+# is no ceiling, and an unbounded value is the thing this block exists to
+# refuse — so the store is not applied, loudly. That degrades to precisely the
+# behaviour this image had before any of this shipped, since a rootfs with no
+# epoch file is one where PID 1 uses the systemd package's build date anyway.
 if [ -n "$stored_clock" ]; then
 	now=$("$DATE" -u +%s 2>/dev/null)
+	# The image build date, from the same file PID 1 is about to stat. Read
+	# only here, i.e. still only when a well-formed store was found, so the
+	# "no store means $DATE is never invoked" property is unchanged.
+	build_epoch=$("$DATE" -u -r "$CLOCK_EPOCH_FILE" +%s 2>/dev/null)
 	if ! clock_valid "$now"; then
 		# A date binary that is missing, or that answered something this cannot
 		# compare, is not a reason to guess: leaving the clock alone puts the
 		# boot back to systemd's own /usr/lib/clock-epoch, which is the backstop
 		# this is layered on top of.
 		log "read clock $stored_clock from $persist_dev but $DATE would not report the current time ('${now:-<nothing>}'); leaving the clock alone"
+	elif ! clock_valid "$build_epoch"; then
+		log "REFUSING clock $stored_clock from $persist_dev: $CLOCK_EPOCH_FILE gave no image build date ('${build_epoch:-<nothing>}') to bound it against, and an unbounded floor is what this check exists to refuse; falling back to whatever PID 1 applies"
+	elif [ "$((stored_clock - build_epoch))" -gt "$CLOCK_CEILING_SECS" ]; then
+		# Subtraction rather than build+ceiling: the operands are the large
+		# numbers and the result is small, so nothing here leans on how wide
+		# the shell's arithmetic is. (busybox 1.37.0 ash is 64-bit either way —
+		# `echo $((9999999999 + 1))` gives 10000000000 — but this does not have
+		# to be true for the check to be right.) A store EARLIER than the build
+		# date gives a negative difference, which is not greater than the
+		# ceiling, so an old store is allowed through and the only-forwards rule
+		# below deals with it.
+		log "REFUSING clock $stored_clock from $persist_dev: it is more than $CLOCK_CEILING_SECS s past this image's build date $build_epoch. NTP is unauthenticated and a floor that only moves forward would carry a bad answer for the life of the node; falling back to the image's baked $CLOCK_EPOCH_FILE"
 	elif [ "$now" -ge "$stored_clock" ]; then
 		# The n100's every boot, and any Pi that somehow already has the time.
 		log "clock floor: already at $now, at or ahead of the $stored_clock stored on $persist_dev; leaving it alone"

@@ -44,6 +44,14 @@ set -eu
 
 STORE="${RASPUTIN_CLOCK_STORE:-/var/lib/rasputin/clock}"
 DATE="${RASPUTIN_CLOCK_DATE:-date}"
+# The ceiling reference: this image's build date, which is the mtime of the file
+# PID 1 reads for its own clock epoch. The same file the shim measures against,
+# so the two halves cannot drift apart.
+EPOCH_FILE="${RASPUTIN_CLOCK_EPOCH:-/usr/lib/clock-epoch}"
+# Ten years, as 10 * 365.25 * 86400. Kept numerically identical to
+# CLOCK_CEILING_SECS in usr/lib/rasputin/machine-id/rasputin-init; see the
+# ceiling section below for the reasoning behind the number.
+CEILING_SECS=315576000
 
 log() {
 	echo "rasputin-clock-save: $*"
@@ -65,6 +73,57 @@ valid() {
 now=$("$DATE" -u +%s 2>/dev/null || echo '')
 if ! valid "$now"; then
 	log "refusing to save: the clock reads '${now:-<nothing>}', which is not a ten-digit Unix timestamp"
+	exit 0
+fi
+
+# ── THE CEILING ──────────────────────────────────────────────────────────────
+#
+# A floor that only moves forward cannot recover from one bad answer, and NTP is
+# unauthenticated. A hostile or broken server that timesyncd accepts puts the
+# clock far in the future; without this check that time is persisted and from
+# then on every boot starts there — certificates minted years ahead, and a node
+# that will never again accept a correct time, because "only forwards" refuses
+# it. Bounding the SAVE is what turns "permanently poisoned" into "bounded", and
+# it costs an offline node nothing at all.
+#
+# Note what this is NOT. Gating on /run/systemd/timesync/synchronized would not
+# address this: that flag is set precisely when timesyncd has ACCEPTED an NTP
+# answer, so the bad answer sets it and passes the gate. It would only stop us
+# persisting clocks that were never NTP-verified — a much milder concern — while
+# costing an offline node any floor improvement at all.
+#
+# THE REFERENCE is the image's own build date, which an attacker on the network
+# cannot move: the mtime of /usr/lib/clock-epoch, baked by post-fakeroot.sh and
+# read by PID 1 for its own floor. One source of truth for both.
+#
+# TEN YEARS, deliberately:
+#   - under systemd's own backward clamp, which resets the clock to
+#     /usr/lib/clock-epoch once it is more than clock-valid-range-usec-max
+#     ahead — 15 years by default (systemd v256 meson_options.txt; Buildroot
+#     2025.02.17 does not override it). A ceiling above that could never fire;
+#   - over the longest plausible life of a node still running ONE image. The
+#     hardware's service life is on the order of five to eight years and a node
+#     that never takes an OTA is the worst case, so ten leaves real margin;
+#   - and the two ways of being wrong are not symmetric. Too tight caps a
+#     LEGITIMATE clock on an old image, which only stops the floor advancing —
+#     NTP still corrects the running clock on every boot that can reach it. Too
+#     loose and the ceiling does nothing.
+#
+# FAIL CLOSED with no reference. With no epoch file there is no ceiling, and an
+# unbounded value is the thing this exists to refuse, so nothing is saved. The
+# node then falls back to the image's own floor, which is where it was before
+# any of this shipped.
+build_epoch=$("$DATE" -u -r "$EPOCH_FILE" +%s 2>/dev/null || echo '')
+if ! valid "$build_epoch"; then
+	log "refusing to save: $EPOCH_FILE gave no image build date ('${build_epoch:-<nothing>}') to bound the clock against, and an unbounded floor is what this check exists to refuse"
+	exit 0
+fi
+# Subtraction rather than build+ceiling, so nothing here leans on how wide the
+# shell's arithmetic is: the operands are the large numbers and the result is
+# small. A clock EARLIER than the build date gives a negative difference and is
+# allowed through — the not-ahead-of-the-store rule below is what handles that.
+if [ "$((now - build_epoch))" -gt "$CEILING_SECS" ]; then
+	log "REFUSING to save clock $now: it is more than $CEILING_SECS s past this image's build date $build_epoch. NTP is unauthenticated and this floor only ever moves forward, so a bad answer persisted here would outlive every reboot"
 	exit 0
 fi
 
