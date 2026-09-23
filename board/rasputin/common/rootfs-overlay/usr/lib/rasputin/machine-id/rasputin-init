@@ -250,6 +250,39 @@ clock_valid() {
 	return 0
 }
 
+# clock_now_valid VALUE — what `date -u +%s` may answer and still be USABLE as
+# the left-hand side of the only-forwards comparison. Deliberately NOT
+# clock_valid().
+#
+# $now is the one operand in this script that may legitimately be tiny. This
+# shim runs as PID 1, BEFORE systemd's clock_apply_epoch() has applied
+# /usr/lib/clock-epoch, so on a node with no RTC the kernel clock really is a
+# few seconds past 1970 and `date` really does answer '4'. That is not a broken
+# `date` — it is precisely the condition the restore below exists to fix, and
+# demanding a plausible ten-digit epoch here made the shim refuse to fix it
+# (measured on cp-compute5.local, geekdojo-brain#601).
+#
+# The other two operands are different and keep clock_valid(): $stored_clock is
+# a value read off a partition and about to be BELIEVED, and $build_epoch is the
+# reference the ceiling is measured against — for both of those, "plausible" is
+# the whole point and load-bearing.
+#
+# So: a non-negative decimal integer, and nothing else. Empty output, a missing
+# `date`, a negative number and anything non-numeric all fail, because none of
+# those can be compared and guessing is not better than leaving the clock alone.
+# The ten-digit cap is kept for the reason clock_valid() states — $now goes into
+# `[ "$now" -ge "$stored_clock" ]` under busybox ash's test applet, and ten
+# digits cannot overflow it while eleven might. A `date` answering eleven digits
+# is a clock past 2286, which degrades here exactly as it does in clock_valid().
+clock_now_valid() {
+	[ -n "$1" ] || return 1
+	[ "${#1}" -le 10 ] || return 1
+	case "$1" in
+		*[!0123456789]*) return 1 ;;
+	esac
+	return 0
+}
+
 # is_mounted PATH — true when PATH is a mount point. Reads /proc/self/mounts
 # directly: `mountpoint` is not on this image and the kernel has not mounted
 # /proc for us.
@@ -517,11 +550,17 @@ if [ -n "$stored_clock" ]; then
 	# only here, i.e. still only when a well-formed store was found, so the
 	# "no store means $DATE is never invoked" property is unchanged.
 	build_epoch=$("$DATE" -u -r "$CLOCK_EPOCH_FILE" +%s 2>/dev/null)
-	if ! clock_valid "$now"; then
+	if ! clock_now_valid "$now"; then
 		# A date binary that is missing, or that answered something this cannot
 		# compare, is not a reason to guess: leaving the clock alone puts the
 		# boot back to systemd's own /usr/lib/clock-epoch, which is the backstop
 		# this is layered on top of.
+		#
+		# clock_now_valid() and NOT clock_valid(): a SMALL number is a usable
+		# answer here, not a malfunction — see the function's comment. The
+		# only-forwards branch below already handles "the clock is fine", and a
+		# tiny $now simply fails that comparison and falls through to the
+		# restore, which is the whole point of the block.
 		log "read clock $stored_clock from $persist_dev but $DATE would not report the current time ('${now:-<nothing>}'); leaving the clock alone"
 	elif ! clock_valid "$build_epoch"; then
 		log "REFUSING clock $stored_clock from $persist_dev: $CLOCK_EPOCH_FILE gave no image build date ('${build_epoch:-<nothing>}') to bound it against, and an unbounded floor is what this check exists to refuse; falling back to whatever PID 1 applies"
