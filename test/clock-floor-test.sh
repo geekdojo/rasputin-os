@@ -393,6 +393,62 @@ for bad in 'garbage' '' '17585790000000' '175857900' '17585790a0' '-758579000'; 
 	check "malformed store '$bad': the clock is not set" "$(set_calls)" "0"
 done
 
+# ── a TINY $now is the case this whole block exists for ─────────────────────
+# The shim runs before systemd's clock_apply_epoch() has applied
+# /usr/lib/clock-epoch, so on a no-RTC node the kernel clock genuinely reads a
+# few seconds past 1970 and `date -u +%s` genuinely answers '4'. Measured on
+# cp-compute5.local (geekdojo-brain#601): the first version validated $now with
+# clock_valid(), which demands a plausible ten-digit epoch, so it read the very
+# condition it exists to fix as a broken `date` and left the clock at 1970.
+#
+# Each value below is a real kernel clock a Pi can present on boot, and every
+# one of them must RESTORE.
+for tiny in 4 0 1 999999999; do
+	shim_setup; printf '1758579000\n' >"$PERSIST/clock"; shim "$tiny"
+	check "tiny now '$tiny' + valid store: the clock is set" "$(set_calls)" "1"
+	check "tiny now '$tiny': set to exactly the stored value" "$(set_to)" "1758579000"
+	check "tiny now '$tiny': still hands off" "$(handed_off)" "yes"
+	check "tiny now '$tiny': and says what it moved" \
+		"$(out_has "clock advanced from $tiny to 1758579000")" "yes"
+done
+
+# ── and what must STILL bail ────────────────────────────────────────────────
+# The genuine failure — a `date` that is missing, or that answers something
+# nothing can compare — keeps the old behaviour and the old message. "Produced a
+# number that happens to be small" and "produced no usable number" are different
+# facts, and only the second is a reason to leave the clock alone.
+#
+# '11111111111' is eleven digits: a clock past 2286, which cannot be compared
+# under busybox ash's test applet without risking an overflow, so it degrades
+# here exactly as clock_valid() says it does.
+for badnow in '' 'garbage' '-1750000000' '1750000000x' '17 58' '11111111111'; do
+	shim_setup; printf '1758579000\n' >"$PERSIST/clock"; shim "$badnow"
+	check "unusable now '$badnow': the clock is NOT set" "$(set_calls)" "0"
+	check "unusable now '$badnow': the node still boots" "$(handed_off)" "yes"
+	check "unusable now '$badnow': and it says date would not report the time" \
+		"$(out_has 'would not report the current time')" "yes"
+done
+
+# `date` absent altogether — the same bail, reached a different way. Removed
+# AFTER shim_setup so $W/date.calls still exists and reads as zero calls.
+shim_setup; printf '1758579000\n' >"$PERSIST/clock"; rm -f "$BIN/date"; shim 1750000000
+check "no date binary at all: the clock is NOT set" "$(set_calls)" "0"
+check "no date binary at all: the node still boots" "$(handed_off)" "yes"
+check "no date binary at all: and it says so" \
+	"$(out_has 'would not report the current time')" "yes"
+
+# A tiny $now must not become a way past the ceiling: the store is still
+# measured against the image build date before it is believed.
+shim_setup; printf '%s\n' "$OVER_CEILING" >"$PERSIST/clock"; shim 4
+check "tiny now + store beyond the ceiling: still REFUSED" "$(set_calls)" "0"
+check "  and the node still boots" "$(handed_off)" "yes"
+
+# A tiny $now must not become a way past a missing ceiling reference either.
+shim_setup; printf '1758579000\n' >"$PERSIST/clock"
+rm -f "$R/usr/lib/clock-epoch"; shim 4
+check "tiny now + no epoch file: still fails closed" "$(set_calls)" "0"
+check "  and the node still boots" "$(handed_off)" "yes"
+
 # A `date` that will not set the clock. The boot continues and degrades to
 # systemd's own epoch file rather than to 1970.
 shim_setup; printf '1758579000\n' >"$PERSIST/clock"; STUB_SET_RC=1; shim 1750000000
