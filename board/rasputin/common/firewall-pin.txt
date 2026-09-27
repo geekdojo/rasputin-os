@@ -30,16 +30,27 @@
 # *this OS release was validated against this firewall release.* Bump it
 # DELIBERATELY — as its own reviewed change, after the paired firewall release
 # has been flashed and exercised — never as a drive-by refresh to "pick up the
-# newest firewall", and never automatically.
+# newest firewall", and never automatically. On a stable cut the pin moves to
+# the stable firewall of the same version (THE RULE below), whose code is the
+# benched dev firewall re-pinned onto the stable agent.
 #
 # WHY THIS VALUE
 #
-# 2026.09.4-dev.127 (published 2026-09-20T18:03:17Z) is the FIRST firewall
-# release that publishes manifest.json.sig; dev.126 and earlier ship no sig
-# asset, so there is nothing for post-build.sh to verify and nothing the
-# flashing laptop could check. Its signature chains to the published Rasputin
-# root CA (leaf CN=Rasputin Bundle Signing leaf-003, release OID
-# 1.3.6.1.4.1.66587.1.1.1) — the same root this image bakes at
-# /etc/rasputin/trust/root-ca.pem.
+# THE RULE (Bryce, 2026-09-27): this pin matches the OS version. A stable OS
+# X bakes firewall X; a dev OS bakes a firewall of its own dev line. A stable
+# OS still pinning a -dev firewall would hand every offline greenfield install
+# a dev firewall. On a stable cut the firewall therefore publishes BEFORE this
+# pin moves (rasputin-os-release skill, section D step 3).
 #
-2026.09.4-dev.127
+# 2026.09.4 is the lockstep STABLE carrying bus TLS
+# (geekdojo/geekdojo-brain#602), published 2026-09-27 from firewall 813a2b3.
+# Its manifest.json.sig verifies against the published Rasputin root CA (the
+# same root this image bakes at /etc/rasputin/trust/root-ca.pem), and the
+# manifest names version 2026.09.4, channel stable. It carries the same
+# firewall code bench-validated as 2026.09.4-dev.130, re-pinned onto the CP
+# stable agent v2026.09.4 (same CP commit as the benched dev.179 agent).
+#
+# History: 2026.09.4-dev.127 was the first pin -- the FIRST firewall release
+# that publishes manifest.json.sig (dev.126 and earlier ship no sig asset).
+#
+2026.09.4
