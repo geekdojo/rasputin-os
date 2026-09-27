@@ -27,30 +27,35 @@
 # actually trusts.
 #
 # SO THIS LINE IS A COMPATIBILITY STATEMENT, NOT A BUILD-TIME ACCIDENT:
-# *this OS release was validated against this firewall release.* Bump it
-# DELIBERATELY — as its own reviewed change, after the paired firewall release
-# has been flashed and exercised — never as a drive-by refresh to "pick up the
-# newest firewall", and never automatically. On a stable cut the pin moves to
-# the stable firewall of the same version (THE RULE below), whose code is the
-# benched dev firewall re-pinned onto the stable agent.
+# *this OS release is paired with this firewall release.* It moves only
+# DELIBERATELY, as part of a release chain, in the same OS pin PR that moves
+# the agent/api pins -- never as a drive-by refresh to "pick up the newest
+# firewall", and never automatically. Bench validation of the pair follows the dev build, as it
+# always does; the pin does not wait for it.
+#
+# THE RULE -- INVIOLATE (Bryce, 2026-09-27): "dev only bakes dev. Stable only
+# ever bakes stable." It is not a choice and is not asked per release.
+#
+#   DEV    chain: CP dev release -> firewall dev build -> ONE OS PR pinning
+#          agent/api to that CP dev release AND this line to THAT chain's
+#          firewall dev release (YYYY.MM.MICRO-dev.N).
+#   STABLE chain: a stable OS X bakes the stable firewall X, which therefore
+#          publishes BEFORE this pin moves (rasputin-os-release skill,
+#          section D step 3). A stable OS pinning a -dev firewall would hand
+#          every offline greenfield install a dev firewall.
 #
 # WHY THIS VALUE
 #
-# THE RULE (Bryce, 2026-09-27): this pin matches the OS version. A stable OS
-# X bakes firewall X; a dev OS bakes a firewall of its own dev line. A stable
-# OS still pinning a -dev firewall would hand every offline greenfield install
-# a dev firewall. On a stable cut the firewall therefore publishes BEFORE this
-# pin moves (rasputin-os-release skill, section D step 3).
-#
-# 2026.09.4 is the lockstep STABLE carrying bus TLS
-# (geekdojo/geekdojo-brain#602), published 2026-09-27 from firewall 813a2b3.
+# 2026.09.5-dev.134 is the firewall dev build of the first 2026.09.5 dev
+# chain, published 2026-09-27 from firewall e83a5ca (agent pin
+# 2026.09.5-dev.181, the same CP release this image's agent/api pins name).
 # Its manifest.json.sig verifies against the published Rasputin root CA (the
 # same root this image bakes at /etc/rasputin/trust/root-ca.pem), and the
-# manifest names version 2026.09.4, channel stable. It carries the same
-# firewall code bench-validated as 2026.09.4-dev.130, re-pinned onto the CP
-# stable agent v2026.09.4 (same CP commit as the benched dev.179 agent).
+# manifest names version 2026.09.5-dev.134, channel dev.
 #
 # History: 2026.09.4-dev.127 was the first pin -- the FIRST firewall release
 # that publishes manifest.json.sig (dev.126 and earlier ship no sig asset).
+# 2026.09.4 (stable, bus TLS, geekdojo/geekdojo-brain#602) was the pin of the
+# 2026.09.4 stable OS.
 #
-2026.09.4
+2026.09.5-dev.134
