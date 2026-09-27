@@ -19,7 +19,7 @@ MulticastDNS=yes
 # the moment a lease is acquired (networkd-dhcp4.c dhcp4_address_acquired →
 # sd_ipv4ll_stop). So with working DHCP no extra address ever exists to
 # pollute the api's cert SANs. NOT "yes" — that also brings up IPv6
-# link-local, which Rasputin is IPv4-only (LOCKED decision #9) forbids.
+# link-local, which Rasputin is IPv4-only (decision #9) forbids.
 LinkLocalAddressing=ipv4
 # Refuse router advertisements / SLAAC so no IPv6 address appears via RA.
 IPv6AcceptRA=no

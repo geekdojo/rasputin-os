@@ -148,7 +148,7 @@ mv "$BINARIES_DIR/disk.img" "$BINARIES_DIR/rasputin-os-$SOC-$VERSION.img" 2>/dev
 echo "post-image: staging RAUC bundle directory…"
 # 2. RAUC bundle SOURCES. We deliberately do NOT call `rauc bundle` here —
 #    `rauc bundle` requires the leaf signing key, which never lives in the
-#    build job (locked decision, os-images/release-pipeline.md §3). The
+#    build job (decision recorded in os-images/release-pipeline.md §3). The
 #    discrete `sign-and-release` CI job downloads this bundle/ dir, runs
 #    `rauc bundle` with the leaf key materialized to tmpfs, and uploads the
 #    signed .raucb to the GitHub Release.
