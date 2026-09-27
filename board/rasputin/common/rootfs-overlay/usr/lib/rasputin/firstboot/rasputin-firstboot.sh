@@ -446,7 +446,7 @@ fi
 # NATS URL fallback. A provisioned seed sets this explicitly; the fallback only
 # matters for a self-initing controlplane or a partial seed. The controlplane
 # dials its own embedded broker; every other node defaults to the control
-# plane's mDNS name on the LAN — rasputin.local, IPv4-only (locked decision #9),
+# plane's mDNS name on the LAN — rasputin.local, IPv4-only (decision #9),
 # matching the control plane UI's enrollment default. NOT a hardcoded tailnet
 # hostname: that was unresolvable on a plain LAN and silently stranded a
 # mis-seeded node (2026-06-22).

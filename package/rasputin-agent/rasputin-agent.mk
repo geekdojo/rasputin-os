@@ -2,7 +2,7 @@
 #
 # rasputin-agent
 #
-# Vendored pre-built release binary (locked decision #4 — see
+# Vendored pre-built release binary (decision #4 — see
 # os-images/buildroot-os.md §5). We do NOT compile Go inside the image
 # build; we pull a statically-linked binary built + tested by the
 # rasputin-control-plane repo's own CI, verify its sha256, and install it.
