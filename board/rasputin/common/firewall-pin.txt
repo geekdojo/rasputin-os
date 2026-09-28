@@ -46,18 +46,19 @@
 #
 # WHY THIS VALUE
 #
-# 2026.09.5-dev.136 is the firewall dev build of the third 2026.09.5 dev
-# chain, published 2026-09-28 from firewall 727a556 (agent pin
-# 2026.09.5-dev.183, the same CP release this image's agent/api pins name).
-# Its manifest.json.sig verifies against the published Rasputin root CA (the
+# 2026.09.5 is the lockstep STABLE, published 2026-09-28 from firewall
+# 8b631a6 (agent pinned to CP stable v2026.09.5, the same CP commit 8574729
+# as the benched dev.183 agent). It promotes firewall 2026.09.5-dev.136, the
+# firewall of the dev chain whose OS was 2026.09.5-dev.264. Its
+# manifest.json.sig verifies against the published Rasputin root CA (the
 # same root this image bakes at /etc/rasputin/trust/root-ca.pem), and the
-# manifest names version 2026.09.5-dev.136, channel dev.
+# manifest names version 2026.09.5, channel stable. Stable only ever bakes
+# stable.
 #
 # History: 2026.09.4-dev.127 was the first pin -- the FIRST firewall release
 # that publishes manifest.json.sig (dev.126 and earlier ship no sig asset).
 # 2026.09.4 (stable, bus TLS, geekdojo/geekdojo-brain#602) was the pin of the
-# 2026.09.4 stable OS. 2026.09.5-dev.134 was the pin of the first 2026.09.5
-# dev chain (OS 2026.09.5-dev.262), and 2026.09.5-dev.135 of the second
-# (OS 2026.09.5-dev.263).
+# 2026.09.4 stable OS. On the 2026.09.5 dev line: dev.134 (OS dev.262),
+# dev.135 (OS dev.263), dev.136 (OS dev.264).
 #
-2026.09.5-dev.136
+2026.09.5
