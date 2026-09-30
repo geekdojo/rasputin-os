@@ -45,16 +45,11 @@ Environment=RASPUTIN_HTTPS_ADDR=:443
 # dedicated bus key at /var/lib/rasputin/bus/bus.key, which nodes trust by pin
 # (RASPUTIN_BUS_PIN; geekdojo-brain#448). A controlplane seed's RASPUTIN_BUS_KEY
 # is written there by firstboot; without one the api generates the key.
-# RASPUTIN_BUS_TLS is deliberately NOT set here: setting it pins the
-# offer/migrate/require ladder and the api then refuses to move it. Unset, the
-# api DERIVES the mode from the recorded setting and the enrolled nodes, and it
-# derives UP, never to `offer`: `require` when every enrolled node last
-# registered over bus TLS with the pin verified (so a fresh cluster with no
-# nodes starts in `require`), otherwise `migrate`. A malformed value here is
-# ignored with a warning and the same derivation runs. This replaced the old
-# `offer` default in rasputin-control-plane#356 (geekdojo-brain#510); measured
-# on the bench 2026-09-23, where `RASPUTIN_BUS_TLS="banana"` resolved to
-# `require` across 7 enrolled nodes.
+# The bus accepts only TLS (rasputin-control-plane#415, geekdojo-brain#517):
+# the offer/migrate/require ladder is gone, and with an unusable key or
+# certificate the api serves no bus listener and raises a crit alert.
+# RASPUTIN_BUS_TLS is retired; the api no longer reads it and warns once at
+# start if it is set, so it is not set here.
 Environment=RASPUTIN_NATS_HOST=0.0.0.0
 # Self-hosted Headscale advertises THIS as its server_url — the address every
 # node's tailscaled connects to. Pin the stable mDNS name, not the controlplane's

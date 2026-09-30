@@ -117,8 +117,9 @@ bus_b64_val() {
 # openssl or base64 binary it can count on, so it cannot parse the key; this is
 # the check that catches the realistic damage — a value truncated or joined in
 # transit — before it is written and scrubbed. The api parses the key properly
-# at start; one that passes here and still fails there leaves the bus
-# plaintext-only, logged, and the api never replaces the file.
+# at start; one that passes here and still fails there leaves the api serving
+# no bus listener at all (a crit alert names the file), and the api never
+# replaces the file.
 bus_key_valid() {
 	bus_b64_strict "$1" || return 1
 	[ "${#1}" -ge 8 ] || return 1
@@ -387,7 +388,7 @@ fi
 # otherwise be stamped in: .provisioned stops firstboot re-running, so a bad
 # pin could no longer be fixed by editing the seed, and a bad key would be
 # written and then scrubbed from the seed. A bad key is the worse of the two —
-# the api would run the bus plaintext-only and refuse to replace the file, and
+# the api would serve no bus listener and refuse to replace the file, and
 # every node in the matched set pins the key the seed was meant to carry.
 # The key's value is never logged.
 BUS_PIN=$(bus_trim "$BUS_PIN")
@@ -500,9 +501,10 @@ nodeenv_put RASPUTIN_NODE_ID "$NODE_ID"
 nodeenv_put RASPUTIN_CLUSTER_ID "$CLUSTER_ID"
 nodeenv_put RASPUTIN_NATS_URL "$NATS_URL"
 # The bus pin — ALL roles, the controlplane included: its own agent dials
-# 127.0.0.1 and pins the key too. Public, so it stays in the seed. No pin
-# line means the agent dials in plaintext until the controlplane delivers one
-# into its state dir (/var/lib/rasputin/agent-state/bus/pin, persistent).
+# 127.0.0.1 and pins the key too. Public, so it stays in the seed. With no pin
+# line the agent uses the pin file an earlier agent saved in its state dir
+# (/var/lib/rasputin/agent-state/bus/pin, persistent), or, on the controlplane,
+# the agent.pin the api writes; with none it refuses to dial (bus is TLS-only).
 if [ -n "$BUS_PIN" ]; then
 	nodeenv_put RASPUTIN_BUS_PIN "$BUS_PIN"
 fi

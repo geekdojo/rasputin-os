@@ -7,8 +7,8 @@
 # (geekdojo/geekdojo-brain#537).
 #
 # Why. What firstboot does with a seed is invisible when wrong, and it only
-# runs once. A pin that never reaches node.env is a node that silently stays on
-# plaintext. A bus key written to the wrong place, overwritten, left on the
+# runs once. A pin that never reaches node.env is a node whose agent refuses to
+# dial the TLS-only bus. A bus key written to the wrong place, overwritten, left on the
 # seed FAT, or copied into node.env is the fleet's private key at rest where it
 # should not be — or a controlplane whose api generates a DIFFERENT key than the
 # one every node in its matched set pins, which strands them all. None of that
@@ -551,9 +551,9 @@ for SH in $TEST_SHELLS; do
 	cases
 done
 
-# The api unit must not pin the TLS ladder: RASPUTIN_BUS_TLS set in the unit
-# would lock every controlplane to one mode (the api refuses changes when the
-# variable is set). Shell-independent, so checked once.
+# RASPUTIN_BUS_TLS is retired (rasputin-control-plane#415): the api no longer
+# reads it and warns at start when it is set, so the unit must not set it.
+# Shell-independent, so checked once.
 SH=unit
 ok "rasputin-api.service does not set RASPUTIN_BUS_TLS" \
 	"$(yes_if not grep -Eq '^[[:space:]]*Environment=.*RASPUTIN_BUS_TLS' "$API_UNIT")"
