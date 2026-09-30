@@ -1,0 +1,9 @@
+config BR2_PACKAGE_OPENBAO
+	bool "openbao"
+	help
+	  SPIKE ONLY (geekdojo/geekdojo-brain#677): the stock OpenBao
+	  release binary, installed to /usr/bin/bao so the image and OTA
+	  growth can be measured. Not enabled by any defconfig and not a
+	  decision to ship OpenBao (that is #687, S3).
+
+	  https://openbao.org

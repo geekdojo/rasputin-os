@@ -1,0 +1,177 @@
+# SPIKE ONLY — geekdojo/geekdojo-brain#677 (OpenBao footprint: image + OTA growth).
+#
+# Builds each SKU twice from ONE commit and reports the size delta:
+#   1. baseline  — the stock defconfig, a clean build (identical content to main)
+#   2. +openbao  — the same output dir with BR2_PACKAGE_OPENBAO=y added, rebuilt
+# and proves the only file-level difference between the two rootfs images is
+# /usr/bin/bao. Both .raucb are signed with the SAME throwaway, job-local,
+# self-signed key, so the signature size cancels out of the delta.
+#
+# Never publishes, never tags, never saves a cache (a branch cache entry would
+# compete with main's for the repo's 10 GB), never reads the signing
+# environment. Artifacts are the size report only, kept 7 days.
+name: spike-e22-677-size
+
+on:
+  push:
+    branches:
+      - spike/e22-677-openbao-size
+
+permissions:
+  contents: read
+
+jobs:
+  size:
+    runs-on: ubuntu-24-16core
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - sku: rpi
+            defconfig: rasputin_rpi_defconfig
+            arch: arm64
+          - sku: n100
+            defconfig: rasputin_n100_defconfig
+            arch: amd64
+    env:
+      RASPUTIN_VERSION: 0.0.0-spike677
+      BR2_DL_DIR: ${{ github.workspace }}/dl
+      RASPUTIN_MESH_IMAGES_DIR: ${{ github.workspace }}/mesh-images
+      RASPUTIN_REQUIRE_FIREWALL_MANIFEST: "1"
+      O: ${{ github.workspace }}/output/${{ matrix.sku }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Init Buildroot (pinned LTS)
+        run: ./scripts/init-buildroot.sh
+
+      - name: Compute Buildroot cache key (same expression as release.yml)
+        id: brkey
+        env:
+          BR_CACHE_HASH: ${{ hashFiles(format('configs/{0}', matrix.defconfig), 'scripts/init-buildroot.sh', format('board/rasputin/{0}/*.fragment', matrix.sku), 'board/rasputin/common/post-build.sh') }}
+        run: |
+          set -euo pipefail
+          test -n "${BR_CACHE_HASH}"
+          echo "key=br-${{ matrix.sku }}-${BR_CACHE_HASH}" >> "$GITHUB_OUTPUT"
+
+      # Restore ONLY. There is deliberately no save step.
+      - name: Restore Buildroot dl + ccache (read-only)
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            dl
+            ~/.buildroot-ccache
+          key: ${{ steps.brkey.outputs.key }}-spike677-never-saved
+          restore-keys: |
+            ${{ steps.brkey.outputs.key }}-
+            br-${{ matrix.sku }}-
+            br-rpi-
+
+      - name: Inject trust root
+        run: |
+          echo "${{ vars.RASPUTIN_ROOT_CA_PEM }}" \
+            > board/rasputin/common/rootfs-overlay/etc/rasputin/trust/root-ca.pem
+
+      - name: Fetch vendored binaries (control-plane release)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          arch='${{ matrix.arch }}'
+          dl="$BR2_DL_DIR"
+          fetch() {
+            pkg=$1
+            var=$(printf '%s' "$pkg" | tr 'a-z-' 'A-Z_')
+            ver=$(sed -n "s/^${var}_VERSION = //p" "package/$pkg/$pkg.mk" | tr -d '[:space:]')
+            test -n "$ver"
+            mkdir -p "$dl/$pkg"
+            gh release download "v$ver" --repo geekdojo/rasputin-control-plane \
+              --pattern "$pkg-$ver-linux-$arch.tar.gz" --dir "$dl/$pkg" --clobber
+          }
+          fetch rasputin-agent
+          fetch rasputin-api
+
+      - name: Bake mesh container images
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/bake-mesh-images.sh '${{ matrix.arch }}' "$RASPUTIN_MESH_IMAGES_DIR"
+
+      - name: Install measurement tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends rauc xz-utils squashfs-tools
+
+      - name: Build 1 — baseline (stock defconfig, clean)
+        run: |
+          set -euo pipefail
+          make -C buildroot BR2_EXTERNAL=${{ github.workspace }} O="$O" ${{ matrix.defconfig }}
+          if grep -q '^BR2_PACKAGE_OPENBAO=y' "$O/.config"; then echo "::error::baseline has openbao"; exit 1; fi
+          make -C buildroot BR2_EXTERNAL=${{ github.workspace }} O="$O"
+          mkdir -p out/baseline
+          cp "$O/images/rootfs.squashfs" out/baseline/rootfs.squashfs
+          cp -r "$O/images/bundle" out/baseline/bundle
+          cp "$O"/images/rasputin-os-*.img out/baseline/
+          if [ -e "$O/target/usr/bin/bao" ]; then echo "::error::baseline target has bao"; exit 1; fi
+
+      - name: Build 2 — the same tree plus BR2_PACKAGE_OPENBAO=y
+        run: |
+          set -euo pipefail
+          echo 'BR2_PACKAGE_OPENBAO=y' >> "$O/.config"
+          make -C buildroot BR2_EXTERNAL=${{ github.workspace }} O="$O" olddefconfig
+          grep -q '^BR2_PACKAGE_OPENBAO=y' "$O/.config"
+          make -C buildroot BR2_EXTERNAL=${{ github.workspace }} O="$O"
+          mkdir -p out/openbao
+          cp "$O/images/rootfs.squashfs" out/openbao/rootfs.squashfs
+          cp -r "$O/images/bundle" out/openbao/bundle
+          cp "$O"/images/rasputin-os-*.img out/openbao/
+
+      - name: Measure
+        run: |
+          set -euo pipefail
+          R=report-${{ matrix.sku }}.txt
+          {
+            echo "sku=${{ matrix.sku }} arch=${{ matrix.arch }} commit=${GITHUB_SHA} run=${GITHUB_RUN_ID} buildroot=$(git -C buildroot describe --tags)"
+            echo "--- installed bao (after Buildroot's target strip)"
+            ls -l "$O/target/usr/bin/bao"
+            file "$O/target/usr/bin/bao"
+            echo "--- upstream tarball"
+            ls -l "$BR2_DL_DIR"/openbao/openbao_2.7.0_linux_${{ matrix.arch }}.tar.gz
+            echo "--- rootfs file-list diff (baseline -> openbao); expect only /usr/bin/bao"
+            unsquashfs -d / -lc out/baseline/rootfs.squashfs | sort > /tmp/base.lst
+            unsquashfs -d / -lc out/openbao/rootfs.squashfs  | sort > /tmp/bao.lst
+            diff /tmp/base.lst /tmp/bao.lst || true
+            echo "--- squashfs superblocks"
+            unsquashfs -s out/baseline/rootfs.squashfs | grep -E 'Filesystem size|Compression|Block size'
+            unsquashfs -s out/openbao/rootfs.squashfs  | grep -E 'Filesystem size|Compression|Block size'
+          } > "$R"
+
+          # One throwaway self-signed signer, created here and destroyed with the
+          # runner. Both bundles use it, so the CMS signature cancels in the delta.
+          k=$(mktemp -d)
+          openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+            -keyout "$k/key.pem" -out "$k/cert.pem" -subj /CN=spike677-throwaway -days 1 2>/dev/null
+          for v in baseline openbao; do
+            rauc bundle --cert="$k/cert.pem" --key="$k/key.pem" --signing-keyring="$k/cert.pem" \
+              "out/$v/bundle" "out/$v/rasputin-os-${{ matrix.sku }}.raucb"
+            img=$(ls out/$v/rasputin-os-*.img | head -1)
+            echo "img.xz source for $v: $(basename "$img")" >> "$R"
+            xz --keep --threads=0 -T0 -c "$img" > "out/$v/img.xz"
+          done
+          rm -rf "$k"
+
+          size() { stat -c%s "$1"; }
+          {
+            echo "--- sizes, bytes: baseline openbao delta"
+            for f in rootfs.squashfs rasputin-os-${{ matrix.sku }}.raucb img.xz; do
+              b=$(size "out/baseline/$f"); o=$(size "out/openbao/$f")
+              echo "$f $b $o $((o - b))"
+            done
+          } >> "$R"
+          cat "$R"
+
+      - name: Upload the size report
+        uses: actions/upload-artifact@v4
+        with:
+          name: spike677-size-${{ matrix.sku }}
+          path: report-${{ matrix.sku }}.txt
+          retention-days: 7
