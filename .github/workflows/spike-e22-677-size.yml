@@ -1,8 +1,8 @@
 # SPIKE ONLY — geekdojo/geekdojo-brain#677 (OpenBao footprint: image + OTA growth).
 #
-# Builds each SKU twice from ONE commit and reports the size delta:
-#   1. baseline  — the stock defconfig, a clean build (identical content to main)
-#   2. +openbao  — the same output dir with BR2_PACKAGE_OPENBAO=y added, rebuilt
+# Builds each SKU twice from ONE commit, both clean, and reports the size delta:
+#   1. baseline  — the stock defconfig (identical content to main)
+#   2. +openbao  — the stock defconfig plus BR2_PACKAGE_OPENBAO=y, own output dir
 # and proves the only file-level difference between the two rootfs images is
 # /usr/bin/bao. Both .raucb are signed with the SAME throwaway, job-local,
 # self-signed key, so the signature size cancels out of the delta.
@@ -113,17 +113,26 @@ jobs:
           cp "$O"/images/rasputin-os-*.img out/baseline/
           if [ -e "$O/target/usr/bin/bao" ]; then echo "::error::baseline target has bao"; exit 1; fi
 
-      - name: Build 2 — the same tree plus BR2_PACKAGE_OPENBAO=y
+      # A second CLEAN build in its own output dir. Re-running make in the
+      # baseline's dir does not work for this tree: post-build.sh leaves
+      # target/etc files read-only, so target-finalize fails on the second pass
+      # (run 36791544560). The shared ccache and dl dir keep this one fast.
+      - name: Build 2 — clean, stock defconfig plus BR2_PACKAGE_OPENBAO=y
+        env:
+          O2: ${{ github.workspace }}/output/${{ matrix.sku }}-openbao
         run: |
           set -euo pipefail
-          echo 'BR2_PACKAGE_OPENBAO=y' >> "$O/.config"
-          make -C buildroot BR2_EXTERNAL=${{ github.workspace }} O="$O" olddefconfig
-          grep -q '^BR2_PACKAGE_OPENBAO=y' "$O/.config"
-          make -C buildroot BR2_EXTERNAL=${{ github.workspace }} O="$O"
+          make -C buildroot BR2_EXTERNAL=${{ github.workspace }} O="$O2" ${{ matrix.defconfig }}
+          echo 'BR2_PACKAGE_OPENBAO=y' >> "$O2/.config"
+          make -C buildroot BR2_EXTERNAL=${{ github.workspace }} O="$O2" olddefconfig
+          grep -q '^BR2_PACKAGE_OPENBAO=y' "$O2/.config"
+          make -C buildroot BR2_EXTERNAL=${{ github.workspace }} O="$O2"
           mkdir -p out/openbao
-          cp "$O/images/rootfs.squashfs" out/openbao/rootfs.squashfs
-          cp -r "$O/images/bundle" out/openbao/bundle
-          cp "$O"/images/rasputin-os-*.img out/openbao/
+          cp "$O2/images/rootfs.squashfs" out/openbao/rootfs.squashfs
+          cp -r "$O2/images/bundle" out/openbao/bundle
+          cp "$O2"/images/rasputin-os-*.img out/openbao/
+          ls -l "$O2/target/usr/bin/bao" > out/openbao/bao.ls
+          file "$O2/target/usr/bin/bao" > out/openbao/bao.file
 
       - name: Measure
         run: |
@@ -132,8 +141,7 @@ jobs:
           {
             echo "sku=${{ matrix.sku }} arch=${{ matrix.arch }} commit=${GITHUB_SHA} run=${GITHUB_RUN_ID} buildroot=$(git -C buildroot describe --tags)"
             echo "--- installed bao (after Buildroot's target strip)"
-            ls -l "$O/target/usr/bin/bao"
-            file "$O/target/usr/bin/bao"
+            cat out/openbao/bao.ls out/openbao/bao.file
             echo "--- upstream tarball"
             ls -l "$BR2_DL_DIR"/openbao/openbao_2.7.0_linux_${{ matrix.arch }}.tar.gz
             echo "--- rootfs file-list diff (baseline -> openbao); expect only /usr/bin/bao"
