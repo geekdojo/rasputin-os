@@ -84,9 +84,11 @@ jobs:
           mkdir -p ../report
           cp "$O/.config" ../report/buildroot.config
 
-      - name: Build systemd and busybox
+      # dbus too: systemd-run --wait/--pipe needs the system bus (run 36806469294
+      # had no bus and every systemd-run in the runtime job failed to connect).
+      - name: Build systemd, busybox and dbus
         working-directory: src
-        run: make -C buildroot BR2_EXTERNAL="$PWD" O="$O" systemd busybox
+        run: make -C buildroot BR2_EXTERNAL="$PWD" O="$O" systemd busybox dbus
 
       - name: Read what systemd was built with
         working-directory: src
@@ -124,6 +126,10 @@ jobs:
       - name: Tar the target tree for the runtime job
         run: |
           set -euo pipefail
+          # The dbus user is normally added by Buildroot's target-finalize
+          # (mkusers), which this partial build does not run.
+          grep -q '^dbus:' "$O/target/etc/group"  || echo 'dbus:x:81:' >> "$O/target/etc/group"
+          grep -q '^dbus:' "$O/target/etc/passwd" || echo 'dbus:x:81:81:DBus messagebus user:/run/dbus:/bin/false' >> "$O/target/etc/passwd"
           tar --numeric-owner --owner=0 --group=0 -C "$O/target" -cf target.tar .
           ls -l target.tar
 
@@ -179,10 +185,17 @@ jobs:
             sleep 1
           done
           echo "manager state: $state"
+          # Start the system bus and wait on the fact that its socket exists.
+          docker exec s679 systemctl start dbus.socket dbus.service || { docker exec s679 systemctl status dbus.service --no-pager || true; exit 1; }
+          deadline=$((SECONDS + 60))
+          until docker exec s679 test -S /run/dbus/system_bus_socket; do
+            [ "$SECONDS" -lt "$deadline" ] || { echo "no /run/dbus/system_bus_socket within 60s"; docker exec s679 systemctl status dbus.service --no-pager || true; exit 1; }
+            sleep 1
+          done
           docker cp spike679/cred-test.sh s679:/root/cred-test.sh
           {
             echo "line=${{ matrix.line }} sku=${{ matrix.sku }} runner=$(uname -m) run=${GITHUB_RUN_ID}"
-            echo "harness: target tree booted as PID 1 in a privileged container; its / is a writable container layer, NOT the image's read-only squashfs"
+            echo "harness: target tree booted as PID 1 in a privileged container; its / is a writable container layer, NOT the image's read-only squashfs; the runner's own firmware TPM shows through to has-tpm2"
             docker exec s679 /bin/sh /root/cred-test.sh /root/spike679-cred 2>&1
           } | tee runtime-report.txt
           docker rm -f s679 >/dev/null
