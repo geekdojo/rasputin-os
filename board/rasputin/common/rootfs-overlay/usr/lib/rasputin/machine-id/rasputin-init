@@ -165,7 +165,11 @@ if [ "$$" -eq 1 ]; then
 	FINDFS=/usr/sbin/findfs
 	# busybox date. Both `-u +%s` and `-u -s @SECONDS` are busybox 1.37.0
 	# applets on this image (`date --help` on cp-compute5.local lists
-	# "@seconds_since_1970" among the recognised TIME formats). It is invoked
+	# "@seconds_since_1970" among the recognised TIME formats), and still are
+	# in 1.38.0, the version Buildroot 2026.08 ships: parse_datestr()'s '@'
+	# branch and `-r` are unchanged. 1.38.0 also makes a failed `-s` exit
+	# non-zero ("can't set date" now dies; 1.37.0 printed it and exited 0), so
+	# the "could not set the clock" branch below is now reachable. It is invoked
 	# ONLY when a stored clock was read, so a node with no store never touches
 	# it — see the clock block near the end.
 	DATE=/bin/date
@@ -340,10 +344,13 @@ fi
 # running, so /dev/disk/by-label does not exist and libblkid cannot resolve a
 # LABEL= from it. Its fallback is a full device scan, and that scan is driven
 # from SYSFS, not from /proc/partitions: strace of util-linux 2.40.4 findfs —
-# the node's exact version — shows it opendir()s /sys/block and then reads
-# /sys/dev/block/<maj>:<min> for each entry. With /sys unmounted the first
-# openat() returns ENOENT, the scan yields nothing, and findfs exits 1 printing
-# nothing. That is precisely the empty $persist_dev observed on both SKUs.
+# the node's exact version on Buildroot 2025.02.17 — shows it opendir()s
+# /sys/block and then reads /sys/dev/block/<maj>:<min> for each entry. With
+# /sys unmounted the first openat() returns ENOENT, the scan yields nothing,
+# and findfs exits 1 printing nothing. That is precisely the empty $persist_dev
+# observed on both SKUs. Buildroot 2026.08 ships util-linux 2.41.5, whose
+# libblkid probe_all() and sysfs_probe_all() (libblkid/src/devname.c) are
+# unchanged from 2.40.4 apart from a comment typo.
 #
 # Tested in a container with udev absent and the libblkid cache removed (so a
 # cache hit cannot mask the dependency), on util-linux 2.38.1 and 2.40.4:
@@ -519,9 +526,10 @@ fi
 #   - It has to be under systemd's own backward clamp to mean anything.
 #     clock_apply_epoch() resets the clock back to /usr/lib/clock-epoch once it
 #     is more than clock-valid-range-usec-max ahead, and that defaults to 15
-#     years (systemd v256 meson_options.txt; Buildroot 2025.02.17 does not
-#     override it). Above 15 years systemd has already pulled the clock back to
-#     the build date, so a ceiling there would never fire.
+#     years (systemd meson_options.txt, the same at v256.17 and v258.7;
+#     neither Buildroot 2025.02.17 nor 2026.08 overrides it). Above 15 years
+#     systemd has already pulled the clock back to the build date, so a
+#     ceiling there would never fire.
 #   - It has to be over the longest plausible life of a node still running ONE
 #     image. This is an appliance: the hardware's service life is on the order
 #     of five to eight years and a node that never takes an OTA is the worst
@@ -568,8 +576,9 @@ if [ -n "$stored_clock" ]; then
 		# Subtraction rather than build+ceiling: the operands are the large
 		# numbers and the result is small, so nothing here leans on how wide
 		# the shell's arithmetic is. (busybox 1.37.0 ash is 64-bit either way —
-		# `echo $((9999999999 + 1))` gives 10000000000 — but this does not have
-		# to be true for the check to be right.) A store EARLIER than the build
+		# `echo $((9999999999 + 1))` gives 10000000000 — and 1.38.0 is built
+		# with the same FEATURE_SH_MATH_64=y; but this does not have to be
+		# true for the check to be right.) A store EARLIER than the build
 		# date gives a negative difference, which is not greater than the
 		# ceiling, so an old store is allowed through and the only-forwards rule
 		# below deals with it.

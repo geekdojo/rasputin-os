@@ -1,6 +1,6 @@
 #!/bin/sh
 # Functional test for the console root password's arrangement on this image,
-# against REAL systemd-tmpfiles 256.17 — the version Buildroot 2025.02.17
+# against REAL systemd-tmpfiles 258.7 — the version Buildroot 2026.08
 # builds into the image — and the real tmpfiles.d line and helper from the
 # rootfs overlay. geekdojo/geekdojo-brain#546.
 #
@@ -44,7 +44,7 @@ set -u
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 OVERLAY="$ROOT/board/rasputin/common/rootfs-overlay"
-IMAGE=rasputin-console-shadow-functional:f41-systemd-256.17
+IMAGE=rasputin-console-shadow-functional:f43-systemd-258.7
 
 command -v docker >/dev/null 2>&1 || { echo "docker not found - this test needs docker"; exit 1; }
 
@@ -55,12 +55,23 @@ check() {
 }
 yes_if() { if "$@"; then echo 0; else echo 1; fi; }
 
-# Fedora 41 ships systemd 256.17, the same release as the image, so what
+# Fedora 43 built systemd 258.7, the same release as the image, so what
 # systemd-tmpfiles does with this line here is what it does on a node.
+# The f43 repos have since moved past 258.7, so the exact build is installed
+# from Fedora's build system (koji) and dnf resolves the rest from the f43
+# repos -- the same arrangement as test/fallback-address-functional.sh. The
+# build fails loudly if that exact version is no longer installable.
 echo "building test image ($IMAGE)"
 docker build -q -t "$IMAGE" - >/dev/null <<'DOCKERFILE' || { echo "FAILED: could not build the test image"; exit 1; }
-FROM fedora:41
-RUN dnf -y install --setopt=install_weak_deps=False systemd-256.17 util-linux findutils \
+FROM fedora:43
+ARG KOJI=https://kojipkgs.fedoraproject.org/packages/systemd/258.7/1.fc43/x86_64
+RUN dnf -y install --setopt=install_weak_deps=False \
+      $KOJI/systemd-258.7-1.fc43.x86_64.rpm \
+      $KOJI/systemd-libs-258.7-1.fc43.x86_64.rpm \
+      $KOJI/systemd-shared-258.7-1.fc43.x86_64.rpm \
+      $KOJI/systemd-pam-258.7-1.fc43.x86_64.rpm \
+      util-linux findutils \
+ && test "$(rpm -q --qf '%{VERSION}' systemd)" = 258.7 \
  && dnf clean all
 DOCKERFILE
 

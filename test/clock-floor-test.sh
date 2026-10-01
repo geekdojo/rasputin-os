@@ -148,7 +148,9 @@ fi
 # PID 1's OWN floor, and the half the image never had. systemd 256's
 # clock_apply_epoch() stats this path and falls back to the compiled TIME_EPOCH
 # — the systemd PACKAGE's build date, 2025-06-25 on 2026.09.4 — only when the
-# stat fails. Absent from the image, so every no-RTC node booted fifteen months
+# stat fails. (systemd 258.7, from Buildroot 2026.08, takes the latest of
+# TIME_EPOCH, this mtime and /var/lib/systemd/timesync/clock's; see
+# post-fakeroot.sh.) Absent from the image, so every no-RTC node booted fifteen months
 # in the past. Nothing else in the tree can substitute: it is read before the
 # manager exists, so before any unit, any generator and any journal line.
 check "PID 1's own epoch file is baked" "$([ -f "$EPOCH" ] && echo yes || echo no)" "yes"
