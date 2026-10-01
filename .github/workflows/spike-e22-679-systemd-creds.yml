@@ -99,12 +99,13 @@ jobs:
             grep -E '^(# )?BR2_PACKAGE_(SYSTEMD|OPENSSL|LIBOPENSSL|TPM2|LIBGCRYPT)[A-Z0-9_]*[ =]' "$O/.config" || true
             echo "--- buildroot/package/systemd/systemd.mk: how those symbols become meson options"
             grep -n -E 'tpm2|openssl|BR2_PACKAGE_TPM2_TSS|BR2_PACKAGE_OPENSSL' buildroot/package/systemd/systemd.mk || true
-            bd=$(ls -d "$O"/build/systemd-[0-9]*/build | head -1)
+            # Buildroot's meson infrastructure builds in <pkg>/buildroot-build.
+            bd=$(ls -d "$O"/build/systemd-[0-9]*/buildroot-build | head -1)
             echo "--- systemd build dir: ${bd#$O/}"
             echo "--- meson options systemd was configured with (meson-info/intro-buildoptions.json)"
             jq -r '.[] | select(.name|test("^(tpm2|openssl|libcryptsetup|gcrypt|p11kit)$")) | "\(.name) = \(.value)"' "$bd/meson-info/intro-buildoptions.json"
-            echo "--- meson log: dependency lines for tpm2 / openssl"
-            grep -E 'Run-time dependency (tss2|libcrypto|openssl)|Dependency (tss2|libcrypto|openssl)' "$bd/meson-logs/meson-log.txt" | sort -u || true
+            echo "--- meson log: dependency and summary lines for tpm2 / openssl"
+            grep -E 'dependency (tss2|libcrypto|openssl)|Dependency tss2|^ *(tpm2|openssl) *:' "$bd/meson-logs/meson-log.txt" | sort -u || true
           } > "$R"
           cat "$R"
 
