@@ -21,9 +21,9 @@ Repo facts an agent should know:
   `/etc/rasputin/trust/root-ca.pem`) is published at
   https://rasputin.geekdojo.com/rasputin-root-ca.pem.
 - A commit or PR that fixes a tracked issue must use a **closing keyword** —
-  `Fixes #N` / `Closes #N` — not a bare `(#N)` reference. Bare references leave the
-  issue open after the fix ships (audited 2026-07-20: four of six stale-open issues
-  across the rasputin repos were exactly this).
+  `Fixes #N` / `Closes #N` — not a bare `(#N)` reference, so the PR and the issue are
+  linked. A merged PR does not close the issue (auto-close is off org-wide since
+  2026-09-30): close it deliberately once it is done.
 
 ## Engineering standard
 
