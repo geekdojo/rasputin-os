@@ -1,0 +1,193 @@
+# SPIKE ONLY: geekdojo/geekdojo-brain#679, questions 2 and 11.
+#
+# Question 2 asks whether plain LoadCredential= delivers a key file on the
+# image's systemd 256.17 and on 258.7 (draft rasputin-os#87), whether
+# LoadCredentialEncrypted= fails as expected, and wants -Dtpm2 and -Dopenssl
+# read from a REAL built configuration, not from the defconfig.
+#
+# For each line (main = Buildroot 2025.02.17 / systemd 256.17; pr87 = #87's head,
+# Buildroot 2026.08 / systemd 258.7) and each SKU, the build job:
+#   1. resolves the defconfig into .config and keeps the systemd/openssl/tpm2 lines;
+#   2. builds systemd and busybox (and their dependencies, toolchain included),
+#      then reads the meson options systemd was ACTUALLY configured with from
+#      the build's meson-info/intro-buildoptions.json;
+#   3. n100 only (question 11): configures the kernel and keeps the TPM lines of
+#      the resolved kernel .config;
+#   4. tars the target tree (systemd, busybox, glibc) for the runtime job.
+# The runtime job boots that tree's systemd as PID 1 in a privileged container,
+# on a native runner of the SKU's architecture, and runs spike679/cred-test.sh,
+# the same script run.sh runs on the bench nodes. main's result is the control:
+# it must match the bench's 256.17 result before pr87's 258.7 result is read.
+#
+# Never publishes, never tags, never saves a cache, never reads the signing
+# environment. Artifacts: the target tars (1 day) and the reports (7 days).
+name: spike-e22-679-systemd-creds
+
+on:
+  push:
+    branches:
+      - spike/e22-679-systemd-creds
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24-16core
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        line: [main, pr87]
+        sku: [rpi, n100]
+        include:
+          - line: main
+            ref: ea9a81fb1842dc60176791704cb8676c7dcf506c
+          - line: pr87
+            ref: 5df7a55c6ffecb7733b4afa55b0e6220045515f0
+          - sku: rpi
+            defconfig: rasputin_rpi_defconfig
+          - sku: n100
+            defconfig: rasputin_n100_defconfig
+    env:
+      RASPUTIN_VERSION: 0.0.0-spike679
+      BR2_DL_DIR: ${{ github.workspace }}/dl
+      O: ${{ github.workspace }}/output
+    steps:
+      - name: Check out the tree under test
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.ref }}
+          path: src
+          submodules: false
+
+      - name: Init Buildroot (as pinned at that ref)
+        working-directory: src
+        run: ./scripts/init-buildroot.sh
+
+      # Restore ONLY. There is deliberately no save step.
+      - name: Restore Buildroot dl + ccache (read-only)
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            dl
+            ~/.buildroot-ccache
+          key: br-${{ matrix.sku }}-spike679-never-saved
+          restore-keys: |
+            br-${{ matrix.sku }}-
+
+      - name: Resolve the defconfig into .config
+        working-directory: src
+        run: |
+          set -euo pipefail
+          make -C buildroot BR2_EXTERNAL="$PWD" O="$O" ${{ matrix.defconfig }}
+          mkdir -p ../report
+          cp "$O/.config" ../report/buildroot.config
+
+      - name: Build systemd and busybox
+        working-directory: src
+        run: make -C buildroot BR2_EXTERNAL="$PWD" O="$O" systemd busybox
+
+      - name: Read what systemd was built with
+        working-directory: src
+        run: |
+          set -euo pipefail
+          R=../report/report.txt
+          {
+            echo "line=${{ matrix.line }} sku=${{ matrix.sku }} ref=${{ matrix.ref }} run=${GITHUB_RUN_ID} buildroot=$(git -C buildroot describe --tags)"
+            echo "--- resolved .config: systemd, openssl, tpm2"
+            grep -E '^(# )?BR2_PACKAGE_(SYSTEMD|OPENSSL|LIBOPENSSL|TPM2|LIBGCRYPT)[A-Z0-9_]*[ =]' "$O/.config" || true
+            echo "--- buildroot/package/systemd/systemd.mk: how those symbols become meson options"
+            grep -n -E 'tpm2|openssl|BR2_PACKAGE_TPM2_TSS|BR2_PACKAGE_OPENSSL' buildroot/package/systemd/systemd.mk || true
+            bd=$(ls -d "$O"/build/systemd-[0-9]*/build | head -1)
+            echo "--- systemd build dir: ${bd#$O/}"
+            echo "--- meson options systemd was configured with (meson-info/intro-buildoptions.json)"
+            jq -r '.[] | select(.name|test("^(tpm2|openssl|libcryptsetup|gcrypt|p11kit)$")) | "\(.name) = \(.value)"' "$bd/meson-info/intro-buildoptions.json"
+            echo "--- meson log: dependency lines for tpm2 / openssl"
+            grep -E 'Run-time dependency (tss2|libcrypto|openssl)|Dependency (tss2|libcrypto|openssl)' "$bd/meson-logs/meson-log.txt" | sort -u || true
+          } > "$R"
+          cat "$R"
+
+      - name: N100 only — configure the kernel and keep its TPM lines (question 11)
+        if: matrix.sku == 'n100'
+        working-directory: src
+        run: |
+          set -euo pipefail
+          make -C buildroot BR2_EXTERNAL="$PWD" O="$O" linux-configure
+          kc=$(ls -d "$O"/build/linux-[0-9]*/.config | head -1)
+          {
+            echo "--- resolved kernel config: ${kc#$O/}"
+            grep -E '^(# )?CONFIG_(TCG_[A-Z0-9_]*|HW_RANDOM_TPM|SECURITYFS|TRUSTED_KEYS|EFI_TPM|ACPI)[ =]' "$kc" || true
+          } | tee -a ../report/report.txt
+
+      - name: Tar the target tree for the runtime job
+        run: |
+          set -euo pipefail
+          tar --numeric-owner --owner=0 --group=0 -C "$O/target" -cf target.tar .
+          ls -l target.tar
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: target-${{ matrix.line }}-${{ matrix.sku }}
+          path: target.tar
+          retention-days: 1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-report-${{ matrix.line }}-${{ matrix.sku }}
+          path: report/
+          retention-days: 7
+
+  runtime:
+    needs: build
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        line: [main, pr87]
+        sku: [rpi, n100]
+        include:
+          - sku: rpi
+            runner: ubuntu-24.04-arm
+          - sku: n100
+            runner: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: target-${{ matrix.line }}-${{ matrix.sku }}
+
+      - name: Boot the target's systemd as PID 1 and run cred-test.sh
+        run: |
+          set -euo pipefail
+          echo "runner: $(uname -m), kernel $(uname -r)"
+          docker import --change 'ENV container=docker' target.tar spike679-sd:local
+          docker run -d --name s679 --privileged --cgroupns=private \
+            --tmpfs /run --tmpfs /run/lock --tmpfs /tmp \
+            --stop-signal SIGRTMIN+3 spike679-sd:local /sbin/init
+          # Wait on a fact: the manager answers and has left "initializing".
+          # Hard deadline, and the container must still be running.
+          deadline=$((SECONDS + 180)); state=none
+          while :; do
+            [ "$(docker inspect -f '{{.State.Running}}' s679)" = true ] || { echo "container exited"; docker logs s679 2>&1 | tail -60; exit 1; }
+            state=$(docker exec s679 systemctl is-system-running 2>/dev/null || true)
+            case "$state" in starting|running|degraded) break ;; esac
+            [ "$SECONDS" -lt "$deadline" ] || { echo "systemd never left initializing within 180s (last: $state)"; docker logs s679 2>&1 | tail -60; exit 1; }
+            sleep 1
+          done
+          echo "manager state: $state"
+          docker cp spike679/cred-test.sh s679:/root/cred-test.sh
+          {
+            echo "line=${{ matrix.line }} sku=${{ matrix.sku }} runner=$(uname -m) run=${GITHUB_RUN_ID}"
+            echo "harness: target tree booted as PID 1 in a privileged container; its / is a writable container layer, NOT the image's read-only squashfs"
+            docker exec s679 /bin/sh /root/cred-test.sh /root/spike679-cred 2>&1
+          } | tee runtime-report.txt
+          docker rm -f s679 >/dev/null
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runtime-report-${{ matrix.line }}-${{ matrix.sku }}
+          path: runtime-report.txt
+          retention-days: 7
