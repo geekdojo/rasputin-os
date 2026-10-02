@@ -493,6 +493,29 @@ if grep -n "Invalid environment assignment" "$CONSOLE_LOG"; then
 fi
 echo "no malformed Environment= assignments in any unit"
 
+# A unit that systemd could not even exec. Before a service's process runs,
+# systemd sets up its sandbox — state/cache/runtime directories, namespaces,
+# credentials — and a failure there is reported as "Failed at step <STEP>
+# spawning <binary>" and an exit status of 2xx/<STEP>. Nothing in the image
+# has to be wrong for this to happen: a systemd bump can change how a setting
+# is applied. The first Buildroot 2026.08 build (run 36935416907) booted to
+# multi-user with every assertion above green while tailscaled failed at
+# STATE_DIRECTORY on every start, because systemd 258 no longer follows the
+# image's /var/lib/tailscale symlink — mesh enrollment would have been dead on
+# every node. tailscaled's CACHE_DIRECTORY failure, found on the bench on
+# 2026-06-18 (dev.20), was the same class.
+#
+# Generic on purpose, like the Environment= check: it covers every unit, and
+# no unit on this image is expected to fail its exec setup. Coverage is the
+# arm64 console: there systemd.log_target=kmsg (above) puts the service
+# manager's per-unit errors on the console. The amd64 console stops carrying
+# them once journald is up, so on amd64 this check sees only early boot.
+if grep -anE "Failed at step [A-Z_]+ spawning" "$CONSOLE_LOG"; then
+  echo "::error::a unit failed while systemd was setting up its execution environment, before its process ran (see the matches above; the step name says which setting). Its service never started."
+  exit 1
+fi
+echo "no unit failed its execution-environment setup"
+
 [ "$api" = 1 ] \
   || { echo "::error::rasputin-api never answered /healthz on :80 on the controlplane boot — unit failed to start, RASPUTIN_HTTP_ADDR regressed, or networking broke; see console artifact"; exit 1; }
 [ "$ui" = 1 ] \
