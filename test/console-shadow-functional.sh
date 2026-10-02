@@ -55,21 +55,23 @@ check() {
 }
 yes_if() { if "$@"; then echo 0; else echo 1; fi; }
 
-# Fedora 43 built systemd 258.7, the same release as the image, so what
+# Fedora 43 shipped systemd 258.7, the same release as the image, so what
 # systemd-tmpfiles does with this line here is what it does on a node.
-# The f43 repos have since moved past 258.7, so the exact build is installed
-# from Fedora's build system (koji) and dnf resolves the rest from the f43
-# repos -- the same arrangement as test/fallback-address-functional.sh. The
-# build fails loudly if that exact version is no longer installable.
+# The f43 repos have since moved past 258.7, so the exact build comes from
+# Fedora's updates-archive repo (fedora-repos-archive), which keeps every
+# update build f43 has shipped. It is an ordinary dnf repo with gpgcheck=1, so
+# the packages are verified against Fedora's signing keys; installing koji
+# URLs directly, as this used to, skips that (dnf's localpkg_gpgcheck is 0)
+# and failed CI outright while koji was down for Fedora infrastructure
+# maintenance (2026-10-02, fedora-infrastructure ticket #13500). The build
+# fails loudly if that exact version is no longer installable.
 echo "building test image ($IMAGE)"
 docker build -q -t "$IMAGE" - >/dev/null <<'DOCKERFILE' || { echo "FAILED: could not build the test image"; exit 1; }
 FROM fedora:43
-ARG KOJI=https://kojipkgs.fedoraproject.org/packages/systemd/258.7/1.fc43/x86_64
-RUN dnf -y install --setopt=install_weak_deps=False \
-      $KOJI/systemd-258.7-1.fc43.x86_64.rpm \
-      $KOJI/systemd-libs-258.7-1.fc43.x86_64.rpm \
-      $KOJI/systemd-shared-258.7-1.fc43.x86_64.rpm \
-      $KOJI/systemd-pam-258.7-1.fc43.x86_64.rpm \
+RUN dnf -y install --setopt=install_weak_deps=False fedora-repos-archive \
+ && dnf -y install --setopt=install_weak_deps=False \
+      systemd-258.7-1.fc43 systemd-libs-258.7-1.fc43 \
+      systemd-shared-258.7-1.fc43 systemd-pam-258.7-1.fc43 \
       util-linux findutils \
  && test "$(rpm -q --qf '%{VERSION}' systemd)" = 258.7 \
  && dnf clean all
