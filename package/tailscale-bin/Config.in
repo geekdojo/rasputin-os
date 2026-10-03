@@ -1,0 +1,16 @@
+config BR2_PACKAGE_TAILSCALE_BIN
+	bool "tailscale-bin"
+	depends on BR2_aarch64 || BR2_x86_64
+	depends on !BR2_PACKAGE_TAILSCALE
+	help
+	  Tailscale (tailscale + tailscaled), installed from Tailscale's
+	  official statically-linked release tarballs at
+	  pkgs.tailscale.com/stable rather than built by Buildroot's own
+	  tailscale package.
+
+	  EXPERIMENT (spike/own-tailscale): Buildroot 2026.08 pins
+	  tailscale 1.78.1 and its install hook turns tailscaled into a
+	  self-referencing symlink under BR2_ROOTFS_MERGED_BIN. This
+	  package pins its own version and installs into /usr/bin.
+
+	  https://tailscale.com/

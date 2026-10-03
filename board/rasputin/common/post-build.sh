@@ -215,9 +215,10 @@ ln -sf /etc/systemd/system/rasputin-fallback-address-release.path \
 ln -sf /etc/systemd/system/rasputin-issue-ip.service \
 	"$TARGET_DIR/etc/systemd/system/multi-user.target.wants/rasputin-issue-ip.service"
 
-# tailscaled (mesh / remote access). The upstream Buildroot tailscale package
-# installs the unit at /usr/lib/systemd/system/tailscaled.service but does not
-# enable it; enable it on every image so it's up before the agent runs
+# tailscaled (mesh / remote access). The tailscale-bin package (this external
+# tree; EXPERIMENT, spike/own-tailscale — it replaces Buildroot's tailscale
+# package) installs the unit at /usr/lib/systemd/system/tailscaled.service but
+# does not enable it; enable it on every image so it's up before the agent runs
 # `tailscale up` on mesh enrollment. (`systemctl restart tailscaled` from the
 # agent then talks to a daemon that's already running.) It idles harmlessly
 # until enrolled — no state until `tailscale up`. The SSL_CERT_FILE drop-in
@@ -225,6 +226,10 @@ ln -sf /etc/systemd/system/rasputin-issue-ip.service \
 # at etc/systemd/system/tailscaled.service.d/.
 ln -sf /usr/lib/systemd/system/tailscaled.service \
 	"$TARGET_DIR/etc/systemd/system/multi-user.target.wants/tailscaled.service"
+# Its once-per-boot state/version report to /dev/kmsg, which the QEMU smoke
+# asserts on (overlay unit rasputin-tailscale-report.service).
+ln -sf /etc/systemd/system/rasputin-tailscale-report.service \
+	"$TARGET_DIR/etc/systemd/system/multi-user.target.wants/rasputin-tailscale-report.service"
 
 # dropbear: key-only SSH for support/debugging a headless controlplane. Enable
 # the overlay unit (etc/systemd/system/dropbear.service, runs with -s = no

@@ -148,3 +148,22 @@ CONFIG_CGROUP_DEVICE=y
 
 # --- tailscale (mesh / remote access): tailscaled needs /dev/net/tun ---
 CONFIG_TUN=y
+
+# --- tailscale kernel requirements (EXPERIMENT, spike/own-tailscale) ---------
+# Buildroot's package/tailscale applied these through
+# TAILSCALE_LINUX_CONFIG_FIXUPS. With that package off they are carried here
+# instead. Fixups only ever reached the primary Buildroot kernel; a fragment
+# also reaches every other kernel built from it.
+# Already set elsewhere in this file: NF_NAT, TUN.
+CONFIG_IPV6=y
+CONFIG_IPV6_MULTIPLE_TABLES=y
+CONFIG_NETFILTER=y
+CONFIG_NETFILTER_NETLINK=y
+CONFIG_NFT_CT=y
+CONFIG_NFT_MASQ=y
+CONFIG_NFT_NAT=y
+CONFIG_NF_CONNTRACK=y
+CONFIG_NF_TABLES=y
+CONFIG_NF_TABLES_INET=y
+CONFIG_NF_TABLES_IPV4=y
+CONFIG_NF_TABLES_IPV6=y
