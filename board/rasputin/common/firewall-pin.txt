@@ -46,14 +46,12 @@
 #
 # WHY THIS VALUE
 #
-# 2026.09.6-dev.143 is the firewall dev build of the fourth 2026.09.6 dev
-# chain (geekdojo/geekdojo-brain#514, control-plane #426), published
-# 2026-10-04 from firewall fbbd18a (firewall #91: agent pin 2026.09.6-dev.188,
-# the same CP release this image's agent/api pins name; Snort rules pin
-# 94d7859a unchanged and current). Its manifest.json.sig verifies against the
-# published Rasputin root CA (the same root this image bakes at
-# /etc/rasputin/trust/root-ca.pem), and the manifest names version
-# 2026.09.6-dev.143, channel dev. Dev only bakes dev.
+# 2026.09.6 is the STABLE firewall of the 2026.09.6 lockstep, published
+# 2026-10-04 from firewall 202ed53 (firewall #92: agent re-pinned from dev.188
+# to the CP stable v2026.09.6, the same CP release this image's agent/api pins
+# name; Snort rules pin 94d7859a, freshness gate passed). It promotes the
+# 2026.09.6-dev.143 chain. Its manifest names version 2026.09.6, channel
+# stable. Stable only ever bakes stable.
 #
 # History: 2026.09.4-dev.127 was the first pin -- the FIRST firewall release
 # that publishes manifest.json.sig (dev.126 and earlier ship no sig asset).
@@ -62,6 +60,7 @@
 # dev.135 (OS dev.263), dev.136 (OS dev.264). 2026.09.5 (stable) was the pin
 # of the 2026.09.5 stable OS.
 # On the 2026.09.6 dev line: dev.140 (OS dev.268), dev.141 (OS dev.269),
-# dev.142 (pinned, but no OS release published with it).
+# dev.142 (pinned, but no OS release published with it), dev.143 (OS dev.276,
+# dev.279).
 #
-2026.09.6-dev.143
+2026.09.6
