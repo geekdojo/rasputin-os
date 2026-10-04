@@ -217,6 +217,26 @@ jobs:
       # change adds no shell script to the node, so there is no shell to vary.
       - name: Persistent journal tests
         run: sh test/persistent-journal-test.sh
+      # The RAUC bundle hook that installs a slot's kernel and boot files with
+      # its rootfs (geekdojo/geekdojo-brain#807). It runs as root, from the
+      # bundle, under the OLD image's busybox, and it writes boot partitions —
+      # a bug either strands a slot on the wrong kernel or writes a partition
+      # it must not touch. Every branch against fake partitions: slot A and B,
+      # BMC-host cmdline policy, payload checksum mismatch, partition too
+      # small, missing, running or mounted, compatible mismatch, and the n100's
+      # per-slot kernel + shared grub.cfg. The update smoke in release.yml runs
+      # it for real.
+      - name: Bundle boot-hook tests
+        env:
+          REQUIRE_BUSYBOX: "1"
+        run: sh test/boot-hook-test.sh
+      # The once-per-boot kernel/rootfs verdict both QEMU smokes assert
+      # (geekdojo/geekdojo-brain#807): what must NOT match is the point — the
+      # same release built at another time, a release-only line, no list.
+      - name: Kernel-match verdict tests
+        env:
+          REQUIRE_BUSYBOX: "1"
+        run: sh test/kernel-match-test.sh
       # release.yml's publish step runs scripts/release-target-guard.sh before
       # and after `gh release create` to prove the tag is on the commit the
       # images were built from. Every exit status, against a throwaway git
