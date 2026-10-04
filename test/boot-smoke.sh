@@ -66,7 +66,9 @@ DNS_PORT=15353
 # TS_TRIES is the tailscaled-report poll (2s apart, 60s ceiling). It runs after
 # the at-rest poll, by which point multi-user has long been reached and the
 # report (ordered only After=tailscaled) has normally already arrived.
-BOOT_BUDGET=900 ; MU_TRIES=120 ; FB_TRIES=60 ; API_TRIES=48 ; ATREST_TRIES=60 ; TS_TRIES=30
+# KM_TRIES is the kernel-match verdict poll (2s apart, 60s ceiling); like the
+# tailscale report it normally arrived long before the polls above finish.
+BOOT_BUDGET=900 ; MU_TRIES=120 ; FB_TRIES=60 ; API_TRIES=48 ; ATREST_TRIES=60 ; TS_TRIES=30 ; KM_TRIES=30
 case "$ARCH" in
   amd64|arm64) ;;
   *) echo "::error::unknown arch '$ARCH' (expected amd64 or arm64)"; exit 1 ;;
@@ -392,12 +394,26 @@ if [ "$ok" = 1 ]; then
 fi
 TS_AT=$(( $(date +%s) - START ))
 
+# Kernel/rootfs match (geekdojo/geekdojo-brain#807). rasputin-kernel-match.service
+# writes ONE "rasputin-kernel-match:" verdict to /dev/kmsg per boot. Arrival is
+# polled here, before the kill; the verdict is asserted after it.
+kmrep=0
+if [ "$ok" = 1 ]; then
+  i=0
+  while [ "$i" -lt "$KM_TRIES" ]; do
+    if grep -qa "rasputin-kernel-match: " "$CONSOLE_LOG"; then kmrep=1; break; fi
+    die_if_qemu_gone "the kernel-match verdict"
+    i=$((i + 1)); sleep 2
+  done
+fi
+KM_AT=$(( $(date +%s) - START ))
+
 TOTAL=$(( $(date +%s) - START ))
 
 kill "$QPID" 2>/dev/null || true
 echo "----- last 60 lines of console -----"; tail -60 "$CONSOLE_LOG" || true
 echo "----- $ARCH smoke timings (seconds from qemu start) -----"
-echo "multi-user=${MU_AT}s firstboot=${FB_AT}s api+ui+dns=${API_AT}s atrest-verdict=${ATREST_AT}s tailscale-report=${TS_AT}s total(incl. 70s soak)=${TOTAL}s"
+echo "multi-user=${MU_AT}s firstboot=${FB_AT}s api+ui+dns=${API_AT}s atrest-verdict=${ATREST_AT}s tailscale-report=${TS_AT}s kernel-match=${KM_AT}s total(incl. 70s soak)=${TOTAL}s"
 
 # ------------------------------------------------------------ assertions ------
 [ "$ok" = 1 ] || { echo "::error::$ARCH image did not reach multi-user in QEMU"; exit 1; }
@@ -535,6 +551,21 @@ case "$TS_LINE" in
 esac
 echo "tailscaled active, daemon and /usr/sbin/tailscaled both report ${TS_EXPECT}"
 
+# The booted kernel is one this rootfs was built for (geekdojo/geekdojo-brain#807).
+# A fresh flash boots its own kernel, so this is the baseline: it proves the
+# image's /usr/lib/rasputin/kernel-ids describes the kernel the image ships,
+# which is what makes the same verdict meaningful after an update (the update
+# smoke asserts it there). No verdict fails like a MISMATCH does: silence means
+# nothing checked.
+KM_LINE="$(grep -ao 'rasputin-kernel-match: .*' "$CONSOLE_LOG" | tr -d '\r' | head -1)"
+if [ "$kmrep" != 1 ] || [ -z "$KM_LINE" ]; then
+  echo "::error::no 'rasputin-kernel-match:' verdict reached the serial console in ${KM_AT}s — nothing checked that the kernel matches the rootfs. Check rasputin-kernel-match.service is in the overlay and enabled in post-build.sh."
+  exit 1
+fi
+case "$KM_LINE" in
+  "rasputin-kernel-match: MATCH "*) echo "kernel matches the rootfs: $KM_LINE" ;;
+  *) echo "::error::the booted kernel is not one this rootfs was built for, on a FRESH flash — post-build.sh baked a kernel-ids list that does not describe the kernel post-image.sh staged: $KM_LINE"; exit 1 ;;
+esac
 
 [ "$api" = 1 ] \
   || { echo "::error::rasputin-api never answered /healthz on :80 on the controlplane boot — unit failed to start, RASPUTIN_HTTP_ADDR regressed, or networking broke; see console artifact"; exit 1; }

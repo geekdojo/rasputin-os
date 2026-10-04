@@ -230,6 +230,11 @@ ln -sf /usr/lib/systemd/system/tailscaled.service \
 # asserts on (overlay unit rasputin-tailscale-report.service).
 ln -sf /etc/systemd/system/rasputin-tailscale-report.service \
 	"$TARGET_DIR/etc/systemd/system/multi-user.target.wants/rasputin-tailscale-report.service"
+# Its once-per-boot "is the running kernel one this rootfs was built for"
+# verdict to /dev/kmsg, which both QEMU smokes assert on (geekdojo/geekdojo-brain#807).
+# The list it compares against is baked at the end of this script.
+ln -sf /etc/systemd/system/rasputin-kernel-match.service \
+	"$TARGET_DIR/etc/systemd/system/multi-user.target.wants/rasputin-kernel-match.service"
 
 # dropbear: key-only SSH for support/debugging a headless controlplane. Enable
 # the overlay unit (etc/systemd/system/dropbear.service, runs with -s = no
@@ -528,4 +533,46 @@ if [ "$SOC" = "rpi" ]; then
 	# where the Pi 4 firmware expects that name.
 	cp "$KSRC/arch/arm64/boot/Image" "$BIN_DIR/kernel8.bin"
 	echo "post-build: Pi 4 kernel → images/kernel8.bin; both kernels' modules now in the rootfs"
+fi
+
+# === kernel-ids: which kernels this rootfs's modules belong to ===============
+# One line per kernel the image ships, "<uname -r> <uname -v>", read out of the
+# kernel images themselves by scripts/kernel-id.sh. rasputin-kernel-match
+# compares the running kernel against it on every boot, and
+# test/bundle-kernel-match.sh checks the bundle's kernels against it on every
+# build (geekdojo/geekdojo-brain#807: an OTA used to leave the old kernel under a
+# new rootfs). The rpi lists both of its kernels, so this runs after the Pi 4
+# kernel above is built; its modules were installed alongside the primary's.
+#
+# A real build always has its kernel images here. The minimal fixture trees the
+# test suite hands this script do not, and they skip with a warning — an image
+# that really shipped without the list could not hide it: its kernel-match
+# verdict is FAIL on every boot, which the boot smoke refuses, and
+# bundle-kernel-match refuses the bundle. A kernel that IS here and cannot be
+# identified stops the build.
+KIMG_DIR="$(cd "$(dirname "$TARGET_DIR")" && pwd)/images"
+case "$SOC" in
+	rpi)  KERNELS="$KIMG_DIR/Image $KIMG_DIR/kernel8.bin" ;;
+	n100) KERNELS="$KIMG_DIR/bzImage" ;;
+	*)    KERNELS="" ;;
+esac
+KIDS_PRESENT=1
+for k in $KERNELS; do [ -f "$k" ] || KIDS_PRESENT=0; done
+if [ -n "$KERNELS" ] && [ "$KIDS_PRESENT" = 1 ]; then
+	KIDS="$TARGET_DIR/usr/lib/rasputin/kernel-ids"
+	mkdir -p "$(dirname "$KIDS")"
+	: > "$KIDS.tmp"
+	for k in $KERNELS; do
+		if ! sh "$SCRIPT_DIR/../../../scripts/kernel-id.sh" "$k" >> "$KIDS.tmp"; then
+			echo "post-build: ERROR — cannot read the kernel identity of $k; refusing to bake a kernel list that does not describe this image" >&2
+			rm -f "$KIDS.tmp"
+			exit 1
+		fi
+	done
+	mv "$KIDS.tmp" "$KIDS"
+	chmod 0644 "$KIDS"
+	echo "post-build: baked /usr/lib/rasputin/kernel-ids:"
+	sed 's/^/post-build:   /' "$KIDS"
+else
+	echo "post-build: WARNING — kernel image(s) not found under $KIMG_DIR; NOT baking /usr/lib/rasputin/kernel-ids (expected only for a fixture tree)" >&2
 fi

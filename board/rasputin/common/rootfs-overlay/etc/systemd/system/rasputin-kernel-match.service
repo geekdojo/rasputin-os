@@ -1,0 +1,18 @@
+# Say once per boot whether the running kernel is one this rootfs was built
+# for (geekdojo/geekdojo-brain#807). See rasputin-kernel-match.sh. The verdict
+# goes to /dev/kmsg, which the QEMU boot and update smokes assert on.
+#
+# Not ordered against anything it could hold up: it reads uname and one file
+# on the rootfs, and a mismatch is reported, not acted on (the node is already
+# running whatever kernel it booted; rollback is the update saga's call).
+
+[Unit]
+Description=Check the running kernel matches this rootfs's modules
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/rasputin/kernel-match/rasputin-kernel-match.sh
+
+[Install]
+WantedBy=multi-user.target

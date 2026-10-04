@@ -8,8 +8,8 @@
 # SEPARATE selector partition + two boot slots, each a complete boot env that
 # statically roots its own slot:
 #   partition 1 = selector (label RASPUTIN-OS) → autoboot.txt + seed + slot state
-#   partition 2 = boot-a   (label RASPUTIN-A)  → rootfs-0 → bootname A
-#   partition 3 = boot-b   (label RASPUTIN-B)  → rootfs-1 → bootname B
+#   partition 2 = boot-a   (label RASPUTIN-BT) → rootfs-0 → bootname A
+#   partition 3 = boot-b   (label RASPUTIN-BT) → rootfs-1 → bootname B
 # The firmware reads autoboot.txt from the selector (p1, mounted rw at
 # /run/rasputin-seed) and loads start4.elf + config.txt + kernel from the slot it
 # names (p2/p3) — boot_partition never points at p1, so p1 needs no kernel:
