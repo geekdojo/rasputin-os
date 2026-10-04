@@ -29,8 +29,10 @@
 #
 # FAIL-SAFE ORDER. node.env is rewritten only after the token file is in place
 # and reads back non-empty. Any failure before that leaves node.env exactly as
-# it was, so the node keeps the credential it has and the next boot retries:
-# a node is never left with neither form.
+# it was, so the token is not lost and the next boot retries: a node is never
+# left with neither form. The agent reads only the file
+# (geekdojo/geekdojo-brain#539), so until a retry succeeds it has no token and
+# the bus refuses the node; the WARNING says so.
 set -eu
 
 PERSIST="${RASPUTIN_JOINTOKEN_PERSIST:-/var/lib/rasputin}"
@@ -79,7 +81,7 @@ if [ -s "$TOKEN_FILE" ]; then
 else
 	TOKEN_DIR=$(dirname "$TOKEN_FILE")
 	if ! { mkdir -p "$TOKEN_DIR" && chmod 700 "$TOKEN_DIR"; }; then
-		log "WARNING: could not create $TOKEN_DIR; node.env is unchanged and this node keeps its inline token. Retrying next boot."
+		log "WARNING: could not create $TOKEN_DIR; node.env keeps the inline token so the next boot can retry; until then the agent has no token and the bus refuses this node."
 		exit 0
 	fi
 	# Atomic: write a 0600 temp beside it and rename. A half-written token file
@@ -91,7 +93,7 @@ else
 		&& chmod 600 "$jt_tmp" \
 		&& mv -f "$jt_tmp" "$TOKEN_FILE"; }; then
 		rm -f "$jt_tmp"
-		log "WARNING: could not write the join token to $TOKEN_FILE; node.env is unchanged and this node keeps its inline token. Retrying next boot."
+		log "WARNING: could not write the join token to $TOKEN_FILE; node.env keeps the inline token so the next boot can retry; until then the agent has no token and the bus refuses this node."
 		exit 0
 	fi
 	sync
@@ -100,7 +102,7 @@ fi
 
 # Prove it reads back before node.env loses the inline copy.
 if [ ! -s "$TOKEN_FILE" ] || [ -z "$(cat "$TOKEN_FILE" 2>/dev/null || true)" ]; then
-	log "WARNING: $TOKEN_FILE does not read back; node.env is unchanged and this node keeps its inline token. Retrying next boot."
+	log "WARNING: $TOKEN_FILE does not read back; node.env keeps the inline token so the next boot can retry; until then the agent has no token and the bus refuses this node."
 	exit 0
 fi
 
@@ -123,12 +125,12 @@ rm -f "$env_tmp"
 # with nothing left in it. Never rename that over the real one.
 if [ ! -s "$env_tmp" ] || ! grep -q '^RASPUTIN_NODE_ID=' "$env_tmp"; then
 	rm -f "$env_tmp"
-	log "WARNING: the rewritten $NODE_ENV did not come out intact; it is unchanged and this node keeps its inline token. Retrying next boot."
+	log "WARNING: the rewritten $NODE_ENV did not come out intact, so it is unchanged and keeps the inline token for the next boot to retry. Until then, unless node.env already names $TOKEN_FILE, the agent has no token and the bus refuses this node."
 	exit 0
 fi
 if ! { chmod 600 "$env_tmp" && mv -f "$env_tmp" "$NODE_ENV"; }; then
 	rm -f "$env_tmp"
-	log "WARNING: could not replace $NODE_ENV; the token file is in place and the inline token stays for now. Retrying next boot."
+	log "WARNING: could not replace $NODE_ENV; the token file is in place, and node.env keeps the inline token for the next boot to retry. Until then, unless node.env already names $TOKEN_FILE, the agent has no token and the bus refuses this node."
 	exit 0
 fi
 sync

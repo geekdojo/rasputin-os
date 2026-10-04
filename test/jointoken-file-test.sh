@@ -189,16 +189,30 @@ cases() {
 	ok "no node.env: nothing written" "$(yes_if test -z "$(ls -A "$P")")" "$(ls -A "$P")"
 
 	# 8. The token file cannot be written (its directory is taken by a
-	#    non-directory): node.env MUST be left alone, so the node keeps the
-	#    only credential it has and the next boot retries. This is the failure
-	#    that would otherwise strand a node.
+	#    non-directory): node.env MUST be left alone, so the token is not lost
+	#    and the next boot retries. This is the failure that would otherwise
+	#    strand a node.
+	#    TC-539-13 (geekdojo/geekdojo-brain#539): the agent no longer reads the
+	#    inline token, so the WARNING must say the agent has no token until the
+	#    retry succeeds and the bus refuses the node, and must not claim the
+	#    node keeps working on its inline token.
 	setup; legacy_env
 	: > "$P/bus"
+	cp "$P/node.env" "$W/env.before"
 	run
 	ok "unwritable: still exits 0 (the next boot retries)" "$RC" "$OUT"
-	ok "unwritable: says so" "$(yes_if out_has "node.env is unchanged")" "$OUT"
+	ok "unwritable: node.env is byte-for-byte unchanged" \
+		"$(yes_if cmp -s "$W/env.before" "$P/node.env")" "$(cat "$P/node.env")"
 	ok "unwritable: the inline token is still there" \
 		"$(yes_if has_line "$P/node.env" "RASPUTIN_CP_JOIN_TOKEN=tok-w1")" "$(cat "$P/node.env")"
+	unwritable_warn="WARNING: could not create $P/bus; node.env keeps the inline token so the next boot can retry; until then the agent has no token and the bus refuses this node."
+	ok "unwritable: the WARNING says the agent has no token and the bus refuses the node (stdout)" \
+		"$(yes_if out_has "$unwritable_warn")" "$OUT"
+	ok "unwritable: the same WARNING reaches the console (kmsg)" \
+		"$(yes_if contains "$W/kmsg" "$unwritable_warn")" "$(cat "$W/kmsg")"
+	ok "unwritable: no message claims the node keeps its inline token" \
+		"$(yes_if not out_has "keeps its inline token")" "$OUT"
+	ok "unwritable: the token is never logged" "$(yes_if not out_has "tok-w1")" "$OUT"
 
 	# 9. A token carrying the rest of the base64 alphabet — "+", "/" and "="
 	#    padding — survives the round trip: the value is everything after the

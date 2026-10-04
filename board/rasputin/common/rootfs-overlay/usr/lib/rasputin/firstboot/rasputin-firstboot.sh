@@ -599,11 +599,12 @@ if [ -n "$JOIN_TOKEN" ] && [ "$ROLE" != "controlplane" ]; then
 		log "ERROR: could not write the join token to $JOIN_TOKEN_FILE — provisioning stopped so this node does not boot without a credential."
 		exit 1
 	fi
-	# node.env carries the PATH, never the token. An agent that predates the
-	# file (before control-plane v2026.09.4-dev.167) reads only
-	# RASPUTIN_CP_JOIN_TOKEN and would not join off this line — which is why
-	# the migration for ALREADY-provisioned nodes keeps its inline token (see
-	# usr/lib/rasputin/jointoken/rasputin-jointoken-file.sh). A node being
+	# node.env carries the PATH, never the token. The agent reads only this
+	# file: since geekdojo/geekdojo-brain#539 an inline RASPUTIN_CP_JOIN_TOKEN
+	# is never read. The migration for ALREADY-provisioned nodes
+	# (usr/lib/rasputin/jointoken/rasputin-jointoken-file.sh) leaves node.env
+	# unchanged when it cannot write the file, so the next boot can retry, but
+	# until then that agent has no token and the bus refuses the node. A node being
 	# provisioned NOW runs the agent from the image that ships this script, and
 	# genimage.cfg pre-populates slot B with that same rootfs at flash, so a
 	# rollback on a freshly provisioned node lands on a file-aware agent too.
