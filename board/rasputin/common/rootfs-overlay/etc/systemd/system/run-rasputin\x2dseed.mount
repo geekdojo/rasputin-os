@@ -5,8 +5,8 @@
 # on n100 and "selector" on rpi (see each board's genimage.cfg), but both FATs
 # carry the same volume label RASPUTIN-OS — one unit serves both boards. On the
 # rpi this is the selector (p1), which holds autoboot.txt + the seed + the RAUC
-# tryboot backend's slot state; the rpi's boot slots (boot-a=p2 RASPUTIN-A,
-# boot-b=p3 RASPUTIN-B) hold the kernels and are deliberately NOT matched here.
+# tryboot backend's slot state; the rpi's boot slots (boot-a=p2, boot-b=p3,
+# both labelled RASPUTIN-BT) hold the kernels and are deliberately NOT matched here.
 #
 # Read-write: the bootloader backend updates state on this FAT at runtime —
 # autoboot.txt + slot-state files on the rpi

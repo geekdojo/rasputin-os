@@ -34,6 +34,8 @@ WORK="${WORK:-/tmp/boot-smoke}"
 
 test -f "$IMG" || { echo "::error::no image at $IMG"; exit 1; }
 mkdir -p "$WORK"
+# Seed lookup, OVMF and the per-arch QEMU line, shared with test/update-smoke.sh.
+. "$(dirname "$0")/lib/qemu-common.sh"
 
 # Host-side forwards into the guest. The same numbers serve both arches: the two
 # smoke jobs run on separate runners, so they never collide.
@@ -64,7 +66,9 @@ DNS_PORT=15353
 # TS_TRIES is the tailscaled-report poll (2s apart, 60s ceiling). It runs after
 # the at-rest poll, by which point multi-user has long been reached and the
 # report (ordered only After=tailscaled) has normally already arrived.
-BOOT_BUDGET=900 ; MU_TRIES=120 ; FB_TRIES=60 ; API_TRIES=48 ; ATREST_TRIES=60 ; TS_TRIES=30
+# KM_TRIES is the kernel-match verdict poll (2s apart, 60s ceiling); like the
+# tailscale report it normally arrived long before the polls above finish.
+BOOT_BUDGET=900 ; MU_TRIES=120 ; FB_TRIES=60 ; API_TRIES=48 ; ATREST_TRIES=60 ; TS_TRIES=30 ; KM_TRIES=30
 case "$ARCH" in
   amd64|arm64) ;;
   *) echo "::error::unknown arch '$ARCH' (expected amd64 or arm64)"; exit 1 ;;
@@ -94,22 +98,12 @@ printf 'RASPUTIN_NODE_ROLE=controlplane\nRASPUTIN_NODE_ID=smoke-cp\nRASPUTIN_CLU
 # The seed ships on its own auto-mounting FAT partition on BOTH SKUs (the
 # running image finds it by FS label RASPUTIN-OS, not by number). We find its
 # byte offset from the partition table so the recipe survives a layout change,
-# and so ONE selector serves both tables:
-#
-#   n100 — GPT: the seed is Microsoft basic data (EBD0A0A2-…), deliberately NOT
-#          the EFI System partition, which Windows and macOS hide from the user.
-#   rpi  — MBR: `sfdisk -J` reports the selector FAT as type "c" + bootable. It
-#          is the ONLY bootable entry in that table (boot-a/boot-b are type "c"
-#          as well but carry no boot flag), so the pair is unambiguous. MBR is
-#          forced on the Pi because the firmware's autoboot.txt boot_partition
-#          switch is broken on GPT (rpi-eeprom#654).
+# and so ONE selector serves both tables (seed_offset, lib/qemu-common.sh, says
+# how). MBR is forced on the Pi because the firmware's autoboot.txt
+# boot_partition switch is broken on GPT (rpi-eeprom#654).
 #
 # mtools keeps the recipe identical to the macOS bench one.
-SEED_OFF=$(sfdisk -J "$IMG" | jq -r '
-  .partitiontable.partitions[]
-  | select(((.type | ascii_upcase) == "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7")
-        or ((.type | ascii_downcase) == "c" and (.bootable == true)))
-  | .start * 512' | head -1)
+SEED_OFF=$(seed_offset "$IMG")
 if [ -z "$SEED_OFF" ]; then
   echo "::error::could not locate the seed partition in $IMG — the table below matches neither the GPT (Microsoft-basic-data) nor the MBR (bootable type 0x0c) seed"
   sfdisk -J "$IMG"
@@ -121,24 +115,13 @@ MTOOLS_SKIP_CHECK=1 mcopy -o -i "$IMG"@@"$SEED_OFF" "$WORK/seed-cp.env" ::rasput
 
 # ------------------------------------------------------- arch preparation -----
 prepare_amd64() {
-  # Ubuntu's ovmf package renamed the firmware files (the un-suffixed
-  # OVMF_CODE.fd / OVMF_VARS.fd are gone on 24.04+; the 4M variants are the
-  # modern names, and the secboot ones require signed bootloaders which our
-  # GRUB isn't). Pick whichever non-secboot variant is installed.
-  OVMF_CODE=""; OVMF_VARS=""
-  for f in /usr/share/OVMF/OVMF_CODE*.fd; do
-    case "$f" in *secboot*) continue ;; esac
-    [ -f "$f" ] || continue; OVMF_CODE="$f"; break
-  done
-  for f in /usr/share/OVMF/OVMF_VARS*.fd; do
-    case "$f" in *secboot*) continue ;; esac
-    [ -f "$f" ] || continue; OVMF_VARS="$f"; break
-  done
-  if [ -z "$OVMF_CODE" ] || [ -z "$OVMF_VARS" ]; then
+  # find_ovmf (lib/qemu-common.sh) picks a non-secboot OVMF pair.
+  if ! find_ovmf; then
     echo "::error::OVMF firmware not found"; ls -la /usr/share/OVMF/ || true; exit 1
   fi
   echo "using OVMF code=$OVMF_CODE vars=$OVMF_VARS"
   cp "$OVMF_VARS" "$WORK/vars.fd"
+  VARS_FD="$WORK/vars.fd"
 }
 
 prepare_arm64() {
@@ -179,6 +162,8 @@ prepare_arm64() {
   #     NOT do this — it forwards journal entries, not PID 1's transitions.)
   CMDLINE="$(tr -d '\n' < "$WORK/cmdline.txt") systemd.log_target=kmsg console=ttyAMA0,115200"
   echo "kernel cmdline: $CMDLINE"
+  QEMU_KERNEL="$WORK/kernel_2712.img"
+  QEMU_APPEND="$CMDLINE"
 }
 
 # ---------------------------------------------------------------- boot --------
@@ -197,48 +182,33 @@ prepare_arm64() {
 # `tryboot` flag are firmware behaviour no emulation here reproduces, and
 # config.txt / start4.elf are never read. Those stay bench-only.
 qemu_boot() {
-  case "$ARCH" in
-  amd64)
-    # -cpu max: advertise every ISA extension QEMU's TCG knows. The image is
-    # built with BR2_x86_corei7 (Nehalem baseline → SSE4.2); the default qemu64
-    # CPU model lacks SSE4.2 so glibc's dynamic linker hits "invalid opcode" the
-    # moment init runs. Real N100 hardware has SSE4.2+ so the build target is
-    # correct — this only affects emulation. (max works without KVM, which not
-    # all GH runners expose at /dev/kvm.)
-    # user-mode NIC with a host forward so the runner can curl the api/UI;
-    # virtio-net matches the virtio-blk the image already boots from. The api
-    # listens on :80 (HTTP bootstrap surface; RASPUTIN_HTTP_ADDR=:80 in
-    # rasputin-api.service — the old :8080 default is gone from the image).
-    # /healthz stays plain-HTTP by contract. mDNS is NOT asserted: user-mode
-    # networking makes multicast useless.
-    exec timeout "$BOOT_BUDGET" qemu-system-x86_64 \
-      -machine q35 -m 2048 -smp 2 -cpu max -nographic \
-      -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
-      -drive if=pflash,format=raw,file="$WORK/vars.fd" \
-      -drive file="$IMG",format=raw,if=virtio \
-      -nic "user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:${HTTP_PORT}-:80,hostfwd=tcp:127.0.0.1:${HTTPS_PORT}-:443,hostfwd=udp:127.0.0.1:${DNS_PORT}-:53,hostfwd=tcp:127.0.0.1:${DNS_PORT}-:53" \
-      -serial mon:stdio > "$CONSOLE_LOG" 2>&1
-    ;;
-  arm64)
-    # gic-version is pinned rather than left to QEMU's per-version default, so a
-    # runner-image bump cannot silently change the interrupt controller under
-    # us; the kernel carries both ARM_GIC and ARM_GIC_V3.
-    #
-    # romfile= (empty) disables the NIC's PXE option ROM. Ubuntu's
-    # qemu-system-x86 depends on ipxe-qemu and qemu-system-arm does NOT, so on
-    # the arm64 runner virtio-net-pci dies at startup with `failed to find
-    # romfile "efi-virtio.rom"` — QEMU never runs at all. We boot with -kernel
-    # and never PXE, so the ROM is dead weight; dropping it beats adding a
-    # package dependency to get a ROM we would not use.
-    exec timeout "$BOOT_BUDGET" qemu-system-aarch64 \
-      -machine virt,gic-version=3 -accel tcg -m 2048 -smp 2 -cpu cortex-a72 -nographic \
-      -kernel "$WORK/kernel_2712.img" -append "$CMDLINE" \
-      -drive file="$IMG",format=raw,if=none,id=hd0 -device virtio-blk-pci,drive=hd0 \
-      -netdev "user,id=n0,hostfwd=tcp:127.0.0.1:${HTTP_PORT}-:80,hostfwd=tcp:127.0.0.1:${HTTPS_PORT}-:443,hostfwd=udp:127.0.0.1:${DNS_PORT}-:53,hostfwd=tcp:127.0.0.1:${DNS_PORT}-:53" \
-      -device virtio-net-pci,netdev=n0,romfile= \
-      -serial mon:stdio > "$CONSOLE_LOG" 2>&1
-    ;;
-  esac
+  # The machine, CPU, disk and NIC lines are in qemu_exec (lib/qemu-common.sh),
+  # shared with the update smoke; the reasoning for each option follows.
+  #
+  # amd64 — -cpu max: advertise every ISA extension QEMU's TCG knows. The image
+  # is built with BR2_x86_corei7 (Nehalem baseline → SSE4.2); the default qemu64
+  # CPU model lacks SSE4.2 so glibc's dynamic linker hits "invalid opcode" the
+  # moment init runs. Real N100 hardware has SSE4.2+ so the build target is
+  # correct — this only affects emulation. (max works without KVM, which not
+  # all GH runners expose at /dev/kvm.)
+  # user-mode NIC with a host forward so the runner can curl the api/UI;
+  # virtio-net matches the virtio-blk the image already boots from. The api
+  # listens on :80 (HTTP bootstrap surface; RASPUTIN_HTTP_ADDR=:80 in
+  # rasputin-api.service — the old :8080 default is gone from the image).
+  # /healthz stays plain-HTTP by contract. mDNS is NOT asserted: user-mode
+  # networking makes multicast useless.
+  #
+  # arm64 — gic-version is pinned rather than left to QEMU's per-version
+  # default, so a runner-image bump cannot silently change the interrupt
+  # controller under us; the kernel carries both ARM_GIC and ARM_GIC_V3.
+  # romfile= (empty) disables the NIC's PXE option ROM. Ubuntu's
+  # qemu-system-x86 depends on ipxe-qemu and qemu-system-arm does NOT, so on
+  # the arm64 runner virtio-net-pci dies at startup with `failed to find
+  # romfile "efi-virtio.rom"` — QEMU never runs at all. We boot with -kernel
+  # and never PXE, so the ROM is dead weight; dropping it beats adding a
+  # package dependency to get a ROM we would not use.
+  qemu_exec "$ARCH" "$IMG" "$BOOT_BUDGET" "$CONSOLE_LOG" \
+    "hostfwd=tcp:127.0.0.1:${HTTP_PORT}-:80,hostfwd=tcp:127.0.0.1:${HTTPS_PORT}-:443,hostfwd=udp:127.0.0.1:${DNS_PORT}-:53,hostfwd=tcp:127.0.0.1:${DNS_PORT}-:53"
 }
 
 "prepare_$ARCH"
@@ -424,12 +394,26 @@ if [ "$ok" = 1 ]; then
 fi
 TS_AT=$(( $(date +%s) - START ))
 
+# Kernel/rootfs match (geekdojo/geekdojo-brain#807). rasputin-kernel-match.service
+# writes ONE "rasputin-kernel-match:" verdict to /dev/kmsg per boot. Arrival is
+# polled here, before the kill; the verdict is asserted after it.
+kmrep=0
+if [ "$ok" = 1 ]; then
+  i=0
+  while [ "$i" -lt "$KM_TRIES" ]; do
+    if grep -qa "rasputin-kernel-match: " "$CONSOLE_LOG"; then kmrep=1; break; fi
+    die_if_qemu_gone "the kernel-match verdict"
+    i=$((i + 1)); sleep 2
+  done
+fi
+KM_AT=$(( $(date +%s) - START ))
+
 TOTAL=$(( $(date +%s) - START ))
 
 kill "$QPID" 2>/dev/null || true
 echo "----- last 60 lines of console -----"; tail -60 "$CONSOLE_LOG" || true
 echo "----- $ARCH smoke timings (seconds from qemu start) -----"
-echo "multi-user=${MU_AT}s firstboot=${FB_AT}s api+ui+dns=${API_AT}s atrest-verdict=${ATREST_AT}s tailscale-report=${TS_AT}s total(incl. 70s soak)=${TOTAL}s"
+echo "multi-user=${MU_AT}s firstboot=${FB_AT}s api+ui+dns=${API_AT}s atrest-verdict=${ATREST_AT}s tailscale-report=${TS_AT}s kernel-match=${KM_AT}s total(incl. 70s soak)=${TOTAL}s"
 
 # ------------------------------------------------------------ assertions ------
 [ "$ok" = 1 ] || { echo "::error::$ARCH image did not reach multi-user in QEMU"; exit 1; }
@@ -566,6 +550,22 @@ case "$TS_LINE" in
   *) echo "::error::/usr/sbin/tailscaled --version did not report ${TS_EXPECT} (binary=none means the path does not exec — a symlink loop shows up exactly like this): $TS_LINE"; exit 1 ;;
 esac
 echo "tailscaled active, daemon and /usr/sbin/tailscaled both report ${TS_EXPECT}"
+
+# The booted kernel is one this rootfs was built for (geekdojo/geekdojo-brain#807).
+# A fresh flash boots its own kernel, so this is the baseline: it proves the
+# image's /usr/lib/rasputin/kernel-ids describes the kernel the image ships,
+# which is what makes the same verdict meaningful after an update (the update
+# smoke asserts it there). No verdict fails like a MISMATCH does: silence means
+# nothing checked.
+KM_LINE="$(grep -ao 'rasputin-kernel-match: .*' "$CONSOLE_LOG" | tr -d '\r' | head -1)"
+if [ "$kmrep" != 1 ] || [ -z "$KM_LINE" ]; then
+  echo "::error::no 'rasputin-kernel-match:' verdict reached the serial console in ${KM_AT}s — nothing checked that the kernel matches the rootfs. Check rasputin-kernel-match.service is in the overlay and enabled in post-build.sh."
+  exit 1
+fi
+case "$KM_LINE" in
+  "rasputin-kernel-match: MATCH "*) echo "kernel matches the rootfs: $KM_LINE" ;;
+  *) echo "::error::the booted kernel is not one this rootfs was built for, on a FRESH flash — post-build.sh baked a kernel-ids list that does not describe the kernel post-image.sh staged: $KM_LINE"; exit 1 ;;
+esac
 
 [ "$api" = 1 ] \
   || { echo "::error::rasputin-api never answered /healthz on :80 on the controlplane boot — unit failed to start, RASPUTIN_HTTP_ADDR regressed, or networking broke; see console artifact"; exit 1; }

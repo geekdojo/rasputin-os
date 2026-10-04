@@ -21,6 +21,10 @@
 
 set -u
 
+# The policy itself (which tokens go) lives in cmdline-policy.sh, shared with
+# the RAUC bundle hook that rewrites cmdline.txt on every update.
+. "$(dirname "$0")/cmdline-policy.sh"
+
 BOOT_PARTS="/dev/disk/by-partuuid/52415350-02 /dev/disk/by-partuuid/52415350-03"
 MNT=/run/rasputin-bootfat
 CHANGED=0
@@ -40,13 +44,10 @@ for dev in $BOOT_PARTS; do
 		umount "$MNT"
 		continue
 	fi
-	# Strip any serial console token — ttyS0 (the mini-UART = the header
-	# UART on this image, bench-verified 2026-07-23) and ttyAMA<n> (PL011,
-	# covered defensively; the Pi 5 may enumerate differently). The
-	# comma+baud requirement protects console=tty1. Collapse the leftover
-	# double space; cmdline is one line.
-	if grep -qE 'console=tty(S|AMA)[0-9]+,[0-9]+' "$CMDLINE"; then
-		sed -E -e 's/console=tty(S|AMA)[0-9]+,[0-9]+ *//g' -e 's/  */ /g' "$CMDLINE" > "$CMDLINE.tmp"
+	# Strip any serial console token (ttyS0 is the header UART on this
+	# image, bench-verified 2026-07-23; see cmdline-policy.sh).
+	if cmdline_has_serial_console "$CMDLINE"; then
+		cmdline_strip_serial_console "$CMDLINE" > "$CMDLINE.tmp"
 		mv "$CMDLINE.tmp" "$CMDLINE"
 		sync
 		CHANGED=1

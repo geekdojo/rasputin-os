@@ -15,7 +15,8 @@ name: release
 #       · bare CalVer (2026.07.1)             → stable channel
 #       · -dev tag    (2026.07.1-dev.N)       → dev channel (legacy/manual)
 #   - manual dispatch (full_build=false, publish=false) → validate only
-#   - manual dispatch (full_build=true,  publish=false) → validate + build, no publish (bench)
+#   - manual dispatch (full_build=true,  publish=false) → validate + build + smokes +
+#       sign + update smoke, no publish (bench)
 #   - manual dispatch (publish=true)                    → build + sign + publish a
 #       dev release to the public channel, versioned ${vars.RASPUTIN_VERSION}-dev.<run>.
 #       This is how dev releases are cut now — the dev.N is the workflow run number
@@ -24,6 +25,12 @@ name: release
 #       target, shared across rasputin-os / -control-plane / -openwrt-firewall for
 #       lockstep). Bump that var when cutting a stable release; see the
 #       rasputin-os-release skill.
+#
+# Pipeline: build → boot smokes (fresh image) → sign → UPDATE SMOKE (a published
+# image updated to this build's signed bundle) → publish. Publishing needs every
+# one of them green; see each job for why. The update smoke exists because
+# nothing tested the update path and dev.276 shipped a bundle that left the old
+# kernel under its rootfs (geekdojo/geekdojo-brain#807).
 
 on:
   push:
@@ -39,6 +46,10 @@ on:
         description: "Sign + publish this build as a dev release to the public channel (versioned from org var RASPUTIN_VERSION). Implies full_build."
         type: boolean
         default: false
+      update_smoke_from:
+        description: "Extra published versions to run the update smoke FROM, comma-separated (one-off legs, e.g. 2026.09.6-dev.269,2026.09.6-dev.276). The newest published release always runs."
+        type: string
+        default: ""
 
 permissions:
   contents: write   # create releases + upload assets
@@ -418,13 +429,25 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.sku }}-${{ steps.ver.outputs.version }}
+          # The whole bundle/ directory: rootfs.img + manifest.raucm, and since
+          # geekdojo/geekdojo-brain#807 the boot payload + hook.sh that install
+          # the slot's kernel with it (see post-image.sh).
           path: |
             output/${{ matrix.sku }}/images/*.img
-            output/${{ matrix.sku }}/images/bundle/rootfs.img
-            output/${{ matrix.sku }}/images/bundle/manifest.raucm
+            output/${{ matrix.sku }}/images/bundle/
           # post-image.sh no longer produces a .raucb in the build job —
           # the leaf signing key never enters the build runner. The bundle/
-          # contents above are what sign-and-release feeds to `rauc bundle`.
+          # contents above are what the sign job feeds to `rauc bundle`.
+
+      # The bundle must install the kernel its rootfs was built for: hooks
+      # declared, payload intact, payload kernels == the rootfs's kernel-ids, a
+      # module tree for each (test/bundle-kernel-match.sh says why each matters).
+      # AFTER the upload on purpose: a red here fails this job, which blocks
+      # publish (publish requires build success), while the artifacts still
+      # reach the update smoke, so a broken bundle is ALSO shown failing on a
+      # device instead of only being refused here.
+      - name: Bundle installs its rootfs's kernel
+        run: sh test/bundle-kernel-match.sh '${{ matrix.sku }}' 'output/${{ matrix.sku }}'
 
   # Boot-smoke the built images in QEMU — the relaxation of "no boot test in
   # CI" that needs NO hardware. Both SKUs now have one; the assertions live in
@@ -521,16 +544,28 @@ jobs:
           name: smoke-arm64-console
           path: /tmp/console.log
 
-  # Discrete signing + publish job — the leaf key is scoped to HERE and nowhere
-  # else. It comes from this repository's `signing` environment, is staged and
+
+  # Discrete signing job — the leaf key is scoped to HERE and nowhere else. It
+  # comes from this repository's `signing` environment, is staged and
   # preflighted by the organisation's shared rasputin-sign action onto an
   # in-memory tmpfs for the duration of `rauc bundle`, and is wiped at the end
   # of the job. (release-pipeline.md §3, geekdojo/geekdojo-brain#524)
   #
-  # Only on a CalVer tag push. To exercise this path before a real release
-  # cut, push a `-dev.N` suffixed tag (e.g. 2026.05.0-dev.1) — same shape,
-  # marked as prerelease.
-  sign-and-release:
+  # SPLIT FROM PUBLISH (geekdojo/geekdojo-brain#807). This job used to sign and
+  # publish in one go, and only on a publishing run. The update smoke below has
+  # to install the SIGNED bundle on a published image — that image's RAUC
+  # verifies it against the real root CA, so no other key would be accepted —
+  # and a publish must wait for that smoke. So: sign, then update-smoke, then
+  # publish, as three jobs.
+  #
+  # It therefore also runs on a full_build bench dispatch (publish=false), so
+  # the bench build gets its update smoke too. The `signing` environment has no
+  # deployment-branch policy, so a branch dispatch can sign — exactly as a
+  # branch dispatch with publish=true always could. What that adds is a
+  # release-signed bundle that is NOT published: it exists only as this run's
+  # `release-bundles` artifact, kept for one day (retention-days below), long
+  # enough for the update smoke and the publish job and no longer.
+  sign:
     needs: [build, smoke-amd64, smoke-arm64]
     # A failing smoke must BLOCK publication. It did not: `!cancelled()` in the
     # condition below meant the job ran on any non-cancelled outcome, so
@@ -541,7 +576,8 @@ jobs:
     # Kept as an explicit result check rather than dropping !cancelled(),
     # because that flag is doing separate work: it decouples this job from the
     # build matrix's own result, so one SKU's build failure does not by itself
-    # decide this job's condition. Both concerns coexist.
+    # decide this job's condition. Both concerns coexist. (publish, below,
+    # does require the build to be green.)
     #
     # BOTH smokes must be green. The rpi SKU used to publish with no boot test
     # of any kind — it was built, signed and released having never been booted,
@@ -551,10 +587,7 @@ jobs:
     # is blocked if either SKU fails to boot. If the rpi image is red and an
     # amd64-only publish is genuinely wanted, that is a decision to make
     # explicitly, not a default.
-    # Publishes on a tag (stable or legacy -dev tag) OR on a dispatch with
-    # publish=true (a run-number-versioned dev release). Bench dispatches
-    # (full_build only) skip this and just produce artifacts.
-    if: ${{ !cancelled() && needs.smoke-amd64.result == 'success' && needs.smoke-arm64.result == 'success' && (startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && (inputs.publish == true || inputs.publish == 'true'))) }}
+    if: ${{ !cancelled() && needs.smoke-amd64.result == 'success' && needs.smoke-arm64.result == 'success' && (startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && (inputs.full_build == true || inputs.full_build == 'true' || inputs.publish == true || inputs.publish == 'true'))) }}
     runs-on: ubuntu-latest
     # The release signing credential lives in this repository's `signing`
     # ENVIRONMENT, not in repository- or organisation-level secrets
@@ -564,20 +597,13 @@ jobs:
     # rather than signing with something weaker.
     environment: signing
     permissions:
-      contents: write
+      contents: read
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      channel: ${{ steps.ver.outputs.channel }}
+      prerelease: ${{ steps.ver.outputs.prerelease }}
     steps:
       - uses: actions/checkout@v4
-
-      # The exact commit this run built. Every job's checkout (build included)
-      # takes the run's github.sha, so this HEAD is the tree the images came
-      # from. The release tag must land HERE, not on whatever main points at
-      # when the publish step runs an hour later: with no explicit target,
-      # GitHub creates a new tag from the default branch at publish time, so a
-      # PR merged mid-run tags a commit the image was never built from
-      # (2026.09.4-dev.220: built from 8d53577, tagged 4ff4746 after #75 merged).
-      - name: Record built commit
-        id: src
-        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Compute version (CalVer, same logic as build)
         id: ver
@@ -588,7 +614,7 @@ jobs:
             VERSION="${GITHUB_REF_NAME}"
           else
             if [ -z "${TARGET_VERSION}" ]; then
-              echo "::error::org var RASPUTIN_VERSION is unset — cannot publish a dev release"; exit 1
+              echo "::error::org var RASPUTIN_VERSION is unset — cannot version a dev build"; exit 1
             fi
             VERSION="${TARGET_VERSION}-dev.${GITHUB_RUN_NUMBER}"
           fi
@@ -614,7 +640,8 @@ jobs:
           set -eu
           ls -R artifacts/ | head -40
           # The build job named each artifact "<sku>-<version>". We get one
-          # subdir per SKU containing: <sku>-<version>.img + bundle/{rootfs.img,manifest.raucm}.
+          # subdir per SKU containing: <sku>-<version>.img + bundle/ (rootfs.img,
+          # manifest.raucm, hook.sh and the boot payload).
           for d in artifacts/*-${{ steps.ver.outputs.version }}; do
             sku=$(basename "$d" | sed "s/-${{ steps.ver.outputs.version }}\$//")
             echo "::group::SKU $sku"
@@ -668,6 +695,12 @@ jobs:
             # (matches what's baked into the bundle — single source of truth).
             compatible=$(awk -F'=' '/^compatible=/{print $2}' "$d/bundle/manifest.raucm")
             case "$sku" in n100) arch=amd64 ;; rpi) arch=arm64 ;; esac
+
+            # upload-artifact does not keep file modes, and RAUC execs the
+            # bundle hook directly: without the x bit every install would fail
+            # with "failed to start bundle hook". post-image.sh set it; restore
+            # it before the bytes are signed.
+            if [ -f "$d/bundle/hook.sh" ]; then chmod 0755 "$d/bundle/hook.sh"; fi
 
             echo "::group::Sign $sku (compatible=$compatible)"
             rauc bundle \
@@ -765,10 +798,172 @@ jobs:
         with:
           mode: cleanup
 
+      # Two artifacts so each update-smoke leg downloads only the bundles, not
+      # both ~380 MB images. One day: see the job header.
+      - name: Upload signed bundles
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-bundles
+          path: release-out/*.raucb
+          retention-days: 1
+      - name: Upload the rest of the release
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-rest
+          path: |
+            release-out/*.img.xz
+            release-out/manifest.json
+            release-out/manifest.json.sig
+          retention-days: 1
+
+  # Which published images the update smoke starts from: the newest published
+  # release (the image most of the fleet updates from), plus any one-off
+  # versions named in the update_smoke_from input, each on both arches. Its own
+  # job so the matrix is data, decided once.
+  update-plan:
+    needs: validate
+    if: ${{ startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && (inputs.full_build == true || inputs.full_build == 'true' || inputs.publish == true || inputs.publish == 'true')) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - name: Pick the published images to update from
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # A dispatch input is free text: through the environment, never into
+          # the script text, and every entry is validated below.
+          EXTRA: ${{ inputs.update_smoke_from }}
+        run: |
+          set -eu
+          # Newest published (non-draft) release that is not this run's own tag.
+          prev=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 30 \
+            --json tagName,isDraft,publishedAt \
+            --jq '[.[] | select(.isDraft | not)] | sort_by(.publishedAt) | reverse | .[].tagName' \
+            | grep -vxF "$GITHUB_REF_NAME" | head -1)
+          test -n "$prev" || { echo "::error::no published release to update from"; exit 1; }
+          # One version per line; never word-split the input.
+          printf '%s\n' "$prev" > bases.txt
+          printf '%s\n' "$EXTRA" | tr ',' '\n' | tr -d ' \t' | while IFS= read -r b; do
+            [ -n "$b" ] || continue
+            printf '%s\n' "$b" | grep -Eqx '[0-9]{4}\.[0-9]{2}\.[0-9]+(-dev\.[0-9]+)?' \
+              || { echo "::error::update_smoke_from entry '$b' is not a CalVer release version"; exit 1; }
+            printf '%s\n' "$b" >> bases.txt
+          done
+          matrix=$(awk 'NF && !seen[$0]++' bases.txt | jq -Rnc '
+            [inputs] as $b | {include: [
+              $b[] as $v | ({arch: "amd64", sku: "n100", base: $v}, {arch: "arm64", sku: "rpi", base: $v})
+            ]}')
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "$matrix" | jq .
+
+  # Update a PUBLISHED image to this build's signed bundle, in QEMU, and prove
+  # the updated slot runs this build's kernel with docker working, then that a
+  # rollback boots the old slot's own kernel (test/update-smoke.sh; read it for
+  # what is asserted and what it cannot prove). Both boot smokes boot a fresh
+  # image with its own kernel, so until this job nothing tested the update
+  # path, and dev.276 published a bundle that left the old kernel under its
+  # rootfs and broke docker on every OTA'd arm64 node
+  # (geekdojo/geekdojo-brain#807). A red leg BLOCKS publish.
+  update-smoke:
+    needs: [sign, update-plan]
+    if: ${{ !cancelled() && needs.sign.result == 'success' && needs.update-plan.result == 'success' }}
+    name: update-smoke (${{ matrix.arch }} from ${{ matrix.base }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.update-plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install QEMU + mtools + dosfstools
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -eu
+          case "$ARCH" in
+            amd64) pkgs="qemu-system-x86 ovmf" ;;
+            arm64) pkgs="qemu-system-arm" ;;
+          esac
+          sudo apt-get update
+          # shellcheck disable=SC2086
+          sudo apt-get install -y --no-install-recommends $pkgs mtools dosfstools
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.sku }}-${{ needs.sign.outputs.version }}
+          path: new
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-bundles
+          path: signed
+      - name: Fetch the published image to update from
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE: ${{ matrix.base }}
+          SKU: ${{ matrix.sku }}
+        run: |
+          set -eu
+          mkdir -p old
+          gh release download "$BASE" --repo "$GITHUB_REPOSITORY" \
+            --pattern "rasputin-os-${SKU}-${BASE}.img.xz" --dir old
+          xz -d -T0 "old/rasputin-os-${SKU}-${BASE}.img.xz"
+          df -h .
+      - name: Update and roll back in QEMU
+        env:
+          ARCH: ${{ matrix.arch }}
+          SKU: ${{ matrix.sku }}
+          BASE: ${{ matrix.base }}
+          VERSION: ${{ needs.sign.outputs.version }}
+        run: |
+          test/update-smoke.sh "$ARCH" \
+            "old/rasputin-os-${SKU}-${BASE}.img" \
+            "signed/rasputin-os-${SKU}-${VERSION}.raucb" \
+            "new/rasputin-os-${SKU}-${VERSION}.img" \
+            "$VERSION"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: update-smoke-${{ matrix.arch }}-from-${{ matrix.base }}-consoles
+          path: /tmp/update-smoke/*.log
+
+  # Publish. Only a tag or publish=true gets here, and only with every gate
+  # green: both builds (which includes the bundle-kernel-match check), both boot
+  # smokes (through sign), the signature, and every update-smoke leg.
+  publish:
+    needs: [build, sign, update-smoke]
+    if: ${{ !cancelled() && needs.build.result == 'success' && needs.sign.result == 'success' && needs.update-smoke.result == 'success' && (startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && (inputs.publish == true || inputs.publish == 'true'))) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # The exact commit this run built. Every job's checkout (build included)
+      # takes the run's github.sha, so this HEAD is the tree the images came
+      # from. The release tag must land HERE, not on whatever main points at
+      # when the publish step runs an hour later: with no explicit target,
+      # GitHub creates a new tag from the default branch at publish time, so a
+      # PR merged mid-run tags a commit the image was never built from
+      # (2026.09.4-dev.220: built from 8d53577, tagged 4ff4746 after #75 merged).
+      - name: Record built commit
+        id: src
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: release-out
+
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ steps.ver.outputs.version }}
+          TAG: ${{ needs.sign.outputs.version }}
+          CHANNEL: ${{ needs.sign.outputs.channel }}
+          PRERELEASE: ${{ needs.sign.outputs.prerelease }}
           # --target pins a NEW tag (dispatch-publish) to the built commit. On a
           # tag push the tag already exists and GitHub ignores target_commitish,
           # so that path is unchanged — and there the checked-out commit is the
@@ -777,8 +972,9 @@ jobs:
           REPO_URL: ${{ github.server_url }}/${{ github.repository }}.git
         run: |
           set -eu
+          ls -lh release-out/
           PRERELEASE_FLAG=""
-          if [ "${{ steps.ver.outputs.prerelease }}" = "true" ]; then
+          if [ "$PRERELEASE" = "true" ]; then
             PRERELEASE_FLAG="--prerelease"
           fi
 
@@ -798,8 +994,8 @@ jobs:
 
           gh release create "$TAG" \
             --target "$TARGET_SHA" \
-            --title "Rasputin OS ${{ steps.ver.outputs.version }}" \
-            --notes "Channel: \`${{ steps.ver.outputs.channel }}\`. Verify the chain with the public root CA (https://rasputin.geekdojo.com/rasputin-root-ca.pem): \`manifest.json.sig\` is a detached DER CMS signature over \`manifest.json\`, which carries per-asset SHA-256. Verify commands: https://rasputin.geekdojo.com/docs/agents/." \
+            --title "Rasputin OS ${TAG}" \
+            --notes "Channel: \`${CHANNEL}\`. Verify the chain with the public root CA (https://rasputin.geekdojo.com/rasputin-root-ca.pem): \`manifest.json.sig\` is a detached DER CMS signature over \`manifest.json\`, which carries per-asset SHA-256. Verify commands: https://rasputin.geekdojo.com/docs/agents/." \
             $PRERELEASE_FLAG \
             release-out/*
 

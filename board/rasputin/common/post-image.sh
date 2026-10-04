@@ -6,7 +6,25 @@
 #
 # Produces, in $BINARIES_DIR:
 #   1. <img>      — full initial-flash image (genimage)
-#   2. <bundle>   — RAUC OTA bundle (host-rauc), UNSIGNED (CI signs it)
+#   2. bundle/    — the RAUC OTA bundle's SOURCES, UNSIGNED (CI signs them)
+#
+# THE BUNDLE CARRIES THE KERNEL (geekdojo/geekdojo-brain#807). An update used to
+# replace only the rootfs and leave the slot booting its old kernel against the
+# new rootfs's modules; dev.276 changed the Pi kernel config and docker died on
+# every OTA'd arm64 node. So bundle/ now also holds the slot's boot files plus
+# hook.sh (rauc-bundle-hook.sh), which RAUC runs as install-check and as the
+# rootfs image's post-install hook to write them:
+#   rpi   boot.vfat (ONE slot-neutral boot FAT: firmware, config.txt, both
+#         kernels, DTBs, overlays — no cmdline.txt), cmdline-A.txt,
+#         cmdline-B.txt, cmdline-policy.sh (the BMC-host policy; the hook runs
+#         on the OLD rootfs, which may not have it).
+#   n100  bzImage (written as the slot's own /bzImage-<slot> on the ESP) and
+#         grub.cfg (per-slot kernels, falling back to the legacy shared
+#         /bzImage for a slot no bundle has written yet).
+#   both  boot-version (the marker the hook writes last) and
+#         boot-payload.sha256 (what the hook checks every payload file against).
+# The flash image is built from the SAME files, so a flashed slot and an
+# updated slot boot identical bytes.
 #
 set -eu
 
@@ -29,6 +47,9 @@ esac
 # The committed file is a .template (the bare name is gitignored — it holds
 # per-deployment secrets once an operator fills it in post-flash).
 cp "$COMMON_DIR/rasputin-seed.env.template" "$BINARIES_DIR/rasputin-seed.env"
+# The boot marker: which image's boot files a slot carries. Flashed onto every
+# boot slot here, and written by the bundle hook as the last step of an update.
+printf '%s\n' "$VERSION" > "$BINARIES_DIR/rasputin-boot-version"
 case "$SOC" in
 	n100)
 		# Buildroot's grub2 (x86_64-efi) emits efi-part/EFI/BOOT/bootx64.efi plus
@@ -69,16 +90,24 @@ case "$SOC" in
 		# bcm2712 `Image`) + kernel8.img (Pi 4 bcm2711, built in post-build.sh) + all
 		# *.dtb (bcm2712-rpi-5-b + bcm2712d0-rpi-5-b D0 + bcm2711-rpi-4-b) +
 		# rpi-firmware/* (GPU/boot firmware incl. start4.elf/fixup4.dat + config.txt +
-		# overlays/). config.txt arrives via rpi-firmware/ (Buildroot CONFIG_FILE);
-		# cmdline.txt arrives there too (CMDLINE_FILE = slot A) and is overwritten with
-		# the slot-B cmdline on boot-b. The Pi 4 fix: the EEPROM loads start4.elf FROM
-		# boot_partition (p2/p3), so the kernel is in the same slot it reads.
+		# overlays/). config.txt arrives via rpi-firmware/ (Buildroot CONFIG_FILE).
+		# The Pi 4 fix: the EEPROM loads start4.elf FROM boot_partition (p2/p3), so
+		# the kernel is in the same slot it reads.
+		#
+		# The shared contents become ONE slot-neutral FAT, boot.vfat, with no
+		# cmdline.txt: the only per-slot file is cmdline.txt (which rootfs it
+		# roots), so each slot's FAT is boot.vfat + its own cmdline + the boot
+		# marker. The bundle ships boot.vfat and both cmdlines, and the hook
+		# assembles the slot's FAT on the device the same way (geekdojo/geekdojo-brain#807).
 		COMMON_STAGE="$BINARIES_DIR/rpi-boot-common"
 		rm -rf "$COMMON_STAGE"; mkdir -p "$COMMON_STAGE"
 		cp "$BINARIES_DIR/Image" "$COMMON_STAGE/kernel_2712.img"   # Pi 5 / CM5 (bcm2712)
 		cp "$BINARIES_DIR/kernel8.bin" "$COMMON_STAGE/kernel8.img" # Pi 4 (bcm2711, post-build; .bin → kernel8.img on the FAT)
 		cp "$BINARIES_DIR"/*.dtb "$COMMON_STAGE/"
-		cp -a "$BINARIES_DIR"/rpi-firmware/. "$COMMON_STAGE/"      # incl. config.txt + cmdline.txt(=A)
+		cp -a "$BINARIES_DIR"/rpi-firmware/. "$COMMON_STAGE/"      # incl. config.txt
+		# CMDLINE_FILE drops a slot-A cmdline.txt into rpi-firmware/; the slot's
+		# cmdline is added per slot below, never baked into the shared FAT.
+		rm -f "$COMMON_STAGE/cmdline.txt"
 
 		# Build one FAT from a staging dir: build_fat <out.vfat> <label> <MB> <stagedir>
 		build_fat() {
@@ -98,14 +127,25 @@ case "$SOC" in
 		cp "$COMMON_DIR/rasputin-seed.env.template" "$STAGE_SEL/rasputin-seed.env"
 		build_fat "$BINARIES_DIR/selector.vfat" RASPUTIN-OS 64 "$STAGE_SEL"
 
-		# boot-a (p2): common; cmdline.txt stays = slot A. No autoboot.txt/seed.
-		build_fat "$BINARIES_DIR/boot-a.vfat" RASPUTIN-A 256 "$COMMON_STAGE"
+		# boot.vfat: the slot-neutral boot FAT, shipped in the bundle as-is. 256M
+		# is the boot partition size (genimage sizes p2/p3 from these images), and
+		# the hook's install-check refuses a device whose boot partitions are
+		# smaller. One label for both slots, since the same bytes land on both;
+		# nothing finds a boot slot by label (the Pi firmware goes by partition
+		# number, everything else by PARTUUID).
+		build_fat "$BINARIES_DIR/boot.vfat" RASPUTIN-BT 256 "$COMMON_STAGE"
 
-		# boot-b (p3): common with cmdline.txt overwritten = slot B.
-		STAGE_B="$BINARIES_DIR/rpi-boot-b"
-		rm -rf "$STAGE_B"; cp -a "$COMMON_STAGE" "$STAGE_B"
-		cp "$BOARD_DIR/cmdline-b.txt" "$STAGE_B/cmdline.txt"
-		build_fat "$BINARIES_DIR/boot-b.vfat" RASPUTIN-B 256 "$STAGE_B"
+		# boot-a (p2) / boot-b (p3): boot.vfat + that slot's cmdline + the marker.
+		for _slot in A B; do
+			case "$_slot" in
+				A) _cmdline="$BOARD_DIR/cmdline.txt"; _out="$BINARIES_DIR/boot-a.vfat" ;;
+				B) _cmdline="$BOARD_DIR/cmdline-b.txt"; _out="$BINARIES_DIR/boot-b.vfat" ;;
+			esac
+			cp "$BINARIES_DIR/boot.vfat" "$_out"
+			MTOOLS_SKIP_CHECK=1 "$HOST_DIR/bin/mcopy" -o -i "$_out" "$_cmdline" ::cmdline.txt
+			MTOOLS_SKIP_CHECK=1 "$HOST_DIR/bin/mcopy" -o -i "$_out" "$BINARIES_DIR/rasputin-boot-version" ::rasputin-boot-version
+			echo "post-image: built boot slot $_slot ($(basename "$_out")) = boot.vfat + $(basename "$_cmdline") + boot marker"
+		done
 		;;
 esac
 
@@ -159,6 +199,33 @@ BUNDLE_DIR="$BINARIES_DIR/bundle"
 rm -rf "$BUNDLE_DIR"; mkdir -p "$BUNDLE_DIR"
 cp "$BINARIES_DIR/rootfs.squashfs" "$BUNDLE_DIR/rootfs.img"
 
+# The boot payload (see the header) and the hook that installs it.
+case "$SOC" in
+	rpi)
+		cp "$BINARIES_DIR/boot.vfat" "$BUNDLE_DIR/boot.vfat"
+		cp "$BOARD_DIR/cmdline.txt" "$BUNDLE_DIR/cmdline-A.txt"
+		cp "$BOARD_DIR/cmdline-b.txt" "$BUNDLE_DIR/cmdline-B.txt"
+		cp "$COMMON_DIR/rootfs-overlay/usr/lib/rasputin/bmc/cmdline-policy.sh" "$BUNDLE_DIR/cmdline-policy.sh"
+		PAYLOAD="boot.vfat cmdline-A.txt cmdline-B.txt cmdline-policy.sh boot-version"
+		;;
+	n100)
+		cp "$BINARIES_DIR/bzImage" "$BUNDLE_DIR/bzImage"
+		cp "$BOARD_DIR/grub.cfg" "$BUNDLE_DIR/grub.cfg"
+		PAYLOAD="bzImage grub.cfg boot-version"
+		;;
+esac
+cp "$BINARIES_DIR/rasputin-boot-version" "$BUNDLE_DIR/boot-version"
+cp "$COMMON_DIR/rauc-bundle-hook.sh" "$BUNDLE_DIR/hook.sh"
+chmod 0755 "$BUNDLE_DIR/hook.sh"
+# shellcheck disable=SC2086 # PAYLOAD is a list of plain file names
+(cd "$BUNDLE_DIR" && sha256sum $PAYLOAD > boot-payload.sha256)
+
+# [hooks] install-check REPLACES RAUC's compatible check; hook.sh re-implements
+# it. post-install on the rootfs image runs after RAUC wrote the rootfs and
+# before it calls set-primary, so a failed boot-file write leaves the device on
+# its current slot. Both declarations are parsed by RAUC 1.13 (dev.269) and
+# 1.15.2 (dev.276), which is what lets the first update from those images
+# install its kernel: neither needs a slot the device's system.conf lacks.
 cat > "$BUNDLE_DIR/manifest.raucm" <<EOF
 [update]
 compatible=$COMPATIBLE
@@ -167,10 +234,15 @@ version=$VERSION
 [bundle]
 format=verity
 
+[hooks]
+filename=hook.sh
+hooks=install-check
+
 [image.rootfs]
 filename=rootfs.img
+hooks=post-install
 EOF
 
 echo "post-image: done — $ARCH artifacts in $BINARIES_DIR"
 echo "  - $BINARIES_DIR/rasputin-os-$SOC-$VERSION.img"
-echo "  - $BUNDLE_DIR/{rootfs.img,manifest.raucm}  (signed into .raucb by CI)"
+echo "  - $BUNDLE_DIR/{rootfs.img,manifest.raucm,hook.sh} + $PAYLOAD  (signed into .raucb by CI)"
