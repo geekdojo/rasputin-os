@@ -90,7 +90,8 @@ BR2_PACKAGE_SYSTEMD_COREDUMP=y
 # Pi-5-focused; Pi 4 (which booted fine on mainline) is dropped for the moment.
 # True Pi 4 + Pi 5 unification = a SECOND kernel (`kernel8.img` from bcm2711) on
 # the same FAT, config.txt auto-selecting — the Raspberry Pi OS model — tracked
-# as a follow-up. Pin matches Buildroot 2025.02.3 (a known-good combination).
+# as a follow-up. Pin is the one Buildroot 2025.02.x's raspberrypi5_defconfig
+# used (6.6.28, a known-good combination); it does NOT follow a Buildroot bump.
 # CM5 carrier note: bcm2712-rpi-5-b is the Pi 5 board; swap/add the CM5 carrier
 # DTB (bcm2712-rpi-cm5-cb / -cm5io) once a CM5 is on the bench.
 BR2_LINUX_KERNEL=y
@@ -175,7 +176,13 @@ BR2_PACKAGE_DOCKER_COMPOSE=y
 # agent autodetects the binary via PATH and drives `tailscale up`; tailscaled
 # trusts the per-installation Mesh CA via SSL_CERT_FILE (see the tailscaled
 # drop-in in the overlay).
-BR2_PACKAGE_TAILSCALE=y
+# EXPERIMENT (spike/own-tailscale): Buildroot's package/tailscale is off. It
+# pins 1.78.1 and, under the merged /usr/bin systemd selects on 2026.08, its
+# install hook makes tailscaled a symlink to itself. tailscale-bin (this
+# external tree) installs Tailscale's official static tarballs instead, and its
+# kernel options are carried in linux.fragment.
+# BR2_PACKAGE_TAILSCALE is not set
+BR2_PACKAGE_TAILSCALE_BIN=y
 
 # --- remote access (SSH) ---
 # dropbear: key-only SSH for support/debugging a headless controlplane. The

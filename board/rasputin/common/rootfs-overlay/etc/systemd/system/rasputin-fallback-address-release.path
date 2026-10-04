@@ -6,7 +6,7 @@ Description=Watch for a DHCPv4 lease that makes the controlplane fallback addres
 # nameserver answers on only one of them (geekdojo-brain#427).
 #
 # The fact: networkd writes /run/systemd/netif/leases/<ifindex> while it holds a
-# lease and unlinks it when the lease goes (systemd 256.17, link_save() in
+# lease and unlinks it when the lease goes (systemd 258.7, link_save() in
 # networkd-state-file.c). It writes a dot-prefixed temp file and renames it
 # into place, and the glob below ignores dot files, so it matches only a real
 # lease.

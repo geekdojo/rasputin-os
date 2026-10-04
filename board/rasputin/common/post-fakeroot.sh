@@ -145,12 +145,29 @@ echo "post-fakeroot: /etc/shadow -> /var/lib/rasputin/console/shadow for $SOC (r
 # and it needs NO ordering at all — PID 1 reads it before the manager exists,
 # so before any generator, any unit and any journal line.
 #
+# systemd 258.7 (Buildroot 2026.08) still reads it unconditionally, now from
+# clock_apply_epoch() in src/core/clock-warp.c, but no longer as an either/or:
+# since v257 PID 1 takes the LATEST of the compiled TIME_EPOCH, this file's
+# mtime and the mtime of /var/lib/systemd/timesync/clock (systemd NEWS, 257).
+# timesyncd itself still reads only TIME_EPOCH and its own file, as on 256,
+# and still opens that file read-write. The third PID 1 input changes nothing
+# here. When PID 1 runs, /var/lib/systemd/timesync is
+# the squashfs directory Buildroot creates empty (SYSTEMD_TIMESYNCD_PERMISSIONS),
+# this build puts no clock file in it (the timesyncd copy below is a FACTORY
+# copy), so that stat returns ENOENT and is ignored. The boot message is also
+# reworded on 258: "System time advanced to timestamp on /usr/lib/clock-epoch:
+# <time>" instead of 256's "System time before build time, advancing clock."
+# Nothing in the tree matches on either; the 256 lines quoted in these
+# comments are dated measurements.
+#
 # THE ONE INTERACTION WORTH KNOWING ABOUT, because it runs the other way.
 # clock_apply_epoch() moves the clock FORWARD to this mtime when the clock is
 # behind it, and it also moves it BACKWARD to this mtime when the clock is more
 # than CLOCK_VALID_RANGE_USEC_MAX ahead of it — "System time is further ahead
 # than %s after build time, resetting clock to build time.", which is in the
-# same library (strings, cp-compute5.local). That matters here because the PID 1
+# same library (strings, cp-compute5.local; 258 words it "System time was
+# further ahead than %s after %s, clock reset to %s" and measures the range
+# from the latest of the three inputs above). That matters here because the PID 1
 # shim sets the clock from the persisted last-known-good time a moment BEFORE
 # systemd runs this, so a small enough range would silently undo the restore on
 # every boot. It is not small: systemd's meson_options.txt ships
@@ -158,12 +175,13 @@ echo "post-fakeroot: /etc/shadow -> /var/lib/rasputin/console/shadow for $SOC (r
 #     option('clock-valid-range-usec-max', type : 'integer',
 #            value : 473364000000000, # 15 years
 #
-# and Buildroot 2025.02.17 — the pinned tag in scripts/init-buildroot.sh —
-# passes neither that option nor -Dtime-epoch in package/systemd/systemd.mk, so
-# the upstream default stands. The clamp therefore fires only on a node whose
-# clock is fifteen years past the build date of the image it is running, which
-# is a broken RTC and is exactly what the clamp is for. Re-check this if the
-# Buildroot pin moves.
+# (unchanged from v256.17 to v258.7), and neither Buildroot 2025.02.17 nor
+# 2026.08 — the pinned tag in scripts/init-buildroot.sh — passes that option or
+# -Dtime-epoch in package/systemd/systemd.mk, so the upstream default stands.
+# The clamp therefore fires only on a node whose clock is fifteen years past
+# the build date of the image it is running, which is a broken RTC and is
+# exactly what the clamp is for. Re-checked at the move to 2026.08; re-check it
+# whenever the Buildroot pin moves.
 #
 # The second file, the timesyncd factory copy, is a different consumer with a
 # different constraint; see below. Both are stamped from the same BUILD_EPOCH

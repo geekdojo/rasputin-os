@@ -1,0 +1,4 @@
+# Computed locally from the downloaded tarballs and cross-checked against
+# Tailscale's published https://pkgs.tailscale.com/stable/<tarball>.sha256
+sha256  50748df1045e60b5b695f19f4c56b0da36c019948b440fb456b6584a50f0d8b9  tailscale_1.102.4_amd64.tgz
+sha256  9dd1e6a592a014bbaea0103167ffe299adeda4ba14e078ce9c2895364f6c4c3f  tailscale_1.102.4_arm64.tgz

@@ -64,7 +64,7 @@ BR2_TARGET_ENABLE_ROOT_LOGIN=n
 # FUNCTIONALLY depends on both: 20-wired.network (DHCP + per-link mDNS) and
 # resolved's mDNS responder for rasputin.local (first-run WebAuthn flow).
 # Pinned explicitly so a Buildroot default flip can't silently drop them.
-# (Buildroot 2025.02.3 ships systemd 256.7, built with default-mdns=yes.)
+# (Buildroot 2026.08 ships systemd 258.7, built with default-mdns=yes.)
 BR2_PACKAGE_SYSTEMD_NETWORKD=y
 BR2_PACKAGE_SYSTEMD_RESOLVED=y
 # systemd-coredump: capture a backtrace on the next crash (esp. the intermittent
@@ -80,8 +80,9 @@ BR2_PACKAGE_SYSTEMD_RESOLVED=y
 BR2_PACKAGE_SYSTEMD_COREDUMP=y
 
 # --- kernel: arch default config + Rasputin fragment ---
-# LATEST_VERSION tracks Buildroot's tested default for this release; pin a
-# specific LTS (e.g. 6.12.x) for a real release. The arch default carries
+# LATEST_VERSION tracks Buildroot's tested default for the pinned release
+# (7.1.x on Buildroot 2026.08; it was 6.12.x on 2025.02.x), so a Buildroot
+# bump moves this SKU's kernel too. The arch default carries
 # the common x86 drivers (AHCI/NVMe/e1000e/igc/xhci/EFI); the fragment adds
 # what our rootfs model needs (squashfs, dm-verity, overlay, virtio for
 # QEMU, Intel TCO watchdog, Docker essentials).
@@ -160,7 +161,13 @@ BR2_PACKAGE_DOCKER_COMPOSE=y
 # agent autodetects the binary via PATH and drives `tailscale up`; tailscaled
 # trusts the per-installation Mesh CA via SSL_CERT_FILE (see the tailscaled
 # drop-in in the overlay).
-BR2_PACKAGE_TAILSCALE=y
+# EXPERIMENT (spike/own-tailscale): Buildroot's package/tailscale is off. It
+# pins 1.78.1 and, under the merged /usr/bin systemd selects on 2026.08, its
+# install hook makes tailscaled a symlink to itself. tailscale-bin (this
+# external tree) installs Tailscale's official static tarballs instead, and its
+# kernel options are carried in linux.fragment.
+# BR2_PACKAGE_TAILSCALE is not set
+BR2_PACKAGE_TAILSCALE_BIN=y
 
 # --- remote access (SSH) ---
 # dropbear: key-only SSH for support/debugging a headless controlplane. The

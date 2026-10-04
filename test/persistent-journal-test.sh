@@ -39,7 +39,7 @@
 # without hardware — that the tmpfiles file beats stock systemd.conf, and that
 # journald with this drop-in writes to /var/log/journal rather than /run — are
 # in test/persistent-journal-functional.sh, which runs them against real
-# systemd 256.17, the image's version.
+# systemd 258.7, the image's version.
 #
 # Shells. Unlike the other suites here this one loops over no shells and does
 # not need busybox: the change adds no shell script to the node. Every case
@@ -216,7 +216,7 @@ SH=tmpfiles
 # that line lands on the bind-mounted store on every boot. Of two lines naming
 # one path the LAST applied wins, and files are read in lexicographic order of
 # basename, so ours has to sort after "systemd.conf". Measured against real
-# systemd-tmpfiles 256.17 in test/persistent-journal-functional.sh.
+# systemd-tmpfiles 258.7 in test/persistent-journal-functional.sh.
 BASE=$(basename "$JTMPFILES")
 ok "the tmpfiles file sorts after systemd.conf" \
 	"$(yes_if test "$(printf '%s\nsystemd.conf\n' "$BASE" | sort | tail -1)" = "$BASE")" \

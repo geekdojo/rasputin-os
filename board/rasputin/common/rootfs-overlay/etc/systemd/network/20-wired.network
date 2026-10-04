@@ -14,7 +14,7 @@ DHCP=yes
 # controlplane answers rasputin.local.
 MulticastDNS=yes
 # IPv4 link-local FALLBACK for the dumb-switch/no-DHCP bench scenario.
-# "ipv4" = IPv4 LL only while DHCPv4 has no lease: systemd 256's networkd
+# "ipv4" = IPv4 LL only while DHCPv4 has no lease: systemd 258's networkd
 # starts sd-ipv4ll on DHCP transient failure and drops the 169.254.x address
 # the moment a lease is acquired (networkd-dhcp4.c dhcp4_address_acquired →
 # sd_ipv4ll_stop). So with working DHCP no extra address ever exists to

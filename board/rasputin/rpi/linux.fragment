@@ -71,6 +71,13 @@ CONFIG_IP_NF_NAT=y
 CONFIG_IP_NF_MANGLE=y
 CONFIG_IP_NF_TARGET_MASQUERADE=y
 CONFIG_NETFILTER_XT_NAT=y
+# raw table: Docker 28 installs raw-table PREROUTING rules that drop remote
+# packets addressed to loopback-published ports and to container IPs from
+# outside their bridge (moby#49325). The fork's bcm2712/bcm2711 defconfigs
+# build it as a module; built in (=y) so dockerd never depends on modprobe
+# finding iptable_raw, and so the Pi 4 kernel (post-build.sh, which does not
+# get Buildroot's docker-engine kernel fixups) has it too.
+CONFIG_IP_NF_RAW=y
 
 # --- BPF + cgroup device controller. cgroup v2 + runc enforce container device
 #     access via an eBPF program (BPF_CGROUP_DEVICE); without CONFIG_CGROUP_BPF
@@ -85,6 +92,26 @@ CONFIG_CGROUP_DEVICE=y
 
 # --- tailscale (mesh / remote access): tailscaled needs /dev/net/tun ---
 CONFIG_TUN=y
+
+# --- tailscale kernel requirements (EXPERIMENT, spike/own-tailscale) ---------
+# Buildroot's package/tailscale applied these through
+# TAILSCALE_LINUX_CONFIG_FIXUPS. With that package off they are carried here
+# instead. Fixups only ever reached the primary Buildroot kernel; a fragment
+# also reaches every other kernel built from it.
+# This file is also merged into the Pi 4 (bcm2711) kernel post-build.sh builds,
+# so kernel8.img gets them too.
+# Already set elsewhere in this file: NF_CONNTRACK, NF_NAT, TUN.
+CONFIG_IPV6=y
+CONFIG_IPV6_MULTIPLE_TABLES=y
+CONFIG_NETFILTER=y
+CONFIG_NETFILTER_NETLINK=y
+CONFIG_NFT_CT=y
+CONFIG_NFT_MASQ=y
+CONFIG_NFT_NAT=y
+CONFIG_NF_TABLES=y
+CONFIG_NF_TABLES_INET=y
+CONFIG_NF_TABLES_IPV4=y
+CONFIG_NF_TABLES_IPV6=y
 
 # --- virtio + a generic PCIe host, so this SKU can be BOOTED IN CI ------------
 # The rpi image was built, signed and published for months without ever being

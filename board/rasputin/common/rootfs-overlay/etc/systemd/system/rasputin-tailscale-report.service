@@ -1,0 +1,21 @@
+# Report tailscaled's state and version to the kernel log once per boot, so the
+# QEMU smoke can assert on it (it has no shell into the guest; only /dev/kmsg
+# reaches its serial console). See rasputin-tailscale-report.sh.
+#
+# EXPERIMENT (spike/own-tailscale). Added because the amd64 smoke passed a
+# Buildroot 2026.08 image whose tailscaled could not exec at all.
+
+[Unit]
+Description=Report tailscaled state and version to the kernel log
+# tailscaled is Type=notify: After= waits for its READY (or its failure), not
+# merely for the fork. Not Wants=: tailscaled is enabled on its own, and this
+# unit must not be what starts it.
+After=tailscaled.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/rasputin/tailscale/rasputin-tailscale-report.sh
+
+[Install]
+WantedBy=multi-user.target

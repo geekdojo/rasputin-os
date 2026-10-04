@@ -1,6 +1,6 @@
 #!/bin/sh
 # Functional test for the controlplane fallback address, against REAL
-# systemd-networkd 256.17 -- the version Buildroot 2025.02.17 builds into the
+# systemd-networkd 258.7 -- the version Buildroot 2026.08 builds into the
 # image -- and the real units from the rootfs overlay.
 #
 # Why this exists next to fallback-address-test.sh. That suite pins the
@@ -27,7 +27,7 @@ set -u
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 OVERLAY="$ROOT/board/rasputin/common/rootfs-overlay"
-IMAGE=rasputin-fallback-functional:f41-networkd-256.17
+IMAGE=rasputin-fallback-functional:f43-networkd-258.7
 LINK=en0test
 FALLBACK=192.168.1.2/24
 DEADLINE="${FALLBACK_TEST_DEADLINE:-90}"
@@ -40,15 +40,26 @@ check() {
 	else printf '  FAIL %s\n       %s\n' "$1" "${3:-}"; fails=$((fails + 1)); fi
 }
 
-# Fedora 41 ships systemd-networkd 256.17, the same release as the image, so
+# Fedora 43 shipped systemd 258.7, the same release as the image, so
 # networkd's lease-file and reload behaviour here is the image's, not a guess.
-# The build fails loudly if that exact version is no longer installable.
+# The f43 repos have since moved past 258.7, so the exact build comes from
+# Fedora's updates-archive repo (fedora-repos-archive), which keeps every
+# update build f43 has shipped. It is an ordinary dnf repo with gpgcheck=1, so
+# the packages are verified against Fedora's signing keys; installing koji
+# URLs directly, as this used to, skips that (dnf's localpkg_gpgcheck is 0)
+# and failed CI outright while koji was down for Fedora infrastructure
+# maintenance (2026-10-02, fedora-infrastructure ticket #13500). The build
+# fails loudly if that exact version is no longer installable.
 echo "building test image ($IMAGE)"
 docker build -q -t "$IMAGE" - >/dev/null <<'DOCKERFILE' || { echo "FAILED: could not build the test image"; exit 1; }
-FROM fedora:41
-RUN dnf -y install --setopt=install_weak_deps=False \
-      systemd-256.17 systemd-networkd-256.17 systemd-udev-256.17 \
+FROM fedora:43
+RUN dnf -y install --setopt=install_weak_deps=False fedora-repos-archive \
+ && dnf -y install --setopt=install_weak_deps=False \
+      systemd-258.7-1.fc43 systemd-libs-258.7-1.fc43 \
+      systemd-shared-258.7-1.fc43 systemd-pam-258.7-1.fc43 \
+      systemd-networkd-258.7-1.fc43 systemd-udev-258.7-1.fc43 \
       dnsmasq iproute util-linux procps-ng \
+ && test "$(rpm -q --qf '%{VERSION}' systemd-networkd)" = 258.7 \
  && dnf clean all \
  && systemctl enable systemd-networkd.service \
  && systemctl mask systemd-resolved.service systemd-homed.service systemd-userdbd.service \

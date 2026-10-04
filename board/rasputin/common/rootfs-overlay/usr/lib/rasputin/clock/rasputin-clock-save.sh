@@ -99,8 +99,9 @@ fi
 # TEN YEARS, deliberately:
 #   - under systemd's own backward clamp, which resets the clock to
 #     /usr/lib/clock-epoch once it is more than clock-valid-range-usec-max
-#     ahead — 15 years by default (systemd v256 meson_options.txt; Buildroot
-#     2025.02.17 does not override it). A ceiling above that could never fire;
+#     ahead — 15 years by default (systemd meson_options.txt, the same at
+#     v256.17 and v258.7; neither Buildroot 2025.02.17 nor 2026.08 overrides
+#     it). A ceiling above that could never fire;
 #   - over the longest plausible life of a node still running ONE image. The
 #     hardware's service life is on the order of five to eight years and a node
 #     that never takes an OTA is the worst case, so ten leaves real margin;

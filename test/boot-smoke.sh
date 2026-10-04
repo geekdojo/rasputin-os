@@ -61,7 +61,10 @@ DNS_PORT=15353
 # 240 (api) + 70 (soak) + 120 = 790s against the 900s qemu timeout, so a stuck
 # audit is reported by the assertion below rather than by qemu being killed
 # out from under the script.
-BOOT_BUDGET=900 ; MU_TRIES=120 ; FB_TRIES=60 ; API_TRIES=48 ; ATREST_TRIES=60
+# TS_TRIES is the tailscaled-report poll (2s apart, 60s ceiling). It runs after
+# the at-rest poll, by which point multi-user has long been reached and the
+# report (ordered only After=tailscaled) has normally already arrived.
+BOOT_BUDGET=900 ; MU_TRIES=120 ; FB_TRIES=60 ; API_TRIES=48 ; ATREST_TRIES=60 ; TS_TRIES=30
 case "$ARCH" in
   amd64|arm64) ;;
   *) echo "::error::unknown arch '$ARCH' (expected amd64 or arm64)"; exit 1 ;;
@@ -405,12 +408,28 @@ if [ "$ok" = 1 ]; then
 fi
 ATREST_AT=$(( $(date +%s) - START ))
 
+# tailscaled state + version (EXPERIMENT, spike/own-tailscale). The image's
+# rasputin-tailscale-report.service writes ONE "rasputin-tailscale:" line to
+# /dev/kmsg once tailscaled is ready or has failed. Only its arrival is polled
+# here, before the kill, for the same reason as the at-rest verdict above; it is
+# read back and asserted after the kill.
+tsrep=0
+if [ "$ok" = 1 ]; then
+  i=0
+  while [ "$i" -lt "$TS_TRIES" ]; do
+    if grep -qa "rasputin-tailscale: " "$CONSOLE_LOG"; then tsrep=1; break; fi
+    die_if_qemu_gone "the tailscaled report"
+    i=$((i + 1)); sleep 2
+  done
+fi
+TS_AT=$(( $(date +%s) - START ))
+
 TOTAL=$(( $(date +%s) - START ))
 
 kill "$QPID" 2>/dev/null || true
 echo "----- last 60 lines of console -----"; tail -60 "$CONSOLE_LOG" || true
 echo "----- $ARCH smoke timings (seconds from qemu start) -----"
-echo "multi-user=${MU_AT}s firstboot=${FB_AT}s api+ui+dns=${API_AT}s atrest-verdict=${ATREST_AT}s total(incl. 70s soak)=${TOTAL}s"
+echo "multi-user=${MU_AT}s firstboot=${FB_AT}s api+ui+dns=${API_AT}s atrest-verdict=${ATREST_AT}s tailscale-report=${TS_AT}s total(incl. 70s soak)=${TOTAL}s"
 
 # ------------------------------------------------------------ assertions ------
 [ "$ok" = 1 ] || { echo "::error::$ARCH image did not reach multi-user in QEMU"; exit 1; }
@@ -492,6 +511,61 @@ if grep -n "Invalid environment assignment" "$CONSOLE_LOG"; then
   exit 1
 fi
 echo "no malformed Environment= assignments in any unit"
+
+# A unit that systemd could not even exec. Before a service's process runs,
+# systemd sets up its sandbox — state/cache/runtime directories, namespaces,
+# credentials — and a failure there is reported as "Failed at step <STEP>
+# spawning <binary>" and an exit status of 2xx/<STEP>. Nothing in the image
+# has to be wrong for this to happen: a systemd bump can change how a setting
+# is applied. The first Buildroot 2026.08 build (run 36935416907) booted to
+# multi-user with every assertion above green while tailscaled failed at
+# STATE_DIRECTORY on every start, because systemd 258 no longer follows the
+# image's /var/lib/tailscale symlink — mesh enrollment would have been dead on
+# every node. tailscaled's CACHE_DIRECTORY failure, found on the bench on
+# 2026-06-18 (dev.20), was the same class.
+#
+# Generic on purpose, like the Environment= check: it covers every unit, and
+# no unit on this image is expected to fail its exec setup. Coverage is the
+# arm64 console: there systemd.log_target=kmsg (above) puts the service
+# manager's per-unit errors on the console. The amd64 console stops carrying
+# them once journald is up, so on amd64 this check sees only early boot.
+if grep -anE "Failed at step [A-Z_]+ spawning" "$CONSOLE_LOG"; then
+  echo "::error::a unit failed while systemd was setting up its execution environment, before its process ran (see the matches above; the step name says which setting). Its service never started."
+  exit 1
+fi
+echo "no unit failed its execution-environment setup"
+
+# tailscaled is running and is the version the image pins (EXPERIMENT,
+# spike/own-tailscale). Buildroot 2026.08's tailscale package made
+# /usr/sbin/tailscaled a symlink to itself (run 36944490353). The arm64 smoke
+# caught it only through the generic "Failed at step" check above; the amd64
+# smoke passed the same broken rootfs, because its console never carries
+# per-unit errors once journald is up and nothing asserted on tailscaled. This
+# assertion reads a kmsg line, which reaches BOTH consoles, so it covers both
+# arches. The expected version is read from the package that installs it, so a
+# version bump cannot leave this check behind.
+TS_EXPECT="$(sed -n 's/^TAILSCALE_BIN_VERSION = //p' "$(dirname "$0")/../package/tailscale-bin/tailscale-bin.mk" | tr -d '[:space:]')"
+[ -n "$TS_EXPECT" ] \
+  || { echo "::error::could not read TAILSCALE_BIN_VERSION from package/tailscale-bin/tailscale-bin.mk — this assertion has nothing to compare against"; exit 1; }
+TS_LINE="$(grep -ao 'rasputin-tailscale: .*' "$CONSOLE_LOG" | tr -d '\r' | head -1)"
+if [ "$tsrep" != 1 ] || [ -z "$TS_LINE" ]; then
+  echo "::error::no 'rasputin-tailscale:' report reached the serial console in ${TS_AT}s — nothing checked that tailscaled runs. Check rasputin-tailscale-report.service is still in the overlay and enabled in post-build.sh."
+  exit 1
+fi
+echo "tailscale report: $TS_LINE"
+case "$TS_LINE" in
+  *" state=active "*) ;;
+  *) echo "::error::tailscaled is not active on the booted image — mesh enrollment would be dead on every node: $TS_LINE"; exit 1 ;;
+esac
+case "$TS_LINE" in
+  *" daemon=${TS_EXPECT} "*) ;;
+  *) echo "::error::the running tailscaled did not report version ${TS_EXPECT} over its LocalAPI (tailscale version --daemon): $TS_LINE"; exit 1 ;;
+esac
+case "$TS_LINE" in
+  *" binary=${TS_EXPECT}") ;;
+  *) echo "::error::/usr/sbin/tailscaled --version did not report ${TS_EXPECT} (binary=none means the path does not exec — a symlink loop shows up exactly like this): $TS_LINE"; exit 1 ;;
+esac
+echo "tailscaled active, daemon and /usr/sbin/tailscaled both report ${TS_EXPECT}"
 
 [ "$api" = 1 ] \
   || { echo "::error::rasputin-api never answered /healthz on :80 on the controlplane boot — unit failed to start, RASPUTIN_HTTP_ADDR regressed, or networking broke; see console artifact"; exit 1; }

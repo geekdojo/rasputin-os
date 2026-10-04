@@ -23,7 +23,7 @@ name: ci
 # itself load-bearing and used to be provable only by a release build.
 #
 # The fallback address also gets a functional test against real
-# systemd-networkd 256.17 (the image's version) in a privileged container,
+# systemd-networkd 258.7 (the image's version) in a privileged container,
 # because what went wrong in geekdojo-brain#427 lives between networkd, the
 # kernel and systemd's path units, and no stub can show it. The core-dump
 # policy gets one for the same reason: it is nothing but systemd configuration,
@@ -273,7 +273,7 @@ jobs:
   # one tmpfiles.d line and a symlink, and the claim it rests on is a claim
   # about what systemd does with a C line. Wrong one way, every boot reverts a
   # delivered password; wrong the other, /etc/shadow is created world-readable
-  # on every node. Runs against real systemd-tmpfiles 256.17, the image's
+  # on every node. Runs against real systemd-tmpfiles 258.7, the image's
   # version, in a container.
   console-shadow-functional:
     runs-on: ubuntu-latest
@@ -287,7 +287,7 @@ jobs:
   # build can show whether systemd reads it the way we do. It matters because
   # a core is a copy of a crashing process's memory and lands on the persistent
   # partition: the wrong reading means every service can write its secrets to
-  # disk. Runs against real systemd 256.17, the image's version, in a
+  # disk. Runs against real systemd 258.7, the image's version, in a
   # privileged container. Note it changes kernel.core_pattern on the runner for
   # part of the run and restores it.
   coredump-functional:
@@ -306,7 +306,7 @@ jobs:
   # stock systemd.conf overrides systemd.conf's mode for the same path — wrong,
   # and /var/log/journal is world-listable on every node under a /var/log that
   # is 0777, with the at-rest audit failing every boot. Runs real
-  # systemd-journald and systemd-tmpfiles 256.17, the image's version, in a
+  # systemd-journald and systemd-tmpfiles 258.7, the image's version, in a
   # privileged container.
   persistent-journal-functional:
     runs-on: ubuntu-latest
