@@ -177,8 +177,15 @@ run() {
 	_fakefs="$_root.fakefs"
 	mkdir -p "$_fakefs"
 	if [ "$_sh" = busybox_applets ]; then
+		# busybox sh runs its own applets ahead of PATH, so a PATH stub never
+		# replaces its mount/umount/df. Shell functions do: define them, then
+		# source the hook with $0 and $1 as RAUC would set them.
 		_out=$(env PATH="$STUBS:$BUSYBOX_DIR:$PATH" STUBS_DIR="$STUBS" FAKEFS="$_fakefs" \
-			RASPUTIN_HOOK_ROOT="$_root" "$@" busybox sh "$_bundle/hook.sh" "$_cmd" 2>&1)
+			RASPUTIN_HOOK_ROOT="$_root" "$@" busybox sh -c '
+				mount() { "$STUBS_DIR/mount" "$@"; }
+				umount() { "$STUBS_DIR/umount" "$@"; }
+				df() { "$STUBS_DIR/df" "$@"; }
+				. "$0"' "$_bundle/hook.sh" "$_cmd" 2>&1)
 	else
 		_out=$(env PATH="$STUBS:$PATH" STUBS_DIR="$STUBS" FAKEFS="$_fakefs" \
 			RASPUTIN_HOOK_ROOT="$_root" "$@" "$_sh" "$_bundle/hook.sh" "$_cmd" 2>&1)

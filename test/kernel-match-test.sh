@@ -75,7 +75,11 @@ run() {
 	: > "$TMP/kmsg"
 	if [ "$1" = busybox_applets ]; then
 		env PATH="$STUBS:$BUSYBOX_DIR:$PATH" RASPUTIN_KERNEL_IDS="$2" RASPUTIN_KMSG="$TMP/kmsg" \
-			FAKE_RELEASE="$3" FAKE_VERSION="$4" busybox sh "$SCRIPT" >/dev/null 2>&1
+			FAKE_RELEASE="$3" FAKE_VERSION="$4" STUB_UNAME="$STUBS/uname" busybox sh -c '
+				# busybox sh runs its own applets ahead of PATH; a function
+				# is what replaces its uname.
+				uname() { "$STUB_UNAME" "$@"; }
+				. "$0"' "$SCRIPT" >/dev/null 2>&1
 		_rc=$?
 	else
 		env PATH="$STUBS:$PATH" RASPUTIN_KERNEL_IDS="$2" RASPUTIN_KMSG="$TMP/kmsg" \
