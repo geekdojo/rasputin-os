@@ -186,6 +186,13 @@ run() {
 	printf '%s|rc=%s' "$_out" "$?"
 }
 rc_of() { echo "${1##*|rc=}"; }
+# check_rc LABEL WANT OUT — like check on the exit status, and on a mismatch
+# prints the hook's own output, which says why.
+check_rc() {
+	_got_rc="$(rc_of "$3")"
+	check "$1" "$2" "$_got_rc"
+	[ "$2" = "$_got_rc" ] || printf '       hook said: %s\n' "${3%|rc=*}" >&2
+}
 
 RPI_ENV="RAUC_SYSTEM_COMPATIBLE=rasputin-rpi-arm64"
 N100_ENV="RAUC_SYSTEM_COMPATIBLE=rasputin-n100"
@@ -201,9 +208,9 @@ for SH in $TEST_SHELLS; do
 	make_bundle "$C/b1" rpi; make_root "$C/r1" rpi A
 	p2_before=$(hash_of "$C/r1/dev/mmcblk0p2")
 	out=$(run "$SH" "$C/b1" "$C/r1" install-check "$RPI_ENV" RAUC_MF_COMPATIBLE=rasputin-rpi-arm64)
-	check "rpi install-check passes on a sound device" 0 "$(rc_of "$out")"
+	check_rc "rpi install-check passes on a sound device" 0 "$out"
 	out=$(run "$SH" "$C/b1" "$C/r1" slot-post-install "$RPI_ENV" RAUC_SLOT_BOOTNAME=B)
-	check "rpi slot B: exit 0" 0 "$(rc_of "$out")"
+	check_rc "rpi slot B: exit 0" 0 "$out"
 	check "rpi slot B: p3 carries boot.vfat" "$(hash_of "$C/b1/boot.vfat")" "$(hash_of "$C/r1/dev/mmcblk0p3")"
 	check "rpi slot B: p2 untouched" "$p2_before" "$(hash_of "$C/r1/dev/mmcblk0p2")"
 	check "rpi slot B: cmdline.txt is cmdline-B" "$(cat "$C/b1/cmdline-B.txt")" "$(cat "$C/r1.fakefs/mmcblk0p3/cmdline.txt" 2>/dev/null)"
@@ -216,7 +223,7 @@ for SH in $TEST_SHELLS; do
 	make_bundle "$C/b2" rpi; make_root "$C/r2" rpi B
 	p3_before=$(hash_of "$C/r2/dev/mmcblk0p3")
 	out=$(run "$SH" "$C/b2" "$C/r2" slot-post-install "$RPI_ENV" RAUC_SLOT_BOOTNAME=A)
-	check "rpi slot A: exit 0" 0 "$(rc_of "$out")"
+	check_rc "rpi slot A: exit 0" 0 "$out"
 	check "rpi slot A: p2 carries boot.vfat" "$(hash_of "$C/b2/boot.vfat")" "$(hash_of "$C/r2/dev/mmcblk0p2")"
 	check "rpi slot A: p3 untouched" "$p3_before" "$(hash_of "$C/r2/dev/mmcblk0p3")"
 	check "rpi slot A: cmdline.txt is cmdline-A" "$(cat "$C/b2/cmdline-A.txt")" "$(cat "$C/r2.fakefs/mmcblk0p2/cmdline.txt" 2>/dev/null)"
@@ -226,7 +233,7 @@ for SH in $TEST_SHELLS; do
 	make_bundle "$C/b3" rpi; make_root "$C/r3" rpi A
 	: > "$C/r3/var/lib/rasputin/bmc-host"
 	out=$(run "$SH" "$C/b3" "$C/r3" slot-post-install "$RPI_ENV" RAUC_SLOT_BOOTNAME=B)
-	check "rpi BMC host: exit 0" 0 "$(rc_of "$out")"
+	check_rc "rpi BMC host: exit 0" 0 "$out"
 	cl=$(cat "$C/r3.fakefs/mmcblk0p3/cmdline.txt" 2>/dev/null)
 	lacks "rpi BMC host: no serial console" "console=ttyS0" "$cl"
 	contains "rpi BMC host: console=tty1 kept" "console=tty1" "$cl"
@@ -238,20 +245,20 @@ for SH in $TEST_SHELLS; do
 	echo tampered >> "$C/b4/boot.vfat"
 	p3_before=$(hash_of "$C/r4/dev/mmcblk0p3")
 	out=$(run "$SH" "$C/b4" "$C/r4" install-check "$RPI_ENV" RAUC_MF_COMPATIBLE=rasputin-rpi-arm64)
-	check "rpi hash mismatch: install-check rejects (10)" 10 "$(rc_of "$out")"
+	check_rc "rpi hash mismatch: install-check rejects (10)" 10 "$out"
 	contains "rpi hash mismatch: install-check says why" "does not match its checksums" "$out"
 	out=$(run "$SH" "$C/b4" "$C/r4" slot-post-install "$RPI_ENV" RAUC_SLOT_BOOTNAME=B)
-	check "rpi hash mismatch: post-install fails" 1 "$(rc_of "$out")"
+	check_rc "rpi hash mismatch: post-install fails" 1 "$out"
 	check "rpi hash mismatch: p3 untouched" "$p3_before" "$(hash_of "$C/r4/dev/mmcblk0p3")"
 
 	# A boot partition smaller than the boot FAT, by file size.
 	make_bundle "$C/b5" rpi; make_root "$C/r5" rpi A
 	head -c 4096 "$C/r5/dev/mmcblk0p3" > "$C/r5/p3.small" && mv "$C/r5/p3.small" "$C/r5/dev/mmcblk0p3"
 	out=$(run "$SH" "$C/b5" "$C/r5" install-check "$RPI_ENV" RAUC_MF_COMPATIBLE=rasputin-rpi-arm64)
-	check "rpi too small: install-check rejects (10)" 10 "$(rc_of "$out")"
+	check_rc "rpi too small: install-check rejects (10)" 10 "$out"
 	contains "rpi too small: install-check names the slot" "slot B is 4096 bytes" "$out"
 	out=$(run "$SH" "$C/b5" "$C/r5" slot-post-install "$RPI_ENV" RAUC_SLOT_BOOTNAME=B)
-	check "rpi too small: post-install fails" 1 "$(rc_of "$out")"
+	check_rc "rpi too small: post-install fails" 1 "$out"
 	check "rpi too small: p3 not written" 4096 "$(wc -c < "$C/r5/dev/mmcblk0p3" | tr -d ' ')"
 
 	# ... and by the sysfs size of the real node, as on a device.
@@ -259,21 +266,21 @@ for SH in $TEST_SHELLS; do
 	mkdir -p "$C/r6/sys/class/block/mmcblk0p2"
 	echo 8 > "$C/r6/sys/class/block/mmcblk0p2/size"
 	out=$(run "$SH" "$C/b6" "$C/r6" install-check "$RPI_ENV" RAUC_MF_COMPATIBLE=rasputin-rpi-arm64)
-	check "rpi too small (sysfs): install-check rejects (10)" 10 "$(rc_of "$out")"
+	check_rc "rpi too small (sysfs): install-check rejects (10)" 10 "$out"
 	contains "rpi too small (sysfs): sized from sysfs" "slot A is 4096 bytes" "$out"
 
 	# A boot partition that does not exist.
 	make_bundle "$C/b7" rpi; make_root "$C/r7" rpi A
 	rm "$C/r7/dev/disk/by-partuuid/52415350-03"
 	out=$(run "$SH" "$C/b7" "$C/r7" install-check "$RPI_ENV" RAUC_MF_COMPATIBLE=rasputin-rpi-arm64)
-	check "rpi missing partition: install-check rejects (10)" 10 "$(rc_of "$out")"
+	check_rc "rpi missing partition: install-check rejects (10)" 10 "$out"
 	contains "rpi missing partition: says which" "slot B" "$out"
 
 	# The running slot's boot partition is never rewritten.
 	make_bundle "$C/b8" rpi; make_root "$C/r8" rpi A
 	p2_before=$(hash_of "$C/r8/dev/mmcblk0p2")
 	out=$(run "$SH" "$C/b8" "$C/r8" slot-post-install "$RPI_ENV" RAUC_SLOT_BOOTNAME=A)
-	check "rpi running slot: refused" 1 "$(rc_of "$out")"
+	check_rc "rpi running slot: refused" 1 "$out"
 	check "rpi running slot: p2 untouched" "$p2_before" "$(hash_of "$C/r8/dev/mmcblk0p2")"
 
 	# Nor is a mounted one.
@@ -281,22 +288,22 @@ for SH in $TEST_SHELLS; do
 	echo "/dev/mmcblk0p3 /run/rasputin-bootfat vfat rw 0 0" >> "$C/r9/proc/mounts"
 	p3_before=$(hash_of "$C/r9/dev/mmcblk0p3")
 	out=$(run "$SH" "$C/b9" "$C/r9" slot-post-install "$RPI_ENV" RAUC_SLOT_BOOTNAME=B)
-	check "rpi mounted target: refused" 1 "$(rc_of "$out")"
+	check_rc "rpi mounted target: refused" 1 "$out"
 	check "rpi mounted target: p3 untouched" "$p3_before" "$(hash_of "$C/r9/dev/mmcblk0p3")"
 
 	# --------------------------------------------------------------- both ----
 	make_bundle "$C/b10" rpi; make_root "$C/r10" rpi A
 	out=$(run "$SH" "$C/b10" "$C/r10" install-check "$RPI_ENV" RAUC_MF_COMPATIBLE=rasputin-n100)
-	check "compatible mismatch: rejected (10)" 10 "$(rc_of "$out")"
+	check_rc "compatible mismatch: rejected (10)" 10 "$out"
 	contains "compatible mismatch: names both" "it is for 'rasputin-n100' and this system is 'rasputin-rpi-arm64'" "$out"
 	out=$(run "$SH" "$C/b10" "$C/r10" install-check "$RPI_ENV")
-	check "empty bundle compatible: rejected (10)" 10 "$(rc_of "$out")"
+	check_rc "empty bundle compatible: rejected (10)" 10 "$out"
 	out=$(run "$SH" "$C/b10" "$C/r10" install-check RAUC_MF_COMPATIBLE=rasputin-other RAUC_SYSTEM_COMPATIBLE=rasputin-other)
-	check "unknown system: rejected (10)" 10 "$(rc_of "$out")"
+	check_rc "unknown system: rejected (10)" 10 "$out"
 	out=$(run "$SH" "$C/b10" "$C/r10" slot-pre-install "$RPI_ENV" RAUC_SLOT_BOOTNAME=B)
-	check "unknown hook command: fails" 1 "$(rc_of "$out")"
+	check_rc "unknown hook command: fails" 1 "$out"
 	out=$(run "$SH" "$C/b10" "$C/r10" slot-post-install "$RPI_ENV")
-	check "no RAUC_SLOT_BOOTNAME: fails" 1 "$(rc_of "$out")"
+	check_rc "no RAUC_SLOT_BOOTNAME: fails" 1 "$out"
 
 	# --------------------------------------------------------------- n100 ----
 	# Slot B from a board flashed before per-slot kernels: bzImage-B written,
@@ -305,9 +312,9 @@ for SH in $TEST_SHELLS; do
 	esp="$C/r11/run/rasputin-esp"
 	legacy_before=$(hash_of "$esp/bzImage")
 	out=$(run "$SH" "$C/b11" "$C/r11" install-check "$N100_ENV" RAUC_MF_COMPATIBLE=rasputin-n100)
-	check "n100 install-check passes on a sound device" 0 "$(rc_of "$out")"
+	check_rc "n100 install-check passes on a sound device" 0 "$out"
 	out=$(run "$SH" "$C/b11" "$C/r11" slot-post-install "$N100_ENV" RAUC_SLOT_BOOTNAME=B)
-	check "n100 slot B: exit 0" 0 "$(rc_of "$out")"
+	check_rc "n100 slot B: exit 0" 0 "$out"
 	check "n100 slot B: bzImage-B is the bundle's kernel" "$(hash_of "$C/b11/bzImage")" "$(hash_of "$esp/bzImage-B")"
 	check "n100 slot B: no bzImage-A written" absent "$(hash_of "$esp/bzImage-A")"
 	check "n100 slot B: legacy /bzImage untouched" "$legacy_before" "$(hash_of "$esp/bzImage")"
@@ -319,11 +326,11 @@ for SH in $TEST_SHELLS; do
 	# Slot A while A is running: refused. Then from B, with grub.cfg already
 	# current: written, and grub.cfg is not rewritten.
 	out=$(run "$SH" "$C/b11" "$C/r11" slot-post-install "$N100_ENV" RAUC_SLOT_BOOTNAME=A)
-	check "n100 running slot A: refused" 1 "$(rc_of "$out")"
+	check_rc "n100 running slot A: refused" 1 "$out"
 	check "n100 running slot A: no bzImage-A written" absent "$(hash_of "$esp/bzImage-A")"
 	printf 'root=PARTLABEL=rootfs-1 rauc.slot=B\n' > "$C/r11/proc/cmdline"
 	out=$(run "$SH" "$C/b11" "$C/r11" slot-post-install "$N100_ENV" RAUC_SLOT_BOOTNAME=A)
-	check "n100 slot A: exit 0" 0 "$(rc_of "$out")"
+	check_rc "n100 slot A: exit 0" 0 "$out"
 	check "n100 slot A: bzImage-A is the bundle's kernel" "$(hash_of "$C/b11/bzImage")" "$(hash_of "$esp/bzImage-A")"
 	lacks "n100 slot A: grub.cfg already current, not rewritten" "replacing the shared" "$out"
 
@@ -331,22 +338,22 @@ for SH in $TEST_SHELLS; do
 	make_bundle "$C/b12" n100; make_root "$C/r12" n100 A
 	printf '/dev/sda3 / squashfs ro 0 0\n' > "$C/r12/proc/mounts"
 	out=$(run "$SH" "$C/b12" "$C/r12" install-check "$N100_ENV" RAUC_MF_COMPATIBLE=rasputin-n100)
-	check "n100 ESP not mounted: install-check rejects (10)" 10 "$(rc_of "$out")"
+	check_rc "n100 ESP not mounted: install-check rejects (10)" 10 "$out"
 	out=$(run "$SH" "$C/b12" "$C/r12" slot-post-install "$N100_ENV" RAUC_SLOT_BOOTNAME=B)
-	check "n100 ESP not mounted: post-install fails" 1 "$(rc_of "$out")"
+	check_rc "n100 ESP not mounted: post-install fails" 1 "$out"
 	check "n100 ESP not mounted: nothing written" absent "$(hash_of "$C/r12/run/rasputin-esp/bzImage-B")"
 
 	# The ESP too full for the kernel.
 	make_bundle "$C/b13" n100; make_root "$C/r13" n100 A
 	out=$(run "$SH" "$C/b13" "$C/r13" install-check "$N100_ENV" RAUC_MF_COMPATIBLE=rasputin-n100 FAKE_DF_AVAIL=10)
-	check "n100 ESP full: install-check rejects (10)" 10 "$(rc_of "$out")"
+	check_rc "n100 ESP full: install-check rejects (10)" 10 "$out"
 	contains "n100 ESP full: says how much" "the ESP has 10 KiB free" "$out"
 
 	# A tampered kernel: refused before anything is written.
 	make_bundle "$C/b14" n100; make_root "$C/r14" n100 A
 	echo tampered >> "$C/b14/bzImage"
 	out=$(run "$SH" "$C/b14" "$C/r14" slot-post-install "$N100_ENV" RAUC_SLOT_BOOTNAME=B)
-	check "n100 hash mismatch: post-install fails" 1 "$(rc_of "$out")"
+	check_rc "n100 hash mismatch: post-install fails" 1 "$out"
 	check "n100 hash mismatch: nothing written" absent "$(hash_of "$C/r14/run/rasputin-esp/bzImage-B")"
 	check "n100 hash mismatch: grub.cfg untouched" "legacy grub.cfg" "$(cat "$C/r14/run/rasputin-esp/EFI/BOOT/grub.cfg")"
 done
