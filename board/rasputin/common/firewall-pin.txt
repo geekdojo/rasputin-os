@@ -46,12 +46,12 @@
 #
 # WHY THIS VALUE
 #
-# 2026.09.6 is the STABLE firewall of the 2026.09.6 lockstep, published
-# 2026-10-04 from firewall 202ed53 (firewall #92: agent re-pinned from dev.188
-# to the CP stable v2026.09.6, the same CP release this image's agent/api pins
-# name; Snort rules pin 94d7859a, freshness gate passed). It promotes the
-# 2026.09.6-dev.143 chain. Its manifest names version 2026.09.6, channel
-# stable. Stable only ever bakes stable.
+# 2026.10.0-dev.147 is the firewall dev build of the 2026.10.0-dev.190 chain,
+# published 2026-10-05 from firewall 92c4a84 (firewall #94: agent pinned to
+# CP 2026.10.0-dev.190, the same CP release this image's agent/api pins name;
+# Snort rules pin 94d7859a, freshness gate passed). It carries firewall #93
+# (7fb432b). Package set identical to the 2026.09.6 stable (SBOM diff empty).
+# Dev only bakes dev.
 #
 # History: 2026.09.4-dev.127 was the first pin -- the FIRST firewall release
 # that publishes manifest.json.sig (dev.126 and earlier ship no sig asset).
@@ -61,6 +61,7 @@
 # of the 2026.09.5 stable OS.
 # On the 2026.09.6 dev line: dev.140 (OS dev.268), dev.141 (OS dev.269),
 # dev.142 (pinned, but no OS release published with it), dev.143 (OS dev.276,
-# dev.279).
+# dev.279). 2026.09.6 (stable) was the pin of the 2026.09.6 stable OS.
+# On the 2026.10.0 dev line: dev.147.
 #
-2026.09.6
+2026.10.0-dev.147
