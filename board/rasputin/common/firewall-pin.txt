@@ -46,13 +46,13 @@
 #
 # WHY THIS VALUE
 #
-# 2026.10.0-dev.148 is the firewall dev build of the 2026.10.0-dev.191 chain,
-# published 2026-10-07 from firewall a0cfb5b (firewall #97: agent pinned to
-# CP 2026.10.0-dev.191, the same CP release this image's agent/api pins name;
-# Snort rules re-pinned to 9d7fb9f4, freshness gate passed; release run
-# 37684632918). Against dev.147 its SBOM moves libopenssl3 3.5.8 -> 3.5.9,
-# LuCI, rpcd, uhttpd, odhcp6c and libiwinfo (ImageBuilder feed refresh).
-# Dev only bakes dev.
+# 2026.10.0 is the STABLE firewall of the 2026.10.0 lockstep, published
+# 2026-10-08 from firewall 1890543 (firewall #98: agent re-pinned from dev.191
+# to the CP stable v2026.10.0, the same CP release this image's agent/api pins
+# name; Snort rules re-pinned to 53d35648, freshness gate passed in pre-flight
+# run 37804351553; tag release run 37805977446). It promotes the
+# 2026.10.0-dev.148 chain. Its manifest names version 2026.10.0, channel
+# stable. Stable only ever bakes stable.
 #
 # History: 2026.09.4-dev.127 was the first pin -- the FIRST firewall release
 # that publishes manifest.json.sig (dev.126 and earlier ship no sig asset).
@@ -63,6 +63,6 @@
 # On the 2026.09.6 dev line: dev.140 (OS dev.268), dev.141 (OS dev.269),
 # dev.142 (pinned, but no OS release published with it), dev.143 (OS dev.276,
 # dev.279). 2026.09.6 (stable) was the pin of the 2026.09.6 stable OS.
-# On the 2026.10.0 dev line: dev.147 (OS dev.283), dev.148.
+# On the 2026.10.0 dev line: dev.147 (OS dev.283), dev.148 (OS dev.284).
 #
-2026.10.0-dev.148
+2026.10.0
