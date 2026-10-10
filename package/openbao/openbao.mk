@@ -59,7 +59,8 @@ OPENBAO_GOARCH = arm64
 else ifeq ($(BR2_x86_64),y)
 OPENBAO_GOARCH = amd64
 else
-$(error OpenBao has no release tarball mapped for the target architecture $(BR2_ARCH). Add the architecture to the map in package/openbao/openbao.mk and its sha256 to openbao.hash.)
+# No closing full stop: GNU make appends ".  Stop." to every $(error).
+$(error OpenBao has no release tarball mapped for the target architecture $(BR2_ARCH). Add the architecture to the map in package/openbao/openbao.mk and its sha256 to openbao.hash)
 endif
 endif
 

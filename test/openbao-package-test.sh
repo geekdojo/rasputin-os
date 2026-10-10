@@ -52,6 +52,18 @@ contains() { # contains LABEL HAYSTACK NEEDLE
 	esac
 }
 
+has_line_ending() { # has_line_ending LABEL TEXT LINE — some line of TEXT is LINE
+	# exactly, after make's "<file>:<line>: " location prefix.
+	_found=0
+	while IFS= read -r _l; do
+		case "$_l" in *": $3") _found=1 ;; esac
+	done <<EOF_LINES
+$2
+EOF_LINES
+	if [ "$_found" = 1 ]; then echo "ok   — $1"
+	else echo "FAIL — $1: no line ending ': $3' in: $2"; fails=$((fails + 1)); fi
+}
+
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 
 # ── the checks the suite applies to the real files, as functions so the
@@ -109,7 +121,11 @@ map_row() {
 	else
 		check "$_label: exit status is non-zero" "$([ "$_rc" -ne 0 ] && echo non-zero || echo 0)" non-zero
 		check "$_label: nothing on stdout" "$_out" ""
-		contains "$_label: stderr names the arch and the fix" "$_err" "$_want"
+		has_line_ending "$_label: stderr carries the line the reader sees" "$_err" "$_want"
+		case "$_err" in
+			*"openbao.hash.."*) echo "FAIL — $_label: stderr has a doubled full stop (openbao.hash..): $_err"; fails=$((fails + 1)) ;;
+			*) echo "ok   — $_label: no doubled full stop (openbao.hash..)" ;;
+		esac
 	fi
 }
 
@@ -122,10 +138,12 @@ map_row "TC-798-01 aarch64" 0 "openbao_${PIN}_linux_arm64.tar.gz" BR2_PACKAGE_OP
 # TC-798-02
 map_row "TC-798-02 x86_64" 0 "openbao_${PIN}_linux_amd64.tar.gz" BR2_PACKAGE_OPENBAO=y BR2_x86_64=y BR2_ARCH=x86_64
 # TC-798-03: an architecture the map does not know fails the build, with a
-# sentence naming the arch and the fix (F-798-05).
+# sentence naming the arch and the fix (F-798-05), exactly as the reader sees
+# it: make appends ".  Stop.", so one full stop, never "openbao.hash.."
+# (F-798-13).
 for a in arm riscv; do
 	map_row "TC-798-03 package on, $a" 1 \
-		"OpenBao has no release tarball mapped for the target architecture $a. Add the architecture to the map in package/openbao/openbao.mk and its sha256 to openbao.hash." \
+		"*** OpenBao has no release tarball mapped for the target architecture $a. Add the architecture to the map in package/openbao/openbao.mk and its sha256 to openbao.hash.  Stop." \
 		BR2_PACKAGE_OPENBAO=y "BR2_$a=y" "BR2_ARCH=$a"
 done
 # TC-798-04: with the store off, an unmapped arch still evaluates cleanly, so a
@@ -210,6 +228,19 @@ no_make() ( PATH="$TMP/no-such-dir"; mk_var "$MK" OPENBAO_VERSION )
 mkvar_fails "no make on PATH" \
 	"Could not read OPENBAO_VERSION from $MK. GNU make is not on PATH." \
 	no_make
+# F-798-15: the helper's two remaining branches.
+mkvar_fails "no variable name" \
+	"The mk_var helper needs a .mk file and a variable name." \
+	mk_var "$MK"
+mk_var "$MK" > /dev/null 2>&1; _rc=$?
+check "TC-798-09 no variable name: exit status" "$_rc" 2
+mkdir "$TMP/not-gnu"
+printf '#!/bin/sh\necho "bmake 20240711"\n' > "$TMP/not-gnu/make"
+chmod +x "$TMP/not-gnu/make"
+not_gnu_make() ( PATH="$TMP/not-gnu"; mk_var "$MK" OPENBAO_VERSION )
+mkvar_fails "make on PATH is not GNU make" \
+	"Could not read OPENBAO_VERSION from $MK. The make on PATH is not GNU make." \
+	not_gnu_make
 
 echo
 if [ "$fails" -gt 0 ]; then echo "$fails check(s) failed"; exit 1; fi
