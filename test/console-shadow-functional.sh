@@ -48,12 +48,7 @@ IMAGE=rasputin-console-shadow-functional:f43-systemd-258.7
 
 command -v docker >/dev/null 2>&1 || { echo "docker not found - this test needs docker"; exit 1; }
 
-fails=0
-check() {
-	if [ "$2" = "0" ]; then printf '  ok   %s\n' "$1"
-	else printf '  FAIL %s\n       %s\n' "$1" "${3:-}"; fails=$((fails + 1)); fi
-}
-yes_if() { if "$@"; then echo 0; else echo 1; fi; }
+. "$ROOT/test/lib/checks.sh"
 
 # Fedora 43 shipped systemd 258.7, the same release as the image, so what
 # systemd-tmpfiles does with this line here is what it does on a node.

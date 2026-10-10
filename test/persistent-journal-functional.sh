@@ -55,17 +55,9 @@ for f in "$JOURNALD_CONF" "$JOURNAL_TMPFILES"; do
 done
 command -v docker >/dev/null 2>&1 || { echo "docker not found - this test needs docker"; exit 1; }
 
-fails=0
-check() {
-	if [ "$2" = "0" ]; then printf '  ok   %s\n' "$1"
-	else printf '  FAIL %s\n       %s\n' "$1" "${3:-}"; fails=$((fails + 1)); fi
-}
-yes_if() { if "$@"; then echo 0; else echo 1; fi; }
-# Glob matching rather than expr(1): expr prints the match length on stdout, and
-# these results are read through $(...), so its output would be captured
-# alongside the verdict and every such check would read as a failure.
+. "$ROOT/test/lib/checks.sh"
+# Glob matching rather than expr(1), for the reason test/lib/checks.sh gives.
 starts_with() { case "$2" in "$1"*) return 0 ;; *) return 1 ;; esac; }
-contains() { case "$2" in *"$1"*) return 0 ;; *) return 1 ;; esac; }
 
 # Fedora 43 shipped systemd 258.7, the same release as the image, so what
 # journald and systemd-tmpfiles do with these files here is what they do on a

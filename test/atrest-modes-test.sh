@@ -90,7 +90,7 @@ HARNESS_INV="$TMP/inventory.harness"
 awk -v u="$ME" -v g="$MYGID" '
 	$1 ~ /^[0-7][0-7][0-7][0-7]$/ && NF >= 4 { $4 = u; if (NF >= 5) $5 = g }
 	{ print }
-' "$INVENTORY" >"$HARNESS_INV" || { echo "could not write the harness inventory" >&2; exit 2; }
+' "$INVENTORY" >"$HARNESS_INV" || { echo "The harness inventory could not be written." >&2; exit 2; }
 
 # The store's paths (geekdojo/geekdojo-brain#754), written here as literals and
 # never read from the inventory, so a row dropped from it or declared with the

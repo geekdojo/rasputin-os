@@ -45,7 +45,7 @@ f43_systemd_image() {
 		return 2
 	fi
 	echo "building test image ($1)"
-	docker build -q -t "$1" - >/dev/null <<'DOCKERFILE' || { echo "FAILED: could not build the test image"; return 1; }
+	docker build -q -t "$1" - >/dev/null <<'DOCKERFILE' || { echo "FAILED: the test image could not be built."; return 1; }
 FROM fedora:43
 RUN dnf -y install --setopt=install_weak_deps=False fedora-repos-archive \
  && dnf -y install --setopt=install_weak_deps=False \

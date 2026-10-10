@@ -43,17 +43,11 @@ AUDIT="$OVERLAY/usr/lib/rasputin/atrest/rasputin-atrest-audit.sh"
 IMAGE=rasputin-store-paths-functional:f43-systemd-258.7
 
 for f in "$TMPFILES" "$INVENTORY" "$AUDIT"; do
-	[ -f "$f" ] || { echo "missing: $f" >&2; exit 2; }
+	[ -f "$f" ] || { echo "The file $f is missing." >&2; exit 2; }
 done
-command -v docker >/dev/null 2>&1 || { echo "docker not found - this test needs docker"; exit 1; }
+command -v docker >/dev/null 2>&1 || { echo "This test needs docker, and docker is not on PATH."; exit 1; }
 
-fails=0
-check() {
-	if [ "$2" = "0" ]; then printf '  ok   %s\n' "$1"
-	else printf '  FAIL %s\n       %s\n' "$1" "${3:-}"; fails=$((fails + 1)); fi
-}
-yes_if() { if "$@"; then echo 0; else echo 1; fi; }
-contains() { case "$2" in *"$1"*) return 0 ;; *) return 1 ;; esac; }
+. "$ROOT/test/lib/checks.sh"
 neither() { ! contains "$1" "$3" && ! contains "$2" "$3"; }
 
 V=/var/lib/rasputin
@@ -97,7 +91,7 @@ trap cleanup EXIT INT TERM
 # mounts, and root in the container can chown without it.
 CID=$(docker run -d --tmpfs /run --tmpfs /tmp \
 	-v "$OVERLAY:/overlay:ro" "$IMAGE" sleep 900) \
-	|| { echo "FAILED: could not start container"; exit 1; }
+	|| { echo "FAILED: the test container could not be started."; exit 1; }
 inside() { docker exec "$CID" sh -c "$*"; }
 echo "in the container: $(inside 'systemd-tmpfiles --version | head -1')"
 check "the container has no openbao user, so 990 works as a number or not at all" \
@@ -122,7 +116,7 @@ tmpfiles() { inside 'systemd-tmpfiles --create /usr/lib/tmpfiles.d/rasputin.conf
 # Failed to resolve user ...") and a path it fails on by path, so both are
 # matched: the store lines' numbers, taken from the shipped file, and the paths.
 STORE_LINES=$(awk '$1 !~ /^#/ && $2 ~ /^\/var\/lib\/rasputin\/(openbao|tls)/ { printf "%s%d", sep, NR; sep = "|" }' "$TMPFILES")
-[ -n "$STORE_LINES" ] || { echo "FAILED: no store lines found in $TMPFILES"; exit 1; }
+[ -n "$STORE_LINES" ] || { echo "FAILED: $TMPFILES has no store lines."; exit 1; }
 store_errors() { printf '%s\n' "$1" | grep -E "rasputin\.conf:($STORE_LINES):|/var/lib/rasputin/(openbao|tls)" || true; }
 # audit — the real script, as root, with no -u or -g: the production defaults.
 # -q because a container has no kernel log of its own to write the verdict to.
