@@ -186,6 +186,9 @@ BR2_PACKAGE_DROPBEAR_DISABLE_REVERSEDNS=y
 BR2_PACKAGE_RASPUTIN_AGENT=y
 BR2_PACKAGE_RASPUTIN_API=y
 BR2_PACKAGE_CADDY=y
+# The secrets store binary and its static user, at the pin in package/openbao
+# (geekdojo/geekdojo-brain#798). No unit yet: nothing runs it.
+BR2_PACKAGE_OPENBAO=y
 
 # --- rootfs: squashfs (read-only, verity-friendly) ---
 BR2_TARGET_ROOTFS_SQUASHFS=y

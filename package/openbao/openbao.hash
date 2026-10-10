@@ -1,0 +1,9 @@
+# From https://github.com/openbao/openbao/releases/download/v2.7.1/checksums.txt
+# (sha256 95ad62d532df64dea20463ce513f0a56f792530bbefeb4e89525bc1eb773b750),
+# taken only after its GPG and cosign signatures verified: the procedure is in
+# openbao.mk's header, and the transcript is geekdojo-brain
+# projects/rasputin/research/openbao-evidence/798/raw/signature-verification-v2.7.1.txt.
+sha256  0e2f1ce10d124e03112b50dd2fbec6b78003783253bc3a91587938f39d1e2243  openbao_2.7.1_linux_amd64.tar.gz
+sha256  2b3807d90f224df05d4fe1fdede7f052d2227596c648a56bd291381f8fd01840  openbao_2.7.1_linux_arm64.tar.gz
+# Locally computed from the LICENSE in both verified tarballs (identical).
+sha256  d6b1a865f1c8c697d343bd4e0ce61025f91898486a1f00d727f32e8644af77d3  LICENSE

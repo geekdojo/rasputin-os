@@ -1,0 +1,10 @@
+OpenBao 2.7.1 is distributed under the Mozilla Public License 2.0.
+
+The licence text is in LICENSE, in this directory.
+
+The Source Code Form of this release is available at:
+  https://github.com/openbao/openbao/tree/v2.7.1
+  https://github.com/openbao/openbao/archive/refs/tags/v2.7.1.tar.gz
+
+Rasputin ships the upstream release binary (/usr/bin/bao) unmodified, and does
+not modify the source.

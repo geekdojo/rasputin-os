@@ -1,0 +1,19 @@
+config BR2_PACKAGE_OPENBAO
+	bool "openbao"
+	help
+	  OpenBao, the node secrets store (ADR-0010, geekdojo/geekdojo-brain
+	  #798). This package installs only the pinned upstream release
+	  binary as /usr/bin/bao, its MPL-2.0 LICENSE and source notice under
+	  /usr/share/licenses/openbao/, and the static openbao service user
+	  (uid/gid 990). No unit and no config: nothing starts the binary
+	  until the store's unit lands.
+
+	  A pre-built CGO-free release binary, hash-pinned from upstream's
+	  GPG- and cosign-verified checksums.txt. See
+	  package/openbao/openbao.mk.
+
+	  There is deliberately no architecture "depends on": a target
+	  architecture the tarball map in openbao.mk does not know fails the
+	  build instead of silently dropping the store from the image.
+
+	  https://openbao.org
