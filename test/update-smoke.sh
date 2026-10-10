@@ -36,7 +36,9 @@
 #      reports the version package/openbao/openbao.mk pins, its LICENSE and
 #      source notice are there and the notice names that version, the static
 #      openbao user is 990:990, /usr/bin/bao is root:root 0755, and nothing
-#      runs it. Boot 2 is where these live because it is the only boot of THIS
+#      runs it. Its unit, openbao.service, is installed and not wanted:
+#      `systemctl is-enabled` says static (geekdojo/geekdojo-brain#755).
+#      Boot 2 is where these live because it is the only boot of THIS
 #      build's rootfs with a shell into the guest, on both arches, and it is an
 #      OTA'd node: its persistent shadow was seeded by the old image and has no
 #      openbao row, which is exactly the path `id openbao` must work on.
@@ -334,6 +336,12 @@ if boot 2; then
 	expect "boot 2: nothing runs bao (pidof bao)" rc=1 "$(ssh_guest 'pidof bao; echo rc=$?' 2>/dev/null)"
 	expect "boot 2: no failed unit names openbao or bao" "" \
 		"$(ssh_guest 'systemctl --failed --no-legend --plain' 2>/dev/null | grep -i bao)"
+	# Installed, not wanted (geekdojo/geekdojo-brain#755): the unit is on the
+	# image with no [Install] section, so preset-all left it static. The two
+	# checks above cannot tell that from "not installed": nothing starts the
+	# unit either way.
+	expect "boot 2: openbao.service is installed and not wanted" static \
+		"$(ssh_guest 'systemctl is-enabled openbao.service' 2>/dev/null)"
 	if ! ssh_guest 'systemctl is-active docker' >/dev/null 2>&1; then
 		ssh_guest 'journalctl -b -u docker --no-pager | tail -15' 2>&1 | sed 's/^/    docker: /'
 	fi

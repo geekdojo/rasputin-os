@@ -245,6 +245,14 @@ jobs:
       # failure, not a skip. No REQUIRE_BUSYBOX: nothing here runs on the node.
       - name: OpenBao package tests
         run: sh test/openbao-package-test.sh
+      # The secrets store's unit (geekdojo/geekdojo-brain#755): every directive
+      # at its value and in its section, the forbidden ones (a watchdog bao never
+      # pets, network-online, MemoryHigh, a rate-limit override, a chosen restart
+      # delay or start limit, [Install]) refused by negative controls, and the
+      # unit tied to the tmpfiles lines and the static user it depends on. The
+      # store-paths-functional job runs it under real systemd.
+      - name: Store unit tests
+        run: sh test/store-unit-test.sh
       # release.yml's publish step runs scripts/release-target-guard.sh before
       # and after `gh release create` to prove the tag is on the commit the
       # images were built from. Every exit status, against a throwaway git
@@ -357,3 +365,13 @@ jobs:
       - uses: actions/checkout@v4
       - name: Store paths against real systemd-tmpfiles (fresh node, re-assert, OTA contents kept)
         run: sh test/store-paths-functional.sh
+      # The store's unit (geekdojo/geekdojo-brain#755) under real systemd 258.7
+      # as PID 1 with the real pinned bao, downloaded and checked against
+      # openbao.hash: not wanted under preset-all, skipped off the control plane
+      # and before its CA and leaf exist, failed without its seal key, 990:990
+      # with no capabilities and no core, credentials only it and root can read,
+      # writes only in its two directories, the memory conditions, and the
+      # start limit after repeated crashes with recovery by reset-failed. Same
+      # job as the store paths: it builds the same image.
+      - name: Store unit against real systemd and the pinned bao (conditions, sandbox, credentials, crash loop)
+        run: sh test/store-unit-functional.sh

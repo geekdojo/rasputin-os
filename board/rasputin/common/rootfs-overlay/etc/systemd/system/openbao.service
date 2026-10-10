@@ -1,0 +1,86 @@
+# The node secrets store (ADR-0010; geekdojo/geekdojo-brain#755). The image's
+# first sandboxed, non-root third-party daemon. Installed but NOT wanted: there
+# is no [Install] section, so Buildroot's preset-all leaves it `static` and
+# nothing starts it until #756 bakes its config and enables it with a wants
+# symlink. test/store-unit-test.sh asserts every line here;
+# test/store-unit-functional.sh runs it under real systemd 258.7 with the real
+# pinned bao.
+[Unit]
+Description=OpenBao secrets store
+# The store's state and every credential source are on the persistent
+# partition.
+RequiresMountsFor=/var/lib/rasputin
+# firstboot writes the role marker below. Ordering only: the condition is the
+# gate, as on rasputin-api.service.
+After=rasputin-firstboot.service
+# The api's readiness wait is sys/health answering, not this ordering
+# (ADR-0010 S6). The store has no ordering on the api, so the api may restart
+# the store from inside its own start (#758) without a deadlock.
+Before=rasputin-api.service
+# Role gate: only a control plane runs the store.
+ConditionPathExists=/var/lib/rasputin/role.controlplane
+# First boot: the store CA and the server leaf do not exist until the api mints
+# them (#758). Until then the store is skipped cleanly (inactive, not failed),
+# which spends none of the start limit; #758 restarts the store once it has
+# written the leaf. The seal key and the seal fragment have NO condition on
+# purpose: a node with its CA and leaf but no seal material fails here, loudly,
+# rather than skipping (S12).
+ConditionPathExists=/var/lib/rasputin/trust/store-ca.pem
+ConditionPathExists=/var/lib/rasputin/tls/openbao-server/leaf.pem
+ConditionPathExists=/var/lib/rasputin/tls/openbao-server/leaf.key
+
+[Service]
+# OpenBao sends READY, RELOADING and STOPPING, and never pets a watchdog, so
+# there is no watchdog setting here.
+Type=notify
+NotifyAccess=main
+# S7: the static openbao user and group, 990:990 (package/openbao, OPENBAO_USERS).
+User=openbao
+Group=openbao
+# The main config is #756's to bake. The seal fragment arrives as a credential
+# and is named by its literal path, because bao expands no variable in its seal
+# config (#679 Q3).
+ExecStart=/usr/bin/bao server -config=/etc/rasputin/openbao/openbao.hcl -config=/run/credentials/openbao.service/seal.hcl
+# Everything root writes for the store reaches it here (#754): the store's uid
+# can read none of these source directories, and only it and root can read the
+# copies systemd makes under /run/credentials/openbao.service/.
+LoadCredential=seal-key:/var/lib/rasputin/openbao-seal/seal-key
+LoadCredential=seal.hcl:/var/lib/rasputin/openbao-seal/seal.hcl
+LoadCredential=store-ca.pem:/var/lib/rasputin/trust/store-ca.pem
+LoadCredential=server.pem:/var/lib/rasputin/tls/openbao-server/leaf.pem
+LoadCredential=server.key:/var/lib/rasputin/tls/openbao-server/leaf.key
+# A process exit is a fact, so the store restarts on it. systemd's own restart
+# delay and start limit apply (100 ms; 5 starts in 10 s): this unit chooses no
+# duration (ARCH-FACTS). After a crash loop the unit sits in `failed`, nothing
+# listens on 127.0.0.1, and F3.3's client raises the unreachable alert (#760).
+# Recovery is by facts: whatever changes the cause (#758 on a new leaf, #766
+# around a restore, #830 on a rotation) runs `systemctl reset-failed` and then
+# `systemctl restart`. A reboot also resets the count.
+Restart=always
+# The filesystem is read-only to the store except its data and audit
+# directories (#754).
+ProtectSystem=strict
+ReadWritePaths=/var/lib/rasputin/openbao /var/lib/rasputin/openbao-audit
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+# No capabilities at all: OpenBao removed mlock, and upstream's CAP_SYSLOG is
+# unused.
+CapabilityBoundingSet=
+# Soft and hard. The manager's default is 0:infinity, which would let the
+# process raise its own soft limit and dump the store's memory.
+LimitCORE=0
+# S2's reserve from F0.1. S6 (#684): the binary's file pages are charged to the
+# store, and there is no MemoryHigh, because below the working set it stalls
+# the store with no kill and no restart.
+MemoryMax=128M
+MemorySwapMax=0
+# The lowest value the kernel still OOM-kills. -1000 would exempt the store
+# from its own memory cgroup's kill and turn a clean OOM restart into a stall.
+OOMScoreAdjust=-999
+# 128 MiB minus 67.3 MiB, the largest file-backed resident set of a PebbleDB
+# store in F0.1. The anonymous peak measured there is 27 MiB, so this never
+# binds under measured load; it is GC back-pressure before the kernel kills.
+Environment=GOMEMLIMIT=60MiB
+# No journald rate-limit override: S11 audits to a file, and a per-unit
+# LogRateLimitIntervalSec=0 is ignored anyway (#684).
