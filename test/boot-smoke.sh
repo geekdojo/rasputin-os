@@ -599,9 +599,10 @@ echo "api healthz + web UI + 70s uptime soak confirmed over hostfwd"
 # THREE OUTCOMES, AND ONLY ONE OF THEM IS GREEN.
 #
 #   PASS checked=N   the only pass, and N must be non-zero.
-#   FAIL ...         a declared path is not its declared mode, a swept file is
-#                    group- or world-accessible, a mode could not be read, or
-#                    the inventory itself was unreadable.
+#   FAIL ...         a declared path is not its declared mode, owner or group,
+#                    grants access the inventory does not declare, a swept file
+#                    is group- or world-accessible, a mode, owner or group could
+#                    not be read, or the inventory itself was unreadable.
 #   nothing          the verdict never arrived.
 #
 # The absent case FAILS AS LOUDLY AS A FAIL LINE, and that is the whole point
@@ -632,7 +633,7 @@ if [ "$atrest" != 1 ] || [ -z "$ATREST_LINES" ]; then
   exit 1
 fi
 if printf '%s\n' "$ATREST_LINES" | grep -q "rasputin-atrest: FAIL"; then
-  echo "::error::the at-rest mode audit FAILED on the booted machine — a path on the persistent partition is not the mode /usr/lib/rasputin/atrest/inventory declares for it, or a swept tree holds a group/world-accessible file. The verdict below carries the count and the FIRST offending path with its actual mode; the remaining findings are printed on the audit's stdout, which systemd captures into the guest's journal and which therefore does NOT reach this console — reproduce them with test/atrest-modes-test.sh or on a node. Either the mode regressed or the inventory is out of date — do not widen the inventory to match a widened file."
+  echo "::error::the at-rest mode audit FAILED on the booted machine — a path on the persistent partition is not the mode, owner or group /usr/lib/rasputin/atrest/inventory declares for it, or a swept tree holds a group/world-accessible file. The verdict below carries the count and the FIRST offending path with its actual mode; the remaining findings are printed on the audit's stdout, which systemd captures into the guest's journal and which therefore does NOT reach this console — reproduce them with test/atrest-modes-test.sh or on a node. Either the mode regressed or the inventory is out of date — do not widen the inventory to match a widened file."
   printf '%s\n' "$ATREST_LINES" | sed 's/^/  /'
   exit 1
 fi

@@ -70,16 +70,19 @@ yes_if() { if "$@"; then echo 0; else echo 1; fi; }
 not() { if "$@"; then return 1; else return 0; fi; }
 
 # run_audit ROOTDIR [EXTRA...] — the audit over a synthetic tree, output
-# captured. -q so the harness never writes to the host's kernel log, and -u
-# with this user's id because a test cannot create root-owned files. The
-# ownership check itself is exercised by the case that passes -u 0.
+# captured. -q so the harness never writes to the host's kernel log, and -u and
+# -g with this user's ids because a test cannot create root-owned files. They
+# set only the DEFAULT for an entry with no OWNER or GROUP column; the
+# ownership checks themselves are exercised by the cases that pass -u 0, or
+# leave -g out, and by the fixture rows that declare the columns.
 ME="$(id -u)"
+MYGID="$(id -g)"
 run_audit() {
 	d="$1"; shift
 	if [ "$SH" = busybox_sh ]; then
-		busybox sh "$AUDIT" -i "$INVENTORY" -r "$d" -u "$ME" -q "$@" 2>&1
+		busybox sh "$AUDIT" -i "$INVENTORY" -r "$d" -u "$ME" -g "$MYGID" -q "$@" 2>&1
 	else
-		"$SH" "$AUDIT" -i "$INVENTORY" -r "$d" -u "$ME" -q "$@" 2>&1
+		"$SH" "$AUDIT" -i "$INVENTORY" -r "$d" -u "$ME" -g "$MYGID" -q "$@" 2>&1
 	fi
 }
 audit_rc() {
@@ -88,9 +91,9 @@ audit_rc() {
 # run_audit_as UID ROOTDIR — the audit demanding a specific owner.
 run_audit_as() {
 	if [ "$SH" = busybox_sh ]; then
-		busybox sh "$AUDIT" -i "$INVENTORY" -r "$2" -u "$1" -q 2>&1
+		busybox sh "$AUDIT" -i "$INVENTORY" -r "$2" -u "$1" -g "$MYGID" -q 2>&1
 	else
-		"$SH" "$AUDIT" -i "$INVENTORY" -r "$2" -u "$1" -q 2>&1
+		"$SH" "$AUDIT" -i "$INVENTORY" -r "$2" -u "$1" -g "$MYGID" -q 2>&1
 	fi
 }
 
@@ -113,9 +116,9 @@ run_audit_without() {
 	d="$1"; shift
 	s=$(stub_without "$@")
 	if [ "$SH" = busybox_sh ]; then
-		PATH="$s:$PATH" busybox sh "$AUDIT" -i "$INVENTORY" -r "$d" -u "$ME" -q 2>&1
+		PATH="$s:$PATH" busybox sh "$AUDIT" -i "$INVENTORY" -r "$d" -u "$ME" -g "$MYGID" -q 2>&1
 	else
-		PATH="$s:$PATH" "$SH" "$AUDIT" -i "$INVENTORY" -r "$d" -u "$ME" -q 2>&1
+		PATH="$s:$PATH" "$SH" "$AUDIT" -i "$INVENTORY" -r "$d" -u "$ME" -g "$MYGID" -q 2>&1
 	fi
 }
 audit_rc_without() {
@@ -143,10 +146,44 @@ world() {
 	: >"$V/bus/agent.token"; chmod 0600 "$V/bus/agent.token"
 	: >"$V/bus/join.token"; chmod 0600 "$V/bus/join.token"
 	umask 022
+	# On BSD and macOS a new file takes its DIRECTORY's group, not the
+	# creator's, so the group the audit reads would depend on where mktemp
+	# put the tree. Set it, so the expected gid is this user's on every host.
+	chgrp -R "$MYGID" "$R"
 	echo "$R"
 }
 
 says() { printf '%s' "$2" | grep -qF -- "$1"; }
+# last_line_matches ERE OUTPUT — the verdict is the audit's last line, and the
+# smoke parses it, so its shape is asserted on that line alone.
+last_line_matches() { printf '%s\n' "$2" | tail -n 1 | grep -qE -- "$1"; }
+
+# fixture MODE ENTRY — a tree holding one file, /x, at MODE and owned by this
+# user and group, and an inventory holding the one line ENTRY. Sets FR (the
+# root) and FI (the inventory). The shipped inventory declares no OWNER or
+# GROUP column, so these one-line inventories are the only way to exercise
+# them. Called directly, never in $(...), so FR and FI reach the caller.
+fixture() {
+	_fw=$(mktemp -d "$TMP/f.XXXXXX")
+	FR="$_fw/root"
+	FI="$_fw/inventory"
+	mkdir -p "$FR"
+	: >"$FR/x"
+	chmod "$1" "$FR/x"
+	chgrp "$MYGID" "$FR/x"
+	printf '%s\n' "$2" >"$FI"
+}
+
+# audit_with INVENTORY ROOTDIR FLAGS... — the audit with exactly the flags
+# given and no harness defaults, so a case can run it as production does.
+audit_with() {
+	_i="$1"; _r="$2"; shift 2
+	if [ "$SH" = busybox_sh ]; then
+		busybox sh "$AUDIT" -i "$_i" -r "$_r" -q "$@" 2>&1
+	else
+		"$SH" "$AUDIT" -i "$_i" -r "$_r" -q "$@" 2>&1
+	fi
+}
 
 cases() {
 	R=$(world)
@@ -295,9 +332,110 @@ cases() {
 	ok "an empty tree is refused" "$(yes_if not audit_rc "$empty")" "$(run_audit "$empty")"
 }
 
+# ── declared OWNER and GROUP columns (geekdojo/geekdojo-brain#734) ──────────
+# An entry may name the uid and gid it belongs to, for a path a non-root
+# service owns. Every case above is the other half (TC-734-11): entries with
+# no columns, which must keep exactly the root, owner-only contract they had.
+owner_group_cases() {
+	# TC-734-01: declared columns accept declared group access, under the
+	# shipped defaults -u 0 -g 0. This is the shape a store owned by its own
+	# user takes: root defaults, explicit non-root columns that still PASS.
+	fixture 0640 "0640 required /x $ME $MYGID"
+	out=$(audit_with "$FI" "$FR" -u 0 -g 0); rc=$?
+	ok "TC-734-01 declared owner and group with group access pass under the 0:0 defaults" \
+		"$(yes_if [ "$rc" -eq 0 ])" "$out"
+	ok "TC-734-01 the verdict is PASS" "$(yes_if says 'rasputin-atrest: PASS' "$out")" "$out"
+	# TC-734-12: a PASS verdict keeps the shape the smoke parses.
+	ok "TC-734-12 a PASS verdict is exactly 'PASS checked=N'" \
+		"$(yes_if last_line_matches '^rasputin-atrest: PASS checked=1$' "$out")" "$out"
+
+	# TC-734-02: a declared OWNER is compared as written; -u never overrides it.
+	fixture 0600 "0600 required /x $((ME + 1)) $MYGID"
+	out=$(audit_with "$FI" "$FR" -u "$ME" -g "$MYGID"); rc=$?
+	ok "TC-734-02 a wrong declared owner is refused" "$(yes_if [ "$rc" -ne 0 ])" "$out"
+	ok "TC-734-02 the failure names the uid found and the one declared" \
+		"$(yes_if says "is owned by uid $ME, not $((ME + 1))" "$out")" "$out"
+
+	# TC-734-03: a declared GROUP is compared as written; -g never overrides it.
+	fixture 0600 "0600 required /x $ME $((MYGID + 1))"
+	out=$(audit_with "$FI" "$FR" -u "$ME" -g "$MYGID"); rc=$?
+	ok "TC-734-03 a wrong declared group is refused" "$(yes_if [ "$rc" -ne 0 ])" "$out"
+	ok "TC-734-03 the failure names the gid found and the one declared" \
+		"$(yes_if says "is group gid $MYGID, not $((MYGID + 1))" "$out")" "$out"
+	# TC-734-12: a FAIL verdict keeps the shape the smoke parses.
+	ok "TC-734-12 a FAIL verdict keeps its shape and carries the group finding" \
+		"$(yes_if last_line_matches '^rasputin-atrest: FAIL failures=1 checked=1 first=FAIL .*group gid' "$out")" "$out"
+
+	# TC-734-04: declared columns do not loosen the exact mode.
+	fixture 0640 "0600 required /x $ME $MYGID"
+	out=$(audit_with "$FI" "$FR" -u "$ME" -g "$MYGID"); rc=$?
+	ok "TC-734-04 a wrong mode is refused even with owner and group declared" \
+		"$(yes_if [ "$rc" -ne 0 ])" "$out"
+	ok "TC-734-04 the failure names the mode found and the one declared" \
+		"$(yes_if says 'is 0640, declared 0600' "$out")" "$out"
+
+	# TC-734-05: world access is refused even when mode, owner and group all
+	# match the declaration, and with or without columns.
+	fixture 0644 "0644 required /x $ME $MYGID"
+	out=$(audit_with "$FI" "$FR" -u "$ME" -g "$MYGID"); rc=$?
+	ok "TC-734-05 world access is refused with every column matching" \
+		"$(yes_if [ "$rc" -ne 0 ])" "$out"
+	ok "TC-734-05 the failure says it grants world access" \
+		"$(yes_if says 'grants world access' "$out")" "$out"
+	fixture 0604 "0604 required /x"
+	out=$(audit_with "$FI" "$FR" -u "$ME" -g "$MYGID"); rc=$?
+	ok "TC-734-05 world access is refused on an entry with no columns" \
+		"$(yes_if [ "$rc" -ne 0 ])" "$out"
+	ok "TC-734-05 that failure also says it grants world access" \
+		"$(yes_if says 'grants world access' "$out")" "$out"
+
+	# TC-734-06: group access needs a declared GROUP. An OWNER alone is not one.
+	fixture 0640 "0640 required /x"
+	out=$(audit_with "$FI" "$FR" -u "$ME" -g "$MYGID"); rc=$?
+	ok "TC-734-06 group access with no columns is refused" "$(yes_if [ "$rc" -ne 0 ])" "$out"
+	ok "TC-734-06 the failure says no group is declared" \
+		"$(yes_if says 'grants group access and declares no group' "$out")" "$out"
+	fixture 0640 "0640 required /x $ME"
+	out=$(audit_with "$FI" "$FR" -u "$ME" -g "$MYGID"); rc=$?
+	ok "TC-734-06 group access with an OWNER only is refused" "$(yes_if [ "$rc" -ne 0 ])" "$out"
+	ok "TC-734-06 that failure also says no group is declared" \
+		"$(yes_if says 'grants group access and declares no group' "$out")" "$out"
+
+	# TC-734-07: an entry with an OWNER only takes the group default.
+	fixture 0600 "0600 required /x $ME"
+	out=$(audit_with "$FI" "$FR" -u "$ME" -g "$MYGID"); rc=$?
+	ok "TC-734-07 an owner-only entry passes when the group default matches" \
+		"$(yes_if [ "$rc" -eq 0 ])" "$out"
+	ok "TC-734-07 that verdict is PASS" "$(yes_if says 'rasputin-atrest: PASS' "$out")" "$out"
+	out=$(audit_with "$FI" "$FR" -u "$ME" -g 0)
+	ok "TC-734-07 an owner-only entry is held to the group default when it differs" \
+		"$(yes_if says "is group gid $MYGID, not 0" "$out")" "$out"
+
+	# TC-734-08: with no -g, the default gid is root's, as it is in production
+	# (the unit passes no flags). Over the shipped inventory and a correct
+	# tree this user owns, every entry is held to gid 0.
+	R=$(world)
+	out=$(audit_with "$INVENTORY" "$R" -u "$ME"); rc=$?
+	ok "TC-734-08 with no -g a correct tree owned by a non-root group is refused" \
+		"$(yes_if [ "$rc" -ne 0 ])" "$out"
+	ok "TC-734-08 the failure says the default gid is 0" \
+		"$(yes_if says "is group gid $MYGID, not 0" "$out")" "$out"
+
+	# TC-734-09: names are never resolved, so a name fails and names itself.
+	fixture 0600 "0600 required /x openbao"
+	out=$(audit_with "$FI" "$FR" -u "$ME" -g "$MYGID"); rc=$?
+	ok "TC-734-09 an OWNER given as a name is refused" "$(yes_if [ "$rc" -ne 0 ])" "$out"
+	ok "TC-734-09 the failure names the owner name" "$(yes_if says 'not openbao' "$out")" "$out"
+	fixture 0600 "0600 required /x $ME openbao"
+	out=$(audit_with "$FI" "$FR" -u "$ME" -g "$MYGID"); rc=$?
+	ok "TC-734-09 a GROUP given as a name is refused" "$(yes_if [ "$rc" -ne 0 ])" "$out"
+	ok "TC-734-09 the failure names the group name" "$(yes_if says 'not openbao' "$out")" "$out"
+}
+
 for SH in $TEST_SHELLS; do
 	echo "== $SH"
 	cases
+	owner_group_cases
 done
 
 # ── an unreadable mode is a FAIL, never an empty one ───────────────────────
@@ -322,6 +460,21 @@ ok "the failure says the mode could not be read and names the path" \
 	"$(yes_if says 'node.env mode could not be read' "$out")" "$out"
 ok "an unreadable mode is never rendered as an empty mode" \
 	"$(yes_if not says 'is , declared' "$out")" "$out"
+
+# ── an unreadable owner or group is a FAIL, never a skip ───────────────────
+# TC-734-10. The same rule, and the same reason for running under sh only, as
+# the unreadable-mode case above: with no `ls` the owner and group reader
+# answers nothing, and that must fail the path, not pass it.
+SH=owner-reader
+R=$(world)
+out=$(PATH="$(stub_without ls):$PATH" \
+	sh "$AUDIT" -i "$INVENTORY" -r "$R" -u "$ME" -g "$MYGID" -q 2>&1)
+ok "TC-734-10 the failure says the owner or group could not be read and names the path" \
+	"$(yes_if says 'node.env owner or group could not be read' "$out")" "$out"
+ok "TC-734-10 an unreadable owner or group is a FAIL" \
+	"$(yes_if says 'rasputin-atrest: FAIL' "$out")" "$out"
+ok "TC-734-10 an unreadable owner or group is never a PASS" \
+	"$(yes_if not says 'rasputin-atrest: PASS' "$out")" "$out"
 
 # ── the image's own declarations, shell-independent ─────────────────────────
 SH=unit
