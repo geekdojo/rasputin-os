@@ -32,6 +32,14 @@
 #      new build's kernel, the running kernel (uname) is the new build's, the
 #      kernel-match verdict says MATCH, rauc.slot=B, the image version is the
 #      new one, docker is active, docker0 exists, /sys/module/bridge exists.
+#      The secrets-store binary (geekdojo/geekdojo-brain#798): `bao version`
+#      reports the version package/openbao/openbao.mk pins, its LICENSE and
+#      source notice are there and the notice names that version, the static
+#      openbao user is 990:990, /usr/bin/bao is root:root 0755, and nothing
+#      runs it. Boot 2 is where these live because it is the only boot of THIS
+#      build's rootfs with a shell into the guest, on both arches, and it is an
+#      OTA'd node: its persistent shadow was seeded by the old image and has no
+#      openbao row, which is exactly the path `id openbao` must work on.
 #   4. Roll back without committing: arm64 powers off without mark-good, and the
 #      next NORMAL boot falls back to the [all] partition (the one-shot rollback);
 #      amd64 marks the booted slot bad, and GRUB falls back to A. Assert slot A
@@ -58,11 +66,16 @@ WORK="${WORK:-/tmp/update-smoke}"
 HERE="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
 KID="$HERE/../scripts/kernel-id.sh"
 . "$HERE/lib/qemu-common.sh"
+. "$HERE/lib/mk-var.sh"
 
 case "$ARCH" in amd64|arm64) ;; *) echo "::error::unknown arch '$ARCH'"; exit 2 ;; esac
 for f in "$OLD_IMG" "$BUNDLE" "$NEW_IMG"; do
 	[ -f "$f" ] || { echo "::error::no such file: $f"; exit 2; }
 done
+# The OpenBao version this build pins, read with real make the way Buildroot
+# reads it; boot 2's store checks compare against it.
+BAO_PIN="$(mk_var "$HERE/../package/openbao/openbao.mk" OPENBAO_VERSION)" \
+	|| { echo "::error::Could not read the OpenBao pin from package/openbao/openbao.mk, so boot 2's store checks have nothing to compare against."; exit 2; }
 
 SSH_PORT=12222
 BUDGET=1800        # hard bound on one QEMU run (a whole boot + install session)
@@ -300,6 +313,27 @@ if boot 2; then
 		"rasputin-kernel-match: MATCH "*) pass "boot 2: kernel-match verdict ($KM)" ;;
 		*) fail "boot 2: kernel-match verdict is not MATCH: '${KM:-<none on the console>}'" ;;
 	esac
+	# The secrets-store binary (geekdojo/geekdojo-brain#798). Only busybox
+	# applets the image has: no stat and no pgrep, so ls -ln and pidof.
+	BAO_LINE="$(ssh_guest '/usr/bin/bao version' 2>/dev/null | tr -d '\r' | head -1)"
+	case "$BAO_LINE" in
+		"OpenBao v$BAO_PIN "*) pass "boot 2: bao version reports the pin ($BAO_LINE)" ;;
+		*) fail "boot 2: /usr/bin/bao version: want a first line starting 'OpenBao v$BAO_PIN ', got '${BAO_LINE:-<nothing>}'" ;;
+	esac
+	BAO_RAN="$(printf '%s\n' "$BAO_LINE" | sed -n 's/^OpenBao v\([^ ]*\) .*/\1/p')"
+	expect "boot 2: the OpenBao LICENSE is installed" yes "$(guest_yes 'test -s /usr/share/licenses/openbao/LICENSE')"
+	expect "boot 2: the OpenBao source notice is installed" yes "$(guest_yes 'test -s /usr/share/licenses/openbao/SOURCE')"
+	expect "boot 2: the source notice names the version bao reported" "${BAO_RAN:-<no version from bao>}" \
+		"$(ssh_guest 'cat /usr/share/licenses/openbao/SOURCE' 2>/dev/null | sed -n 's/^OpenBao \([^ ]*\) is distributed under the Mozilla Public License 2\.0\.$/\1/p')"
+	expect "boot 2: openbao uid" 990 "$(ssh_guest 'id -u openbao' 2>/dev/null)"
+	expect "boot 2: openbao gid" 990 "$(ssh_guest 'id -g openbao' 2>/dev/null)"
+	expect "boot 2: /usr/bin/bao mode, owner and group" "-rwxr-xr-x 0 0" \
+		"$(ssh_guest 'ls -ln /usr/bin/bao' 2>/dev/null | awk '{print $1, $3, $4}')"
+	# rc=1 only: pidof's "no such process". rc=127 (no pidof) and any PID fail,
+	# so this cannot pass because the tool is missing.
+	expect "boot 2: nothing runs bao (pidof bao)" rc=1 "$(ssh_guest 'pidof bao; echo rc=$?' 2>/dev/null)"
+	expect "boot 2: no failed unit names openbao or bao" "" \
+		"$(ssh_guest 'systemctl --failed --no-legend --plain' 2>/dev/null | grep -i bao)"
 	if ! ssh_guest 'systemctl is-active docker' >/dev/null 2>&1; then
 		ssh_guest 'journalctl -b -u docker --no-pager | tail -15' 2>&1 | sed 's/^/    docker: /'
 	fi

@@ -237,6 +237,14 @@ jobs:
         env:
           REQUIRE_BUSYBOX: "1"
         run: sh test/kernel-match-test.sh
+      # The pinned secrets-store binary (geekdojo/geekdojo-brain#798): the
+      # per-arch tarball map fails the build on an unmapped architecture only
+      # when the store is on, openbao.hash covers every tarball the map can ask
+      # for, and the hand-written MPL source notice names the pinned version and
+      # no other. openbao.mk is evaluated with real GNU make; no make is a
+      # failure, not a skip. No REQUIRE_BUSYBOX: nothing here runs on the node.
+      - name: OpenBao package tests
+        run: sh test/openbao-package-test.sh
       # release.yml's publish step runs scripts/release-target-guard.sh before
       # and after `gh release create` to prove the tag is on the commit the
       # images were built from. Every exit status, against a throwaway git
