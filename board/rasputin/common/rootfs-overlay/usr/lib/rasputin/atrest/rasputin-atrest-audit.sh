@@ -19,14 +19,17 @@
 # ignores it (see the unit file); the smoke reads the verdict line.
 #
 # Usage:
-#   rasputin-atrest-audit.sh [-i INVENTORY] [-r ROOT] [-u UID] [-q]
+#   rasputin-atrest-audit.sh [-i INVENTORY] [-r ROOT] [-u UID] [-g GID] [-q]
 #     -i  inventory file (default /usr/lib/rasputin/atrest/inventory)
 #     -r  prefix every inventory path with ROOT — for the test harness, which
 #         builds a synthetic tree rather than a machine
-#     -u  the uid every declared path must belong to (default 0). Only the
-#         test harness passes this: it cannot create root-owned files, and a
-#         harness that turned the ownership check OFF would be testing a
-#         different audit from the one that ships.
+#     -u  the uid an entry with no OWNER column must belong to (default 0).
+#     -g  the gid an entry with no GROUP column must belong to (default 0).
+#         Only the test harness passes -u or -g: it cannot create root-owned
+#         files, and a harness that turned the ownership check OFF would be
+#         testing a different audit from the one that ships. An OWNER or GROUP
+#         the inventory declares is always compared as written; neither flag
+#         overrides it.
 #     -q  do not write to /dev/kmsg (the test harness; also what happens
 #         automatically when /dev/kmsg cannot be written)
 #
@@ -38,13 +41,15 @@ set -u
 INVENTORY=/usr/lib/rasputin/atrest/inventory
 ROOT=
 QUIET=
-WANT_UID=0
+DEFAULT_UID=0
+DEFAULT_GID=0
 
 while [ $# -gt 0 ]; do
 	case "$1" in
 	-i) INVENTORY="$2"; shift 2 ;;
 	-r) ROOT="$2"; shift 2 ;;
-	-u) WANT_UID="$2"; shift 2 ;;
+	-u) DEFAULT_UID="$2"; shift 2 ;;
+	-g) DEFAULT_GID="$2"; shift 2 ;;
 	-q) QUIET=1; shift ;;
 	*) echo "rasputin-atrest-audit: unknown argument: $1" >&2; exit 2 ;;
 	esac
@@ -60,8 +65,8 @@ if [ ! -r "$INVENTORY" ]; then
 	exit 1
 fi
 
-# mode PATH  — the four-digit octal mode, or empty when it cannot be read.
-# owner PATH — the numeric owner uid, or empty when it cannot be read.
+# mode PATH        — the four-digit octal mode, or empty when it cannot be read.
+# owner_group PATH — "UID GID", numeric, or empty when they cannot be read.
 #
 # WHY NOT stat(1). The appliance image ships no stat at all: busybox is built
 # without the applet and there is no coreutils. The first version of this
@@ -106,12 +111,16 @@ mode() {
 	echo "$_out"
 }
 
-owner() {
-	# Column 3 of `ls -ldn` is the numeric uid. Its POSITION is stable across
-	# busybox, coreutils and BSD ls, and the suffix characters that make
-	# column 1 unsafe to parse do not shift it. -d so a symlink is reported
-	# rather than its target, which is what the mode reader above does too.
-	ls -ldn "$1" 2>/dev/null | awk 'NR == 1 { print $3 }'
+owner_group() {
+	# Columns 3 and 4 of `ls -ldn` are the numeric uid and gid. Their
+	# POSITIONS are stable across busybox, coreutils and BSD ls, and the
+	# suffix characters that make column 1 unsafe to parse do not shift them.
+	# -n so neither is ever a name: the inventory declares numbers, and a
+	# name lookup would be a second reader that a synthetic tree under -r has
+	# no passwd file for. -d so a symlink is reported rather than its target,
+	# which is what the mode reader above does too. Both columns or nothing,
+	# so a half-read answer cannot compare equal to anything.
+	ls -ldn "$1" 2>/dev/null | awk 'NR == 1 && $3 != "" && $4 != "" { print $3, $4 }'
 }
 
 # Failures are collected in a file rather than a variable: the sweep reads
@@ -146,7 +155,7 @@ owner_only() {
 	[ "$(( 0$1 & 0077 ))" -eq 0 ]
 }
 
-while read -r col1 col2 col3 _rest; do
+while read -r col1 col2 col3 col4 col5 _rest; do
 	case "$col1" in
 	'' | \#*) continue ;;
 	esac
@@ -179,6 +188,12 @@ while read -r col1 col2 col3 _rest; do
 	want="$col1"
 	presence="$col2"
 	path="$ROOT$col3"
+	# OWNER and GROUP are optional, and an entry without them is root's: the
+	# defaults are 0 on the appliance. Group access is allowed only where a
+	# GROUP is declared, so an entry written before these columns existed
+	# keeps exactly the contract it had.
+	want_uid="${col4:-$DEFAULT_UID}"
+	want_gid="${col5:-$DEFAULT_GID}"
 
 	if [ ! -e "$path" ]; then
 		if [ "$presence" = "required" ]; then
@@ -205,15 +220,29 @@ while read -r col1 col2 col3 _rest; do
 		fail "FAIL $path is $got, declared $want"
 		continue
 	fi
-	if ! owner_only "$got"; then
-		fail "FAIL $path is $got, which grants group or world access"
+	# World access is refused whatever the entry declares. Group access is
+	# refused unless the entry names the group it is meant for.
+	if [ "$(( 0$got & 0007 ))" -ne 0 ]; then
+		fail "FAIL $path is $got, which grants world access"
 		continue
 	fi
-	o="$(owner "$path")"
-	if [ -z "$o" ]; then
-		fail "FAIL $path owner could not be read"
-	elif [ "$o" != "$WANT_UID" ]; then
-		fail "FAIL $path is owned by uid $o, not $WANT_UID"
+	if [ -z "$col5" ] && [ "$(( 0$got & 0070 ))" -ne 0 ]; then
+		fail "FAIL $path is $got, which grants group access and declares no group"
+		continue
+	fi
+	og="$(owner_group "$path")"
+	if [ -z "$og" ]; then
+		fail "FAIL $path owner or group could not be read"
+		continue
+	fi
+	o="${og% *}"
+	g="${og#* }"
+	# Compared as strings, never resolved: a name such as `openbao` in the
+	# inventory never equals a numeric id, so it fails and names itself.
+	if [ "$o" != "$want_uid" ]; then
+		fail "FAIL $path is owned by uid $o, not $want_uid"
+	elif [ "$g" != "$want_gid" ]; then
+		fail "FAIL $path is group gid $g, not $want_gid"
 	fi
 done <"$INVENTORY"
 

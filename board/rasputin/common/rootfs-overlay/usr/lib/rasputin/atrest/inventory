@@ -14,14 +14,23 @@
 #
 # Two kinds of line, whitespace-separated. Paths have no spaces.
 #
-#   MODE  PRESENCE  PATH
+#   MODE  PRESENCE  PATH  [OWNER  [GROUP]]
 #     MODE      the exact octal mode this path must have.
 #     PRESENCE  `required` — absent is a failure.
 #               `optional` — absent is fine: the path belongs to one role, or
 #                            appears only once something has run. Present with
 #                            the wrong mode is still a failure.
-#     Every entry is also checked for root ownership and for any group or
-#     world access, whatever MODE says.
+#     OWNER     optional numeric uid the path must belong to. Default 0 (root).
+#     GROUP     optional numeric gid the path must belong to. Default 0 (root).
+#               Numbers, never names: the audit reads ids with `ls -ldn` and
+#               resolves nothing, so a name here always fails. Name the user
+#               or group in a comment beside the entry instead. GROUP needs an
+#               OWNER before it.
+#     Every entry is also checked for its owner and group, and for access by
+#     anyone else, whatever MODE says:
+#       - world access is always refused;
+#       - group access is refused unless the entry declares a GROUP.
+#     So an entry with neither column must be root:root and owner-only.
 #
 #   sweep  PATH
 #     Every file under PATH, recursively, must be owner-only. This is the half
