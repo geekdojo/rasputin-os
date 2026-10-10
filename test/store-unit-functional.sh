@@ -281,9 +281,10 @@ inside "rm -f $V/openbao-seal/seal-key; systemctl reset-failed openbao.service 2
 wait_for "openbao.service is failed after the missing seal key" \
 	'[ "$(systemctl show openbao.service -p ActiveState --value)" = failed ]' || fails=$((fails + 1))
 st="$(show ConditionResult) $(show ActiveState) $(show Result)"
-check "ConditionResult=yes and ActiveState=failed (got '$st')" "$(yes_if contains 'yes failed' "$st")"
+check "ConditionResult=yes, ActiveState=failed, Result=exit-code (got '$st')" "$(yes_if [ "$st" = "yes failed exit-code" ])"
 # systemd 258.7 names the failed step, not the credential, at its default log
-# level: "Failed to set up credentials: <errno>" and status 243/CREDENTIALS.
+# level: "Failed at step CREDENTIALS spawning /usr/bin/bao" and status
+# 243/CREDENTIALS.
 journal=$(inside "journalctl -u openbao.service --no-pager -o cat" | grep 'Failed at step CREDENTIALS' | head -1)
 check "the unit's journal says the credentials could not be set up" "$(yes_if [ -n "$journal" ])" \
 	"$(inside "journalctl -u openbao.service --no-pager -o cat | tail -5" | tr '\n' '|')"
@@ -379,38 +380,48 @@ check "nothing under $V outside its two directories changed while it ran" "$(yes
 echo
 echo "6. repeated crashes: the start limit, then recovery (TC-755-17)"
 inside "systemctl reset-failed openbao.service 2>/dev/null; systemctl start openbao.service" >/dev/null 2>&1
+pid=$(show MainPID)
+inside "kill -KILL $pid" >/dev/null 2>&1
+if wait_for "after one SIGKILL, a new active MainPID other than $pid" \
+	"[ \"\$(systemctl show openbao.service -p ActiveState --value)\" = active ] &&
+	 p=\$(systemctl show openbao.service -p MainPID --value) && [ \"\$p\" != 0 ] && [ \"\$p\" != $pid ]"; then
+	check "after one SIGKILL of $pid systemd restarts it: active, MainPID $(show MainPID)" 0
+else
+	check "after one SIGKILL of $pid systemd restarts it" 1 "$(show ActiveState) $(show MainPID)"
+fi
+# The crash loop is systemd's, not this test's: a seal fragment bao cannot
+# parse makes bao exit non-zero on every start, and systemd's own restart
+# delay drives each restart. Nothing below waits on the test reaching a step
+# inside StartLimitIntervalSec.
+inside "systemctl stop openbao.service; systemctl reset-failed openbao.service 2>/dev/null
+printf 'seal \"static\" {\n  this is not hcl\n' >$V/openbao-seal/seal.hcl
+systemctl start openbao.service" >/dev/null 2>&1
 burst=$(show StartLimitBurst)
-echo "  StartLimitBurst $burst, StartLimitIntervalUSec $(show StartLimitIntervalUSec): systemd's defaults"
-kills=0
-while :; do
-	pid=$(show MainPID)
-	[ "$pid" != 0 ] || break
-	inside "kill -KILL $pid" >/dev/null 2>&1
-	kills=$((kills + 1))
-	# The next fact: a new active MainPID, or the unit failed.
-	wait_for "after kill $kills, a new active MainPID or a failed unit" \
-		"s=\$(systemctl show openbao.service -p ActiveState --value); p=\$(systemctl show openbao.service -p MainPID --value);
-		 [ \"\$s\" = failed ] || { [ \"\$s\" = active ] && [ \"\$p\" != 0 ] && [ \"\$p\" != $pid ]; }" || break
-	[ "$(show ActiveState)" = failed ] && break
-	[ "$kills" -le $((burst + 2)) ] || { check "the unit stops restarting within the start limit" 1 "$kills kills and still restarting"; break; }
-done
-# The first start plus StartLimitBurst restarts use up the burst; the start
-# after that is refused, so NRestarts ends at StartLimitBurst.
-st="$(show ActiveState) $(show NRestarts)"
-check "after $kills kills the unit is failed with NRestarts = StartLimitBurst = $burst (got '$st')" \
-	"$(yes_if [ "$st" = "failed $burst" ])"
+echo "  StartLimitBurst $burst, StartLimitIntervalUSec $(show StartLimitIntervalUSec), RestartUSec $(show RestartUSec): systemd's defaults"
+wait_for "openbao.service is failed with no job, after bao rejects its seal config on every start" \
+	'[ "$(systemctl show openbao.service -p ActiveState --value)" = failed ] && [ -z "$(systemctl show openbao.service -p Job --value)" ]' \
+	|| fails=$((fails + 1))
+st="$(show ActiveState) $(show Result)"
+check "the unit is failed and Result keeps the crash's own value, exit-code (got '$st')" "$(yes_if [ "$st" = "failed exit-code" ])"
 job=$(inside "systemctl list-jobs --no-legend --plain" | grep openbao || true)
 check "no job is queued for it" "$(yes_if [ -z "$job" ])" "$job"
+# NRestarts = StartLimitBurst holds here because reset-failed cleared the
+# start-limit counter and the loop's first start is the `systemctl start`
+# above, inside the window: that start plus StartLimitBurst-1 restarts use up
+# the burst, and the restart after them is counted and refused. It is not a
+# general rule: a store that ran longer than StartLimitIntervalSec before it
+# crashed ends at StartLimitBurst+1 (verifier r1, F-755-08).
+nr=$(show NRestarts)
+check "NRestarts = StartLimitBurst = $burst, both from systemctl show (got '$nr')" "$(yes_if [ "$nr" = "$burst" ])"
 line=$(inside "journalctl -u openbao.service --no-pager -o cat" | grep 'Start request repeated too quickly' | tail -1)
 check "the journal says 'Start request repeated too quickly'" "$(yes_if [ -n "$line" ])"
 code=$(health)
 r=1; { contains 'Could not connect' "$code" || contains 'Connection refused' "$code"; } && r=0
 check "sys/health on 127.0.0.1 gets connection refused (got '$code')" "$r"
-err=$(inside "systemctl start openbao.service" 2>&1) && r=1 || r=0
-check "a plain systemctl start is refused" "$r" "$err"
+put_seal
 inside "systemctl reset-failed openbao.service && systemctl start openbao.service" >/dev/null 2>&1
 st=$(show ActiveState)
-check "reset-failed then start brings it back active (got '$st')" "$(yes_if [ "$st" = active ])"
+check "with the valid seal.hcl back, reset-failed then start brings it back active (got '$st')" "$(yes_if [ "$st" = active ])"
 inside "systemctl stop openbao.service" >/dev/null 2>&1
 
 echo
