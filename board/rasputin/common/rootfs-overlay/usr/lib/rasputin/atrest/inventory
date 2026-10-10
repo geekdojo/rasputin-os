@@ -104,6 +104,42 @@
 # modes this image does not set.
 0700  optional  /var/lib/rasputin/journal
 
+# ── the secrets store ──────────────────────────────────────────────────────
+# ADR-0010; geekdojo/geekdojo-brain#754. usr/lib/tmpfiles.d/rasputin.conf
+# creates each directory below with the same mode, uid and gid, and its comment
+# says why the layout is this shape. 990 is the openbao user and group
+# (package/openbao, OPENBAO_USERS); test/openbao-package-test.sh fails if the
+# number here and the package's diverge.
+#
+# The directories are required: tmpfiles creates them on every boot, the same
+# reason console/ is required. The files are optional: their writers (#803 for
+# the seal, #758 for the leaves) put them there, and a node without them yet
+# is not wrong.
+#
+# openbao/ and openbao-audit/ belong to the store's uid and hold only what the
+# store writes. They are NOT swept, for the reason the journal is not: the
+# store sets the modes of their contents, not this image, and the directory
+# mode is what keeps them unreachable.
+0700  required  /var/lib/rasputin/openbao                         990  990
+0700  required  /var/lib/rasputin/openbao-audit                   990  990
+# openbao-seal/ is root's. The seal key and the per-cluster seal fragment reach
+# the store through LoadCredential=, so nothing but root ever opens them here,
+# and every file in it is a secret: swept, below.
+0700  required  /var/lib/rasputin/openbao-seal
+0600  optional  /var/lib/rasputin/openbao-seal/seal-key
+0600  optional  /var/lib/rasputin/openbao-seal/seal.hcl
+# tls/ and the two leaf directories are root's, written by the api. Each leaf
+# directory holds leaf.key and leaf.pem. leaf.pem is NOT declared, and the leaf
+# directories are not swept, for the reason trust/ and bus.crt are not: the api
+# writes a certificate at 0644, public by construction, and every entry here
+# refuses world access. The 0700 directory is what keeps the key unreachable,
+# and the key is declared by name.
+0700  required  /var/lib/rasputin/tls
+0700  required  /var/lib/rasputin/tls/openbao-server
+0600  optional  /var/lib/rasputin/tls/openbao-server/leaf.key
+0700  required  /var/lib/rasputin/tls/openbao-client
+0600  optional  /var/lib/rasputin/tls/openbao-client/leaf.key
+
 # ── NOT declared, and deliberately ─────────────────────────────────────────
 # /var/lib/rasputin/clock — the last-known-good time, written by
 # rasputin-clock-save.service and read by the PID 1 shim to floor the next boot
@@ -120,7 +156,10 @@
 # exception. docker, containerd and tailscale are not swept: their contents
 # belong to those daemons and carry their own modes. bus/ is not swept either
 # — see the exemption above it: it is a certificate and a pin next to the keys,
-# and the keys are declared by name.
+# and the keys are declared by name. openbao-seal/ holds nothing but the seal's
+# secrets, so it is swept; the store's own directories and the leaf
+# directories are not (see the store section).
 sweep  /var/lib/rasputin/console
 sweep  /var/lib/rasputin/agent-state
 sweep  /var/lib/rasputin/coredump
+sweep  /var/lib/rasputin/openbao-seal
