@@ -242,6 +242,31 @@ mkvar_fails "make on PATH is not GNU make" \
 	"Could not read OPENBAO_VERSION from $MK. The make on PATH is not GNU make." \
 	not_gnu_make
 
+echo "── the store's paths carry the package's uid and gid"
+# TC-754-04 (geekdojo/geekdojo-brain#754): tmpfiles.d and the at-rest inventory
+# declare the store's own directories as 990:990, written as numbers. That
+# number has to be the one mkusers gives the openbao user, or every node
+# creates the directories for a uid nothing runs as and the audit fails them.
+# OPENBAO_USERS is read with real make; a failed read leaves the fields empty,
+# which equals nothing below, so it can only fail.
+OVERLAY="$ROOT/board/rasputin/common/rootfs-overlay"
+TMPFILES="$OVERLAY/usr/lib/tmpfiles.d/rasputin.conf"
+INVENTORY="$OVERLAY/usr/lib/rasputin/atrest/inventory"
+USERS=$(mk_var "$MK" OPENBAO_USERS)
+# awk, not `set --`: the line carries a literal * (no password), which word
+# splitting would glob.
+USER_UID=$(printf '%s\n' "$USERS" | awk '{ print $2 }')
+USER_GID=$(printf '%s\n' "$USERS" | awk '{ print $4 }')
+check "TC-754-04 OPENBAO_USERS gives openbao uid 990" "$USER_UID" 990
+check "TC-754-04 OPENBAO_USERS gives openbao gid 990" "$USER_GID" 990
+for d in openbao openbao-audit; do
+	p="/var/lib/rasputin/$d"
+	check "TC-754-04 tmpfiles.d $p owner and group are the package's" \
+		"$(awk -v p="$p" '$1 == "d" && $2 == p { print $4, $5 }' "$TMPFILES")" "$USER_UID $USER_GID"
+	check "TC-754-04 inventory $p owner and group are the package's" \
+		"$(awk -v p="$p" '$3 == p && NF >= 5 { print $4, $5 }' "$INVENTORY")" "$USER_UID $USER_GID"
+done
+
 echo
 if [ "$fails" -gt 0 ]; then echo "$fails check(s) failed"; exit 1; fi
 echo "all OpenBao package checks passed"

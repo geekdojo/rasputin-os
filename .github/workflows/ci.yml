@@ -342,3 +342,18 @@ jobs:
       - uses: actions/checkout@v4
       - name: Persistent journal against real journald + tmpfiles (fallback, flush, mode, caps)
         run: sh test/persistent-journal-functional.sh
+
+  # The secrets store's persistent paths (geekdojo/geekdojo-brain#754) are six
+  # tmpfiles.d lines and six at-rest inventory rows, and what they rest on is
+  # systemd's behaviour: a numeric owner works with no such user, a declared
+  # parent is created at its own mode rather than tmpfiles' 0755, and a `d`
+  # line re-asserts mode and owner on every boot without touching what is
+  # inside. Runs the shipped file through real systemd-tmpfiles 258.7, the
+  # image's version, and the real at-rest audit over the shipped store rows,
+  # in a container.
+  store-paths-functional:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Store paths against real systemd-tmpfiles (fresh node, re-assert, OTA contents kept)
+        run: sh test/store-paths-functional.sh

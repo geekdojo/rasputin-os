@@ -70,25 +70,9 @@ contains() { case "$2" in *"$1"*) return 0 ;; *) return 1 ;; esac; }
 # Fedora 43 shipped systemd 258.7, the same release as the image, so what
 # journald and systemd-tmpfiles do with these files here is what they do on a
 # node. Same base as test/console-shadow-functional.sh.
-# The f43 repos have since moved past 258.7, so the exact build comes from
-# Fedora's updates-archive repo (fedora-repos-archive), which keeps every
-# update build f43 has shipped. It is an ordinary dnf repo with gpgcheck=1, so
-# the packages are verified against Fedora's signing keys; installing koji
-# URLs directly, as this used to, skips that (dnf's localpkg_gpgcheck is 0)
-# and failed CI outright while koji was down for Fedora infrastructure
-# maintenance (2026-10-02, fedora-infrastructure ticket #13500). The build
-# fails loudly if that exact version is no longer installable.
-echo "building test image ($IMAGE)"
-docker build -q -t "$IMAGE" - >/dev/null <<'DOCKERFILE' || { echo "FAILED: could not build the test image"; exit 1; }
-FROM fedora:43
-RUN dnf -y install --setopt=install_weak_deps=False fedora-repos-archive \
- && dnf -y install --setopt=install_weak_deps=False \
-      systemd-258.7-1.fc43 systemd-libs-258.7-1.fc43 \
-      systemd-shared-258.7-1.fc43 systemd-pam-258.7-1.fc43 \
-      util-linux findutils \
- && test "$(rpm -q --qf '%{VERSION}' systemd)" = 258.7 \
- && dnf clean all
-DOCKERFILE
+# test/lib/f43-systemd.sh builds it and refuses any other systemd.
+. "$ROOT/test/lib/f43-systemd.sh"
+f43_systemd_image "$IMAGE" || exit 1
 
 CID=""
 cleanup() { [ -n "$CID" ] && docker rm -f "$CID" >/dev/null 2>&1; CID=""; }
