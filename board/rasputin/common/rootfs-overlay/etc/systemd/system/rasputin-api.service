@@ -4,6 +4,17 @@ After=network-online.target rasputin-firstboot.service
 Wants=network-online.target
 Requires=rasputin-firstboot.service
 RequiresMountsFor=/var/lib/rasputin
+# The secrets store (ADR-0010 F3.1; geekdojo/geekdojo-brain#757). Wants= only:
+# the api pulls the store into its own start, and a store that is skipped,
+# fails or is stopped never stops or fails the api. Not Requires=, BindsTo= or
+# Requisite=: the store is condition-skipped until the api mints its server
+# leaf, and the api itself runs reset-failed and restart on the store after
+# minting, so a hard dependency would keep the api down on first boot or
+# restart it with every store restart. No After=: openbao.service carries
+# Before=rasputin-api.service, so the order is stated once, on the store.
+# test/api-store-wiring-test.sh pins these lines and
+# test/api-store-wiring-functional.sh runs them under real systemd.
+Wants=openbao.service
 # Role gate: this unit ships preset-enabled on every image but only starts
 # on the controlplane — rasputin-firstboot drops this marker on the
 # persistent partition when role==controlplane. (Not ConditionEnvironment:
@@ -73,6 +84,18 @@ Environment=RASPUTIN_NATS_HOST=0.0.0.0
 # hasExternal needs BOTH, so setting the URL alone was always self-hosted, and
 # removing it keeps that branch identical while letting the name follow the
 # cluster id.
+# The secrets store client (ADR-0010 F3.1; geekdojo/geekdojo-brain#757): the
+# backend selector and the store's loopback listener. There are no CA,
+# client-certificate or credential path lines: the api derives the trust
+# directory and its client leaf from RASPUTIN_DATA_DIR above. Only an api
+# release with the store client reads these, and the selector is what arms it
+# to mint the store's leaf and restart the store, so
+# test/api-store-wiring-test.sh holds the api pin at the last release without
+# the client until the store's config ships, and from then on ties this address
+# to the config's listener. node.env cannot carry them from a seed: firstboot
+# writes a fixed key list.
+Environment=RASPUTIN_SECRETSTORE_BACKEND=openbao
+Environment=RASPUTIN_SECRETSTORE_ADDR=https://127.0.0.1:8200
 EnvironmentFile=-/var/lib/rasputin/node.env
 ExecStart=/usr/bin/rasputin-api
 Restart=always

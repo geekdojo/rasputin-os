@@ -90,6 +90,16 @@ jobs:
           done
           grep -q '^name: RASPUTIN' external.desc
           echo "external tree structure OK"
+      # The api pin guard (geekdojo/geekdojo-brain#757, F-757-06). ci.yml runs
+      # it on every pull request, but a red PR check does not stop a merge, and
+      # ci.yml does not run on a tag or a dispatch. Every build job needs this
+      # one, so here it stops any image being built from a tree whose api pin
+      # would arm the secrets store before its config ships, or whose store
+      # listener is not the api's address. The whole static test runs, not the
+      # guard alone: it is one script and takes seconds. GNU make is on the
+      # runner.
+      - name: API store wiring and pin guard
+        run: sh test/api-store-wiring-test.sh
 
   build:
     needs: validate
