@@ -1,8 +1,11 @@
 # The node secrets store (ADR-0010; geekdojo/geekdojo-brain#755). The image's
-# first sandboxed, non-root third-party daemon. Installed but NOT wanted: there
-# is no [Install] section, so Buildroot's preset-all leaves it `static` and
-# nothing starts it until #756 bakes its config and enables it with a wants
-# symlink. test/store-unit-test.sh asserts every line here;
+# first sandboxed, non-root third-party daemon. Not enabled: there is no
+# [Install] section, so Buildroot's preset-all leaves it `static`, and no
+# *.wants link names it (#756 adds one). It is still started on a control
+# plane: rasputin-api.service carries Wants=openbao.service (#757), so the
+# api's start pulls the store in. Until the api mints the store CA and the
+# server leaf, the conditions below skip it cleanly.
+# test/store-unit-test.sh asserts every line here;
 # test/store-unit-functional.sh runs it under real systemd 258.7 with the real
 # pinned bao.
 [Unit]
