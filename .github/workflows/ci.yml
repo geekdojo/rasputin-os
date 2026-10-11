@@ -253,6 +253,18 @@ jobs:
       # store-paths-functional job runs it under real systemd.
       - name: Store unit tests
         run: sh test/store-unit-test.sh
+      # The seal-key oneshot (geekdojo/geekdojo-brain#803) decides, on every
+      # boot of every control plane, whether to mint the key the whole store is
+      # sealed with. Minting one over existing data loses the data; failing
+      # open on an unreadable directory does the same; a key byte in a log is a
+      # leaked seal key. Every branch against a scratch tree, every run searched
+      # for the key, under dash, bash, busybox ash and busybox's own applets,
+      # plus the unit's directives and the api's gate path. The
+      # store-paths-functional job runs it under real systemd.
+      - name: Seal-key oneshot tests
+        env:
+          REQUIRE_BUSYBOX: "1"
+        run: sh test/seal-key-test.sh
       # release.yml's publish step runs scripts/release-target-guard.sh before
       # and after `gh release create` to prove the tag is on the commit the
       # images were built from. Every exit status, against a throwaway git
@@ -375,3 +387,11 @@ jobs:
       # job as the store paths: it builds the same image.
       - name: Store unit against real systemd and the pinned bao (conditions, sandbox, credentials, crash loop)
         run: sh test/store-unit-functional.sh
+      # The seal-key oneshot (geekdojo/geekdojo-brain#803) under real systemd
+      # 258.7 as PID 1, four boots on one volume: created before the store and
+      # the api, untouched on the next boot, refused with the api held back by
+      # its assertion when store data has no key, failed with the api still up
+      # on a short random read, and no key byte in any boot's journal. Same job:
+      # it builds the same image.
+      - name: Seal-key oneshot against real systemd (created, untouched, refused, failed)
+        run: sh test/seal-key-functional.sh

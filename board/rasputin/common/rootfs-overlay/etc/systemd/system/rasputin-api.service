@@ -11,6 +11,12 @@ RequiresMountsFor=/var/lib/rasputin
 # runtime `systemctl enable`: /etc is read-only squashfs.)
 # See os-images/provisioning.md §2.
 ConditionPathExists=/var/lib/rasputin/role.controlplane
+# S12 (geekdojo/geekdojo-brain#803): rasputin-seal-key.service writes this gate
+# when the secrets store has data but no seal key. The api then does not start,
+# so the cluster does not come up on a store nothing can open. A failed
+# assertion leaves the api inactive with AssertResult=no; it is not a failed
+# unit. The oneshot's Before= decides the gate before this is checked.
+AssertPathExists=!/run/rasputin-seal-key/refused
 
 [Service]
 # Image defaults via Environment=; the seed-written node.env can OVERRIDE

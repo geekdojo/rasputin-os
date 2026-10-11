@@ -38,6 +38,11 @@
 #      openbao user is 990:990, /usr/bin/bao is root:root 0755, and nothing
 #      runs it. Its unit, openbao.service, is installed and not wanted:
 #      `systemctl is-enabled` says static (geekdojo/geekdojo-brain#755).
+#      The seal key (geekdojo/geekdojo-brain#803): an OTA'd control plane never
+#      runs firstboot again, so the every-boot oneshot is what creates its key.
+#      rasputin-seal-key.service's Result is success and it is not in
+#      `systemctl --failed`, the key is 32 bytes 0600 0:0, the fragment is
+#      0600 0:0, and the outcome record says created.
 #      Boot 2 is where these live because it is the only boot of THIS
 #      build's rootfs with a shell into the guest, on both arches, and it is an
 #      OTA'd node: its persistent shadow was seeded by the old image and has no
@@ -342,6 +347,19 @@ if boot 2; then
 	# unit either way.
 	expect "boot 2: openbao.service is installed and not wanted" static \
 		"$(ssh_guest 'systemctl is-enabled openbao.service' 2>/dev/null)"
+	# The seal key on an OTA'd, provisioned control plane (TC-803-25). Result
+	# alone is success for a unit that never ran, so the files and the record
+	# are checked too.
+	expect "boot 2: rasputin-seal-key.service Result" success \
+		"$(ssh_guest 'systemctl show rasputin-seal-key.service -p Result --value' 2>/dev/null)"
+	expect "boot 2: seal-key mode, owner, group and size" "-rw------- 0 0 32" \
+		"$(ssh_guest 'ls -ln /var/lib/rasputin/openbao-seal/seal-key' 2>/dev/null | awk '{print $1, $3, $4, $5}')"
+	expect "boot 2: seal.hcl mode, owner and group" "-rw------- 0 0" \
+		"$(ssh_guest 'ls -ln /var/lib/rasputin/openbao-seal/seal.hcl' 2>/dev/null | awk '{print $1, $3, $4}')"
+	expect "boot 2: the seal-key outcome record says created" created \
+		"$(ssh_guest 'sed -n "s/^outcome=//p" /run/rasputin-seal-key/outcome' 2>/dev/null)"
+	expect "boot 2: systemctl --failed does not list rasputin-seal-key" "" \
+		"$(ssh_guest 'systemctl --failed --no-legend --plain' 2>/dev/null | grep rasputin-seal-key)"
 	if ! ssh_guest 'systemctl is-active docker' >/dev/null 2>&1; then
 		ssh_guest 'journalctl -b -u docker --no-pager | tail -15' 2>&1 | sed 's/^/    docker: /'
 	fi

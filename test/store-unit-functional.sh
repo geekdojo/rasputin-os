@@ -19,6 +19,11 @@
 #   3  first boot, no leaf or no CA: skipped; then a restart starts it
 #      (TC-755-11)
 #   4  no seal key: fails, never skips (TC-755-12)
+#
+# The seal key and the seal fragment are NOT harness: the real
+# rasputin-seal-key.sh (#803) writes them in the container, against the empty
+# store tree tmpfiles makes, so scenario 5's credential and sys/health checks
+# run bao on the oneshot's own output under 258.7 (TC-803-24).
 #   5  the running store: its user, capabilities, environment, core limit,
 #      credentials, writable paths and memory (TC-755-13 to TC-755-16, 18)
 #   6  repeated crashes: the start limit, then recovery by reset-failed and
@@ -29,8 +34,8 @@
 #   * the store's main config, which is #756's to bake: a listener on
 #     127.0.0.1:8200 naming the credentials, and PebbleDB in the data
 #     directory;
-#   * the seal fragment and seal key, which #803 writes, and a throwaway PKI
-#     standing in for the store CA and the server leaf the api mints (#758);
+#   * a throwaway PKI standing in for the store CA and the server leaf the
+#     api mints (#758);
 #   * `mount --make-rshared /`. A booted image gets a shared root from systemd
 #     itself (mount-setup); a container's root is private, and without this the
 #     credentials systemd mounts never reach the service.
@@ -163,7 +168,6 @@ printf 'extendedKeyUsage=clientAuth\n' >"$P/client.ext"
 			-days 2 -extfile "$P/$n.ext" -out "$P/$n.pem" || exit 1
 	done
 } >/dev/null 2>&1 || { echo "FAILED: openssl could not make the test PKI."; exit 1; }
-head -c 32 /dev/urandom >"$P/seal-key"
 
 # --- the container ---------------------------------------------------------------
 f43_systemd_image "$IMAGE" || exit 1
@@ -206,15 +210,26 @@ storage \"pebbledb\" {
   path = \"$V/openbao\"
 }
 EOF
-# TEST HARNESS: the seal fragment #803 writes.
-cat >/pki/seal.hcl <<'EOF'
-seal \"static\" {
-  current_key_id = \"store-unit-test\"
-  current_key    = \"file://$CREDS/seal-key\"
-}
-EOF
 systemctl daemon-reload
 " || { echo "FAILED: could not install the unit and the test harness into the container."; exit 1; }
+
+# The seal key and fragment, from the real oneshot (#803, TC-803-24), run as
+# root with its production paths. Its kernel-log line goes to /dev/null: in a
+# privileged container /dev/kmsg is the host's. A copy of its output is kept
+# in /pki, so put_seal below re-installs exactly what the oneshot wrote.
+echo
+echo "the seal key and fragment, from the real rasputin-seal-key.sh (TC-803-24)"
+out=$(inside "RASPUTIN_SEALKEY_KMSG=/dev/null sh /overlay/usr/lib/rasputin/seal-key/rasputin-seal-key.sh; echo rc=\$?" 2>&1)
+check "the oneshot exits 0" "$(yes_if contains 'rc=0' "$out")" "$out"
+check "the oneshot reports outcome=created" "$(yes_if contains 'rasputin-seal-key: outcome=created' "$out")" "$out"
+inside "cp -p $V/openbao-seal/seal-key /pki/seal-key && cp -p $V/openbao-seal/seal.hcl /pki/seal.hcl" \
+	|| { echo "FAILED: could not keep a copy of the oneshot's key and fragment."; exit 1; }
+ONESHOT_SHA=$(inside "cat $V/openbao-seal/seal-key $V/openbao-seal/seal.hcl | sha256sum")
+# seal_is_oneshots LABEL — the installed pair is byte-identical to the oneshot's.
+seal_is_oneshots() {
+	check "$1: the installed key and fragment are the oneshot's, byte for byte" \
+		"$(yes_if [ "$(inside "cat $V/openbao-seal/seal-key $V/openbao-seal/seal.hcl | sha256sum")" = "$ONESHOT_SHA" ])"
+}
 
 # The credential sources, written as their writers would (root, 0600 or 0644).
 put_seal() { inside "install -m 0600 /pki/seal-key $V/openbao-seal/seal-key && install -m 0600 /pki/seal.hcl $V/openbao-seal/seal.hcl"; }
@@ -256,6 +271,7 @@ check "control: the same unit with [Install] appended comes out enabled (got '$s
 echo
 echo "2. no role marker: skipped (TC-755-10)"
 if ! { put_seal && put_ca && put_leaf; }; then check "the credential sources are written" 1; fi
+seal_is_oneshots "put_seal"
 inside "rm -f $V/role.controlplane; systemctl start openbao.service" >/dev/null 2>&1
 skipped "no role marker"
 
@@ -419,6 +435,7 @@ code=$(health)
 r=1; { contains 'Could not connect' "$code" || contains 'Connection refused' "$code"; } && r=0
 check "sys/health on 127.0.0.1 gets connection refused (got '$code')" "$r"
 put_seal
+seal_is_oneshots "put_seal after the crash loop"
 inside "systemctl reset-failed openbao.service && systemctl start openbao.service" >/dev/null 2>&1
 st=$(show ActiveState)
 check "with the valid seal.hcl back, reset-failed then start brings it back active (got '$st')" "$(yes_if [ "$st" = active ])"
