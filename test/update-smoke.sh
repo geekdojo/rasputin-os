@@ -47,8 +47,9 @@
 #      is there. Then the harness mints a store-CA server leaf (the image's
 #      api pin does not mint one yet) and restarts it: active as uid 990, its
 #      only socket 127.0.0.1:8200, `bao status` answers "Initialized false"
-#      with a store-CA client leaf and fails at TLS with none, with a
-#      controlplane-CA leaf and with the server leaf, no OOM kill, and the
+#      with a store-CA client leaf and is refused in the TLS handshake, as the
+#      store's own journal records, with none, with a controlplane-CA leaf
+#      and with the server leaf, no OOM kill, and the
 #      at-rest audit passes with the store running. With the role marker
 #      moved aside it is skipped again, naming the role condition, and with
 #      the marker back it is active. The harness's CA keys and test leaves
@@ -72,7 +73,9 @@
 #
 # Every assertion is collected and reported; the script exits 1 if any failed,
 # so one run shows the whole picture (a red run lists every broken property, not
-# the first). Every wait is a poll on a checkable fact with a hard try count.
+# the first). Every wait is a poll on a checkable fact with a hard try count,
+# or, for the store's handshake-error lines, a journal follow that ends on the
+# line, bounded by its SSH call's timeout.
 set -u
 
 ARCH="${1:?usage: update-smoke.sh <amd64|arm64> <old.img> <new.raucb> <new.img> <new-version>}"
@@ -449,15 +452,28 @@ if boot 2; then
 		else
 			fail "boot 2: bao status with a store-CA client leaf: want 'Initialized false' and rc=2, got: $(printf '%s' "$ST" | tr '\n' '|')"
 		fi
-		for c in "no client certificate:" \
-			"the controlplane CA's client leaf:-client-cert=$GUEST_PKI/mesh-client.pem -client-key=$GUEST_PKI/mesh-client.key" \
-			"the server leaf as a client:-client-cert=$GUEST_PKI/server.pem -client-key=$GUEST_PKI/server.key"; do
-			ST="$(bao_status "${c#*:}")"
-			if printf '%s\n' "$ST" | grep -qx 'rc=1' && printf '%s\n' "$ST" | grep -Eqi 'tls|certificate' \
-				&& ! printf '%s\n' "$ST" | grep -qi 'connection refused'; then
-				pass "boot 2: bao status with ${c%%:*} is refused at TLS, exit 1"
+		# The refusals. Under TLS 1.3 bao's client reports the store's refusal
+		# as an alert, a failed write or an HTTP/2 setup failure, by timing
+		# (F-756-16), so its words are not the fact. The fact is the store's own
+		# "http: TLS handshake error" line naming the reason, read by
+		# test/lib/tls-refusal.sh on the guest from a cursor taken before the
+		# attempt; the SSH call's timeout is its deadline. With it: rc=1, no
+		# HTTP status, and no connection refusal.
+		ssh_guest "umask 077 && cat >$GUEST_PKI/tls-refusal.sh" <"$HERE/lib/tls-refusal.sh" \
+			|| fail "boot 2: could not copy test/lib/tls-refusal.sh to the guest"
+		for c in "no client certificate|provide a certificate|" \
+			"the controlplane CA's client leaf|certificate signed by unknown authority|-client-cert=$GUEST_PKI/mesh-client.pem -client-key=$GUEST_PKI/mesh-client.key" \
+			"the server leaf as a client|certificate specifies an incompatible key usage|-client-cert=$GUEST_PKI/server.pem -client-key=$GUEST_PKI/server.key"; do
+			_who=${c%%|*}; _rest=${c#*|}; _why=${_rest%%|*}; _args=${_rest#*|}
+			ST="$(ssh_guest "BAO_ADDR=https://127.0.0.1:8200 sh $GUEST_PKI/tls-refusal.sh openbao.service '$_why' bao status -ca-cert=$GUEST_PKI/store-ca.pem $_args" 2>/dev/null | tr -d '\r')"
+			_client=$(printf '%s\n' "$ST" | sed -n 's/^client: //p')
+			_line=$(printf '%s\n' "$ST" | sed -n 's/^journal: //p')
+			case "$_line" in *"http: TLS handshake error from 127.0.0.1:"*"$_why"*) _logged=1 ;; *) _logged=0 ;; esac
+			case "$_client" in *"Code: "*|*"onnection refused"*) _client_ok=0 ;; *"|rc=1") _client_ok=1 ;; *) _client_ok=0 ;; esac
+			if [ "$_logged" = 1 ] && [ "$_client_ok" = 1 ]; then
+				pass "boot 2: bao status with $_who is refused in the TLS handshake: the store logged '$_line'; the client got no HTTP status (rc=1)"
 			else
-				fail "boot 2: bao status with ${c%%:*}: want rc=1 and a TLS failure, not a connection refusal, got: $(printf '%s' "$ST" | tr '\n' '|')"
+				fail "boot 2: bao status with $_who: want the store's 'http: TLS handshake error … $_why' line, rc=1, no HTTP status and no connection refusal, got: $(printf '%s' "${ST:-<nothing; the SSH call ended with no output within ${SSH_CALL_TIMEOUT:-120}s>}" | tr '\n' '|')"
 			fi
 		done
 		expect "boot 2: the store's memory.events oom_kill" 0 \
@@ -477,6 +493,8 @@ if boot 2; then
 		# every line already sent, so each count is read after its fact.
 		PID1_LOG="org.freedesktop.systemd1 /org/freedesktop/systemd1 org.freedesktop.systemd1.Manager LogTarget"
 		_target="$(ssh_guest "busctl get-property $PID1_LOG" 2>/dev/null | tr -d '\r' | sed -n 's/^s "\(.*\)"$/\1/p')"
+		# Without the old target there is nothing to restore it to (F-756-17).
+		[ -n "$_target" ] || fail "boot 2: role marker moved aside: could not read PID 1's LogTarget with busctl, so the step cannot restore it"
 		ssh_guest "busctl set-property $PID1_LOG s journal-or-kmsg" >/dev/null 2>&1
 		expect "boot 2: role marker moved aside: PID 1 logs to the journal for the step (was ${_target:-?})" 's "journal-or-kmsg"' \
 			"$(ssh_guest "busctl get-property $PID1_LOG" 2>/dev/null | tr -d '\r')"
@@ -490,7 +508,11 @@ if boot 2; then
 		else
 			fail "boot 2: role marker moved aside: no new journal line names ConditionPathExists=$ROLE (before ${_before:-?}, after ${_after:-?})"
 		fi
-		[ -z "$_target" ] || ssh_guest "busctl set-property $PID1_LOG s $_target" >/dev/null 2>&1
+		if [ -n "$_target" ]; then
+			ssh_guest "busctl set-property $PID1_LOG s $_target" >/dev/null 2>&1
+			expect "boot 2: role marker moved aside: PID 1's log target is restored to $_target" "s \"$_target\"" \
+				"$(ssh_guest "busctl get-property $PID1_LOG" 2>/dev/null | tr -d '\r')"
+		fi
 		expect "boot 2: role marker moved aside: nothing runs bao (pidof bao)" rc=1 "$(ssh_guest 'pidof bao; echo rc=$?' 2>/dev/null)"
 		expect "boot 2: role marker moved aside: no LISTEN socket on port 8200" "" \
 			"$(ssh_guest 'cat /proc/net/tcp /proc/net/tcp6' 2>/dev/null | listening_sockets | grep ':8200$')"

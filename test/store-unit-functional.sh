@@ -75,6 +75,7 @@ TMPFILES="$OVERLAY/usr/lib/tmpfiles.d/rasputin.conf"
 CONFIG="$OVERLAY/etc/rasputin/openbao/openbao.hcl"
 POSTBUILD="$ROOT/board/rasputin/common/post-build.sh"
 PKG="$ROOT/package/openbao"
+TLS_REFUSAL="$ROOT/test/lib/tls-refusal.sh"
 IMAGE=rasputin-store-unit-functional:f43-systemd-258.7
 CTR_DEADLINE="${STORE_UNIT_TEST_DEADLINE:-60}"
 V=/var/lib/rasputin
@@ -86,7 +87,7 @@ command -v docker >/dev/null 2>&1 || { echo "FAILED: this test needs docker, and
 for t in openssl make curl tar; do
 	command -v "$t" >/dev/null 2>&1 || { echo "FAILED: this test needs $t, and it is not on PATH."; exit 1; }
 done
-for f in "$UNIT" "$TMPFILES" "$POSTBUILD" "$PKG/openbao.mk" "$PKG/openbao.hash"; do
+for f in "$UNIT" "$TMPFILES" "$POSTBUILD" "$PKG/openbao.mk" "$PKG/openbao.hash" "$TLS_REFUSAL"; do
 	[ -f "$f" ] || { echo "FAILED: the file $f is missing."; exit 1; }
 done
 # The store's main config, which this test never writes for itself (TC-756-10).
@@ -203,8 +204,9 @@ mkdir -p "$P"
 f43_systemd_image "$IMAGE" || exit 1
 ctr_boot "the store unit" "$IMAGE" -v "$OVERLAY:/overlay:ro" || exit 1
 echo "in the container: $(inside 'systemctl --version | head -1')"
-if ! { docker cp "$SCRATCH/bao" "$CID:/usr/bin/bao" >/dev/null && docker cp "$P" "$CID:/pki" >/dev/null; }; then
-	echo "FAILED: could not copy bao and the test PKI into the container."; exit 1
+if ! { docker cp "$SCRATCH/bao" "$CID:/usr/bin/bao" >/dev/null && docker cp "$P" "$CID:/pki" >/dev/null \
+	&& docker cp "$TLS_REFUSAL" "$CID:/root/tls-refusal.sh" >/dev/null; }; then
+	echo "FAILED: could not copy bao, the test PKI and test/lib/tls-refusal.sh into the container."; exit 1
 fi
 
 inside "
@@ -496,23 +498,29 @@ check "systemctl start returns with the store active on the shipped config (got 
 only_loopback "after systemctl start returns (READY, not initialised)"
 
 echo "  -- the handshake (TC-756-13)"
-# tls_refused LABEL CURL_ARGS — refused inside TLS: no HTTP status, an output
-# that names a TLS alert or a certificate failure, and no connection refusal.
+# tls_refused LABEL REASON CURL_ARGS — refused inside TLS: the store's own
+# "http: TLS handshake error" line names REASON, curl gets no HTTP status, and
+# nothing reports a connection refusal. Under TLS 1.3 a client's words for the
+# refusal depend on timing (F-756-16); the store's line does not.
+# test/lib/tls-refusal.sh follows the journal from a cursor taken before the
+# attempt, and `timeout` in the container is its deadline.
 tls_refused() {
-	_tr=$(inside "curl -sS --max-time $CTR_DEADLINE -o /dev/null -w 'code=%{http_code}' --cacert /pki/store-ca.pem $2 https://127.0.0.1:$PORT/v1/sys/health 2>&1")
+	_tr=$(inside "timeout $CTR_DEADLINE sh /root/tls-refusal.sh openbao.service '$2' curl -sS --max-time $CTR_DEADLINE -o /dev/null -w 'code=%{http_code}' --cacert /pki/store-ca.pem $3 https://127.0.0.1:$PORT/v1/sys/health")
+	_tr_client=$(printf '%s\n' "$_tr" | sed -n 's/^client: //p')
+	_tr_line=$(printf '%s\n' "$_tr" | sed -n 's/^journal: //p')
 	_st=1
-	if contains 'code=000' "$_tr" && ! contains 'onnection refused' "$_tr" && ! contains 'Could not connect' "$_tr"; then
-		case "$_tr" in *alert*|*certificate*|*SSL*|*TLS*) _st=0 ;; esac
+	if contains 'code=000|' "$_tr_client" && ! contains 'onnection refused' "$_tr_client" && ! contains 'Could not connect' "$_tr_client"; then
+		case "$_tr_line" in *"http: TLS handshake error from 127.0.0.1:"*"$2"*) _st=0 ;; esac
 	fi
-	check "TC-756-13 $1 is refused in the TLS handshake ($(printf '%s' "$_tr" | tr '\n' ' '))" "$_st"
+	check "TC-756-13 $1 is refused in the TLS handshake (store: ${_tr_line:-none}; curl: ${_tr_client:-none})" "$_st" "$_tr"
 }
 code=$(store_get sys/health)
 r=1
 case "$code" in [1-5][0-9][0-9]) r=0 ;; esac
 check "TC-756-13 control: a store-CA clientAuth certificate gets an HTTP status from sys/health (got '$code')" "$r"
-tls_refused "no client certificate" ""
-tls_refused "a clientAuth certificate from a foreign CA" "--cert /pki/foreign.pem --key /pki/foreign.key"
-tls_refused "a store-CA certificate with serverAuth only" "--cert /pki/server.pem --key /pki/server.key"
+tls_refused "no client certificate" "provide a certificate" ""
+tls_refused "a clientAuth certificate from a foreign CA" "certificate signed by unknown authority" "--cert /pki/foreign.pem --key /pki/foreign.key"
+tls_refused "a store-CA certificate with serverAuth only" "certificate specifies an incompatible key usage" "--cert /pki/server.pem --key /pki/server.key"
 
 echo "  -- init, then a restart that unseals from the fragment (TC-756-15)"
 # TEST HARNESS: one recovery share. The response holds the root token and the
