@@ -265,6 +265,18 @@ jobs:
         env:
           REQUIRE_BUSYBOX: "1"
         run: sh test/seal-key-test.sh
+      # The api's wiring to the secrets store (geekdojo/geekdojo-brain#757):
+      # the selector and the store's address byte-exact and assigned once,
+      # Wants= on the store with no hard dependency, and the store's own
+      # Before= the api relies on, each refused by a negative control. Also
+      # the api pin guard: while the store's config is absent from the overlay,
+      # a pin bump would arm a store that cannot run, so it fails here; once
+      # the config ships, its listener must be the api's address. Real GNU
+      # make reads the pin. release.yml's validate job runs it too, so no image
+      # is built from a tree it refuses. The store-paths-functional job runs
+      # the wiring under real systemd.
+      - name: API store wiring tests
+        run: sh test/api-store-wiring-test.sh
       # release.yml's publish step runs scripts/release-target-guard.sh before
       # and after `gh release create` to prove the tag is on the commit the
       # images were built from. Every exit status, against a throwaway git
@@ -395,3 +407,13 @@ jobs:
       # it builds the same image.
       - name: Seal-key oneshot against real systemd (created, untouched, refused, failed)
         run: sh test/seal-key-functional.sh
+      # The api's wiring to the secrets store (geekdojo/geekdojo-brain#757)
+      # under real systemd 258.7 as PID 1, the store wanted by no target: the
+      # api's Wants= pulls it in, the api is up with the store skipped on a
+      # node upgraded without a server leaf, the store starts first, stopping
+      # or restarting it leaves the api on its boot PID, the api's process
+      # environment holds the selector and address, and a Requires= control
+      # shows the test can tell the difference. Same job: it builds the same
+      # image.
+      - name: API store wiring against real systemd (pulled in, skipped, stopped, restarted)
+        run: sh test/api-store-wiring-functional.sh
