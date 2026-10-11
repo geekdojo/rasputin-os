@@ -1,0 +1,38 @@
+# The secrets store's seal key, created once on a control plane that has
+# neither a key nor store data (geekdojo/geekdojo-brain#803; ADR-0010 S10,
+# S12). The script header is the contract: the four outcomes, the record file,
+# the gate and the exit statuses. test/seal-key-test.sh asserts every line
+# here; test/seal-key-functional.sh runs it under real systemd 258.7.
+[Unit]
+Description=Create the secrets store's seal key once, or refuse when store data has no key
+# firstboot writes the role marker below. On later boots it is
+# condition-skipped, which still satisfies the ordering. This unit is NOT part
+# of firstboot: a control plane that reaches the store by an OS update never
+# runs firstboot again, and it needs a key too.
+After=rasputin-firstboot.service
+# The store must find the key already decided, and the api's
+# AssertPathExists=! must find the gate already decided. Ordering only: no
+# Requires= from either. A transient failure here must not take the api, and
+# with it the alert channel, down; only a refusal does that, through the gate.
+Before=openbao.service rasputin-api.service
+RequiresMountsFor=/var/lib/rasputin
+# Role gate: only a control plane runs the store.
+ConditionPathExists=/var/lib/rasputin/role.controlplane
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/rasputin/seal-key/rasputin-seal-key.sh
+# Read-only everywhere except where the key and fragment go. The store's data
+# directory is read-only to this process: a refusal cannot touch it.
+ProtectSystem=strict
+ReadWritePaths=/var/lib/rasputin/openbao-seal
+# The outcome record and the gate. Kept after the unit stops or fails, so a
+# refusal's gate is still there when the api's assertion is checked; tmpfs, so
+# both last for this boot only.
+RuntimeDirectory=rasputin-seal-key
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+
+[Install]
+WantedBy=multi-user.target

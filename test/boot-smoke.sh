@@ -567,6 +567,20 @@ case "$KM_LINE" in
   *) echo "::error::the booted kernel is not one this rootfs was built for, on a FRESH flash — post-build.sh baked a kernel-ids list that does not describe the kernel post-image.sh staged: $KM_LINE"; exit 1 ;;
 esac
 
+# The seal key (geekdojo/geekdojo-brain#803, TC-803-26). A fresh control plane
+# has neither a key nor store data, so rasputin-seal-key.service creates the
+# key and writes one "rasputin-seal-key:" line to /dev/kmsg. It is ordered
+# before the api, so by the time /healthz answered the line was already written:
+# no arrival poll. A missing line fails like a wrong one: silence means nothing
+# created the key. The /healthz and soak checks below are what show its gate
+# does not hold a fresh node down.
+SK_LINE="$(grep -ao 'rasputin-seal-key: .*' "$CONSOLE_LOG" | tr -d '\r' | head -1)"
+case "$SK_LINE" in
+  "rasputin-seal-key: outcome=created "*) echo "seal key created at boot: ${SK_LINE%% reason=*}" ;;
+  "") echo "::error::no 'rasputin-seal-key:' line reached the serial console — nothing created the secrets store's seal key on a fresh control plane. Check rasputin-seal-key.service is in the overlay and enabled."; exit 1 ;;
+  *) echo "::error::the seal-key oneshot did not create a key on a FRESH control plane: $SK_LINE"; exit 1 ;;
+esac
+
 [ "$api" = 1 ] \
   || { echo "::error::rasputin-api never answered /healthz on :80 on the controlplane boot — unit failed to start, RASPUTIN_HTTP_ADDR regressed, or networking broke; see console artifact"; exit 1; }
 [ "$ui" = 1 ] \
