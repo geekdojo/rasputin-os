@@ -73,8 +73,7 @@ PIN=$(mk_var "$MK" RASPUTIN_API_VERSION 2>/dev/null) \
 
 # --- the checker -----------------------------------------------------------------
 #
-# values D SECTION KEY — every value KEY has in SECTION, one per line.
-values() { printf '%s\n' "$1" | sed -n "s/^$2|$3=//p"; }
+# values D SECTION KEY — the shared lib, test/lib/unit-directives.sh.
 # words D SECTION KEY — the space-separated words of every KEY in SECTION.
 words() { values "$1" "$2" "$3" | tr ' \t' '\n\n' | sed '/^$/d'; }
 # lines_naming D SECTION KEY WORD — the directive lines of KEY that carry WORD,

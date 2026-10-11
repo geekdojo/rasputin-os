@@ -52,10 +52,9 @@ BAO_USER=$1 BAO_UID=$2 BAO_GROUP=$3 BAO_GID=$4
 
 # --- the checker -------------------------------------------------------------
 #
-# directives UNIT — one "Section|Key=Value" line per directive (the shared lib).
+# directives UNIT — one "Section|Key=Value" line per directive, and
+# values D SECTION KEY — every value KEY has in SECTION (the shared lib).
 . "$ROOT/test/lib/unit-directives.sh"
-# values D SECTION KEY — every value KEY has in SECTION, one per line.
-values() { printf '%s\n' "$1" | sed -n "s/^$2|$3=//p"; }
 count() { printf '%s\n' "$1" | grep -c "^$2|$3=" ; }
 # bytes N[K|M|G|KiB|MiB|GiB] — systemd's and Go's binary suffixes, in bytes.
 bytes() {

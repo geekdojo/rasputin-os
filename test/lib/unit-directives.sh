@@ -9,6 +9,10 @@
 #       Prints one "Section|Key=Value" line per directive in UNIT: comments
 #       and blank lines dropped, surrounding whitespace trimmed, the section
 #       the directive sits in before the bar.
+#
+#   values D SECTION KEY
+#       Prints every value KEY has in SECTION of D, one per line, where D is
+#       the output of directives.
 
 directives() {
 	awk '
@@ -18,3 +22,5 @@ directives() {
 		{ print sect "|" $0 }
 	' "$1"
 }
+
+values() { printf '%s\n' "$1" | sed -n "s/^$2|$3=//p"; }
