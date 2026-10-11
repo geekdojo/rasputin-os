@@ -463,8 +463,8 @@ cases() {
 	ok "$l: seal-key is the first 32 bytes of the random source" "$(yes_if cmp -s "$W/want-key" "$S/seal-key")"
 	ok "$l: openbao-seal/ holds exactly the key and the fragment" "$(yes_if test "$(ls -A "$S" | tr '\n' ' ')" = "seal-key seal.hcl ")" "$(ls -A "$S")"
 	prio_line "$l" "<6>$TAG: outcome=created key_id=rasputin-$UUID reason=\""
-	ok "$l: stderr warns that the console did not get the line" \
-		"$(yes_if contains "$W/stderr" "$TAG: WARNING could not write the line to $W/ro/kmsg, so the console did not get it")" "$(cat "$W/stderr")"
+	ok "$l: stderr has the WARN sentence that the console did not get the line" \
+		"$(yes_if grep -qxF -- "<4>$TAG: The log line could not be written to $W/ro/kmsg, so the console did not get it." "$W/stderr")" "$(cat "$W/stderr")"
 	ok "$l: no kmsg file was made" "$(yes_if test ! -e "$W/ro/kmsg")"
 	no_secret "$l" "$S/seal-key"
 

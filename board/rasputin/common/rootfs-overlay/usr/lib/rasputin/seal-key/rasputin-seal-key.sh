@@ -104,7 +104,7 @@ log() {
 	# must not change the outcome or the exit status: the run carries on, and
 	# the warning on stderr (also the journal) says the console missed it.
 	printf '<%s>rasputin-seal-key: %s\n' "$1" "$2" > "$KMSG" 2>/dev/null \
-		|| echo "rasputin-seal-key: WARNING could not write the line to $KMSG, so the console did not get it" >&2
+		|| printf '<4>rasputin-seal-key: The log line could not be written to %s, so the console did not get it.\n' "$KMSG" >&2
 }
 
 # finish OUTCOME KEY_ID REASON — write the record (and the gate on refusal),
