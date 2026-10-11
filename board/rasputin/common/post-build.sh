@@ -28,6 +28,12 @@ ln -sf /etc/systemd/system/rasputin-firstboot.service \
 	"$TARGET_DIR/etc/systemd/system/multi-user.target.wants/rasputin-firstboot.service"
 ln -sf /etc/systemd/system/rasputin-agent.service \
 	"$TARGET_DIR/etc/systemd/system/multi-user.target.wants/rasputin-agent.service"
+# The node secrets store (geekdojo/geekdojo-brain#756), wanted on every image.
+# Its own conditions skip it off the control plane and until the api has
+# minted the store CA and the server leaf. One physical line on purpose:
+# test/store-config-test.sh asserts it and test/store-unit-functional.sh runs
+# it against a tree under real preset-all.
+ln -sf /etc/systemd/system/openbao.service "$TARGET_DIR/etc/systemd/system/multi-user.target.wants/openbao.service"
 # Per-role transient hostname, every boot (firstboot is run-once; a transient
 # hostname isn't). Only the controlplane may answer rasputin.local via mDNS.
 ln -sf /etc/systemd/system/rasputin-hostname.service \

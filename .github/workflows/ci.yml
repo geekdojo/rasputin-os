@@ -253,6 +253,17 @@ jobs:
       # store-paths-functional job runs it under real systemd.
       - name: Store unit tests
         run: sh test/store-unit-test.sh
+      # The secrets store's main config, openbao.hcl, and its enablement
+      # (geekdojo/geekdojo-brain#756): the exact keys of each scope, the
+      # listener on 127.0.0.1:8200 with a required client certificate and the
+      # store CA alone as client trust, both unauthenticated-endpoint options
+      # inside the listener, no seal stanza and no secret, the credential paths
+      # derived from the unit's LoadCredential= lines, and post-build.sh's one
+      # wants link. Every injection refused by a negative control; the HCL and
+      # /proc socket readers table-tested. The store-paths-functional job runs
+      # the file on the real pinned bao.
+      - name: Store config tests
+        run: sh test/store-config-test.sh
       # The seal-key oneshot (geekdojo/geekdojo-brain#803) decides, on every
       # boot of every control plane, whether to mint the key the whole store is
       # sealed with. Minting one over existing data loses the data; failing
@@ -391,13 +402,17 @@ jobs:
         run: sh test/store-paths-functional.sh
       # The store's unit (geekdojo/geekdojo-brain#755) under real systemd 258.7
       # as PID 1 with the real pinned bao, downloaded and checked against
-      # openbao.hash: not wanted under preset-all, skipped off the control plane
+      # openbao.hash, on the overlay's openbao.hcl byte for byte (#756): wanted
+      # by post-build.sh's link under preset-all, skipped off the control plane
       # and before its CA and leaf exist, failed without its seal key, 990:990
       # with no capabilities and no core, credentials only it and root can read,
-      # writes only in its two directories, the memory conditions, and the
-      # start limit after repeated crashes with recovery by reset-failed. Same
-      # job as the store paths: it builds the same image.
-      - name: Store unit against real systemd and the pinned bao (conditions, sandbox, credentials, crash loop)
+      # writes only in its two directories, the memory conditions, the start
+      # limit after repeated crashes with recovery by reset-failed, and the
+      # shipped config at work: its only socket 127.0.0.1:8200, the TLS
+      # handshake matrix, init and a restart that unseals from the fragment,
+      # log level info and no key material in the journal. Same job as the
+      # store paths: it builds the same image.
+      - name: Store unit against real systemd and the pinned bao (config, conditions, sandbox, credentials, crash loop)
         run: sh test/store-unit-functional.sh
       # The seal-key oneshot (geekdojo/geekdojo-brain#803) under real systemd
       # 258.7 as PID 1, four boots on one volume: created before the store and
