@@ -487,15 +487,8 @@ done
 
 # --- TC-803-18: the unit files, statically ------------------------------------
 SH=static
-# directives UNIT — "Section|Key=Value" per directive; comments and blanks out.
-directives() {
-	awk '
-		{ sub(/^[ \t]+/, ""); sub(/[ \t]+$/, "") }
-		/^$/ || /^[#;]/ { next }
-		/^\[.*\]$/ { sect = substr($0, 2, length($0) - 2); next }
-		{ print sect "|" $0 }
-	' "$1"
-}
+# directives UNIT — "Section|Key=Value" per directive (the shared lib).
+. "$ROOT/test/lib/unit-directives.sh"
 got=$(directives "$UNIT" | grep -v '^Unit|Description=' | sort)
 want=$(sort <<'EOF'
 Unit|After=rasputin-firstboot.service
