@@ -100,7 +100,11 @@ umask 077
 # into PRIORITY) and /dev/kmsg (every console= device).
 log() {
 	printf '<%s>rasputin-seal-key: %s\n' "$1" "$2"
-	printf '<%s>rasputin-seal-key: %s\n' "$1" "$2" > "$KMSG" 2>/dev/null || true
+	# The line on stdout is in the journal either way, so a failed console copy
+	# must not change the outcome or the exit status: the run carries on, and
+	# the warning on stderr (also the journal) says the console missed it.
+	printf '<%s>rasputin-seal-key: %s\n' "$1" "$2" > "$KMSG" 2>/dev/null \
+		|| echo "rasputin-seal-key: WARNING could not write the line to $KMSG, so the console did not get it" >&2
 }
 
 # finish OUTCOME KEY_ID REASON — write the record (and the gate on refusal),
@@ -119,6 +123,9 @@ finish() {
 			"$_outcome" "$_boot_id" "$_key_id" "$_reason" > "$RECORD_TMP" \
 		&& chmod 600 "$RECORD_TMP" \
 		&& mv -f "$RECORD_TMP" "$RECORD"; } 2>/dev/null; then
+		# Best effort, its error dropped on purpose: the failure is logged on the
+		# next line, no reader opens the temp name (only $RECORD), it is on
+		# tmpfs, and the next run's write starts by removing it.
 		rm -f "$RECORD_TMP" 2>/dev/null
 		log 3 "The outcome record $RECORD could not be written, so only this journal line carries the outcome."
 	fi
@@ -131,6 +138,11 @@ finish() {
 
 # fail_create REASON — a failed creation: remove every temp file, then fail.
 fail_create() {
+	# Best effort, its error dropped on purpose: the run is already failing and
+	# says why. A leftover temp is never read as a key or fragment (only $KEY
+	# and $HCL are, and the key rename is the commit point), stays 0600 root in
+	# the 0700 seal directory, and the next run removes it before creating, or
+	# fails if it cannot (step 4).
 	rm -f "$KEY_TMP" "$HCL_TMP" 2>/dev/null
 	finish failed - "$1"
 }

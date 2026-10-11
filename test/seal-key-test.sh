@@ -114,6 +114,7 @@ setup() {
 	BOOT_ID="b00710d0-0000-4000-8000-000000000001"
 	printf '%s\n' "$BOOT_ID" > "$W/bootid"
 	: > "$W/kmsg"
+	KMSG_PATH="$W/kmsg"
 	head -c 32 "$W/random" > "$W/want-key"
 }
 
@@ -127,12 +128,12 @@ run() {
 	if [ "$SH" = busybox_applets ]; then
 		PATH="$BUSYBOX_DIR:$PATH" RASPUTIN_SEALKEY_PERSIST="$P" RASPUTIN_SEALKEY_RUN="$RUN" \
 			RASPUTIN_SEALKEY_RANDOM="$W/random" RASPUTIN_SEALKEY_UUID="$W/uuid" \
-			RASPUTIN_SEALKEY_BOOTID="$W/bootid" RASPUTIN_SEALKEY_KMSG="$W/kmsg" \
+			RASPUTIN_SEALKEY_BOOTID="$W/bootid" RASPUTIN_SEALKEY_KMSG="$KMSG_PATH" \
 			"$@" > "$W/stdout" 2> "$W/stderr"
 	else
 		RASPUTIN_SEALKEY_PERSIST="$P" RASPUTIN_SEALKEY_RUN="$RUN" \
 			RASPUTIN_SEALKEY_RANDOM="$W/random" RASPUTIN_SEALKEY_UUID="$W/uuid" \
-			RASPUTIN_SEALKEY_BOOTID="$W/bootid" RASPUTIN_SEALKEY_KMSG="$W/kmsg" \
+			RASPUTIN_SEALKEY_BOOTID="$W/bootid" RASPUTIN_SEALKEY_KMSG="$KMSG_PATH" \
 			"$@" > "$W/stdout" 2> "$W/stderr"
 	fi
 	RC=$?
@@ -448,6 +449,24 @@ cases() {
 	printf 'stale-hcl' > "$S/.seal.hcl.new"
 	run
 	created_case "TC-803-14 stale gate and temps"
+
+	# Code review r2 (ERR-WRAP): a console that cannot be written. The kmsg
+	# path is a file under a mode-0500 directory. The outcome is the same as
+	# with a console, a warning on stderr (the journal) says the console
+	# missed the line, and stderr holds no key bytes.
+	KIND=created; setup
+	mkdir "$W/ro"; chmod 0500 "$W/ro"; KMSG_PATH="$W/ro/kmsg"
+	run; chmod 0700 "$W/ro"
+	l="kmsg cannot be written"
+	ok "$l: exits 0" "$(yes_if test "$RC" = 0)" "rc=$RC $OUT $(cat "$W/stderr")"
+	ok "$l: outcome=created" "$(yes_if test "$(rec outcome)" = created)" "$(cat "$RUN/outcome" 2>&1)"
+	ok "$l: seal-key is the first 32 bytes of the random source" "$(yes_if cmp -s "$W/want-key" "$S/seal-key")"
+	ok "$l: openbao-seal/ holds exactly the key and the fragment" "$(yes_if test "$(ls -A "$S" | tr '\n' ' ')" = "seal-key seal.hcl ")" "$(ls -A "$S")"
+	prio_line "$l" "<6>$TAG: outcome=created key_id=rasputin-$UUID reason=\""
+	ok "$l: stderr warns that the console did not get the line" \
+		"$(yes_if contains "$W/stderr" "$TAG: WARNING could not write the line to $W/ro/kmsg, so the console did not get it")" "$(cat "$W/stderr")"
+	ok "$l: no kmsg file was made" "$(yes_if test ! -e "$W/ro/kmsg")"
+	no_secret "$l" "$S/seal-key"
 
 	# TC-803-17: levels are pinned by prio_line above. Here, every reason is a
 	# sentence, and different failure kinds never share one (F-803-06).
