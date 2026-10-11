@@ -59,6 +59,7 @@ _hcl_scan() {
 				gsub(/[ \t]+/, " ", h)
 				printf "%s\tb\t%s\t\n", scope[depth], h
 				depth++
+				opened[depth] = NR; opener[depth] = t
 				scope[depth] = (depth == 1) ? h : scope[depth - 1] " / " h
 				next
 			}
@@ -85,7 +86,7 @@ _hcl_scan() {
 			bad("is not a key, a block header or a closing brace")
 		}
 		END {
-			if (!err && depth != 0) { printf "Could not read %s. It ends inside an open block.\n", F > "/dev/stderr"; exit 1 }
+			if (!err && depth != 0) { printf "Could not read %s. Line %d opens a block that the file never closes: %s\n", F, opened[depth], opener[depth] > "/dev/stderr"; exit 1 }
 		}
 	' "$1"
 }

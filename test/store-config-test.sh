@@ -54,10 +54,7 @@ command -v make >/dev/null 2>&1 \
 . "$LIB/mk-var.sh"
 . "$LIB/listen-sockets.sh"
 
-# values D SECTION KEY — every value KEY has in SECTION, one per line.
-values() { printf '%s\n' "$1" | sed -n "s/^$2|$3=//p"; }
-# words D SECTION KEY — the whitespace-separated words of every KEY in SECTION.
-words() { values "$1" "$2" "$3" | tr ' \t' '\n\n' | sed '/^$/d'; }
+# values and words D SECTION KEY — the shared lib, test/lib/unit-directives.sh.
 # configs D — ExecStart's -config= paths, in order.
 configs() { words "$1" Service ExecStart | sed -n 's/^-config=//p'; }
 
@@ -397,7 +394,34 @@ row "hcl_get refuses a missing key, naming it" nz '' 'has no cluster_addr' hcl_g
 row "hcl_get refuses a key twice in one block, naming it" nz '' 'has address 2 times' hcl_get "$H2" 'listener "tcp"' address
 row "hcl_get refuses a key in two blocks of the same name: one scope, so twice" nz '' 'has address 2 times' hcl_get "$H3" 'listener "tcp"' address
 row "hcl_get refuses a missing file, naming it" nz '' "$SCRATCH/none.hcl" hcl_get "$SCRATCH/none.hcl" '' address
-row "hcl_get refuses a line it cannot read rather than guess" nz '' 'Line 1' hcl_get "$H4" 'listener "tcp"' address
+row "hcl_get refuses a line it cannot read rather than guess" nz '' "Could not read $H4. Line 1 is not a key, a block header or a closing brace" hcl_get "$H4" 'listener "tcp"' address
+# Every other refusal in the reader (F-756-11): each fixture is readable up to
+# line 3, so the line number in the sentence is the refusing line's own.
+# refusal LABEL N LINE WHY — the sentence names the file, line 3 and WHY.
+refusal() {
+	_rl=$1 _rn=$2 _rtext=$3 _rwhy=$4
+	printf 'ui = false\nlistener "tcp" {\n%s\n}\n' "$_rtext" >"$SCRATCH/r$_rn.hcl"
+	row "hcl_get refuses $_rl, naming the file and line 3" nz '' "Could not read $SCRATCH/r$_rn.hcl. Line 3 $_rwhy" \
+		hcl_get "$SCRATCH/r$_rn.hcl" '' ui
+}
+refusal "a /* comment" 1 '  /* a comment */' 'opens a /* comment'
+refusal "a block header it cannot read" 2 '  1nner {' 'is not a block header'
+refusal "a string with no closing quote" 3 '  address = "127.0.0.1:8200' 'has a string with no closing quote'
+refusal "a value it cannot parse" 4 '  ports = [8200, 8201]' 'has a value this reader does not parse'
+refusal "text after a value" 5 '  address = "127.0.0.1:8200" extra' 'has text after its value'
+printf 'ui = false\nlistener "tcp" {\n}\n}\n' >"$SCRATCH/r6.hcl"
+row "hcl_get refuses a } with no open block, naming the file and line 4" nz '' "Could not read $SCRATCH/r6.hcl. Line 4 closes a block that was never opened" \
+	hcl_get "$SCRATCH/r6.hcl" '' ui
+printf 'ui = false\nlistener "tcp" {\n  address = "a"\n' >"$SCRATCH/r7.hcl"
+row "hcl_get refuses a file that ends inside a block, naming the file and the block's line 2" nz '' \
+	"Could not read $SCRATCH/r7.hcl. Line 2 opens a block that the file never closes" hcl_get "$SCRATCH/r7.hcl" '' ui
+# A nested block is a scope of its own, "OUTER / INNER" (F-756-11).
+printf 'outer "x" {\n  k = 1\n  inner {\n    j = "v"\n  }\n}\n' >"$SCRATCH/nest.hcl"
+row "hcl_keys lists a nested block in its parent as a header with { after it" 0 'k
+inner {' '' hcl_keys "$SCRATCH/nest.hcl" 'outer "x"'
+row "hcl_get reads a nested block's key through 'OUTER / INNER'" 0 v '' hcl_get "$SCRATCH/nest.hcl" 'outer "x" / inner' j
+row "hcl_get does not see a nested block's key in the parent" nz '' 'has no j in the outer "x" block' \
+	hcl_get "$SCRATCH/nest.hcl" 'outer "x"' j
 row "hcl_keys lists the top level's keys and headers in file order, comments excluded" 0 'address
 ui
 listener "tcp" {

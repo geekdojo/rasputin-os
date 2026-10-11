@@ -469,16 +469,28 @@ if boot 2; then
 		esac
 		# The role gate on the image (TC-756-22, TC-756-23).
 		ROLE=/var/lib/rasputin/role.controlplane
-		_before="$(ssh_guest "journalctl -b -u openbao.service --no-pager -o cat | grep -c 'ConditionPathExists=$ROLE'" 2>/dev/null)"
+		# PID 1 logs to the journal for this step, as it does on a booted image.
+		# On arm64 the harness boots with systemd.log_target=kmsg (arm64_load_slot),
+		# and a PID 1 line sent through kmsg reaches journald with no UNIT= field,
+		# so `journalctl -u` can never name it (F-756-13). The image has busctl and
+		# no systemd-analyze. `journalctl --sync` returns once journald has stored
+		# every line already sent, so each count is read after its fact.
+		PID1_LOG="org.freedesktop.systemd1 /org/freedesktop/systemd1 org.freedesktop.systemd1.Manager LogTarget"
+		_target="$(ssh_guest "busctl get-property $PID1_LOG" 2>/dev/null | tr -d '\r' | sed -n 's/^s "\(.*\)"$/\1/p')"
+		ssh_guest "busctl set-property $PID1_LOG s journal-or-kmsg" >/dev/null 2>&1
+		expect "boot 2: role marker moved aside: PID 1 logs to the journal for the step (was ${_target:-?})" 's "journal-or-kmsg"' \
+			"$(ssh_guest "busctl get-property $PID1_LOG" 2>/dev/null | tr -d '\r')"
+		_before="$(ssh_guest "journalctl --sync && journalctl -b -u openbao.service --no-pager -o cat | grep -c 'ConditionPathExists=$ROLE'" 2>/dev/null)"
 		ssh_guest "mv $ROLE $ROLE.smoke-aside && systemctl restart openbao.service" >/dev/null 2>&1
 		expect "boot 2: role marker moved aside: openbao.service ConditionResult and ActiveState" "no inactive" \
 			"$(ssh_guest 'echo $(systemctl show openbao.service -p ConditionResult --value) $(systemctl show openbao.service -p ActiveState --value)' 2>/dev/null)"
-		_after="$(ssh_guest "journalctl -b -u openbao.service --no-pager -o cat | grep -c 'ConditionPathExists=$ROLE'" 2>/dev/null)"
+		_after="$(ssh_guest "journalctl --sync && journalctl -b -u openbao.service --no-pager -o cat | grep -c 'ConditionPathExists=$ROLE'" 2>/dev/null)"
 		if [ "${_after:-0}" -gt "${_before:-0}" ] 2>/dev/null; then
 			pass "boot 2: role marker moved aside: the journal names ConditionPathExists=$ROLE"
 		else
 			fail "boot 2: role marker moved aside: no new journal line names ConditionPathExists=$ROLE (before ${_before:-?}, after ${_after:-?})"
 		fi
+		[ -z "$_target" ] || ssh_guest "busctl set-property $PID1_LOG s $_target" >/dev/null 2>&1
 		expect "boot 2: role marker moved aside: nothing runs bao (pidof bao)" rc=1 "$(ssh_guest 'pidof bao; echo rc=$?' 2>/dev/null)"
 		expect "boot 2: role marker moved aside: no LISTEN socket on port 8200" "" \
 			"$(ssh_guest 'cat /proc/net/tcp /proc/net/tcp6' 2>/dev/null | listening_sockets | grep ':8200$')"
