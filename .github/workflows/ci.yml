@@ -318,13 +318,6 @@ jobs:
         run: |
           sh test/store-policy-drift-test.sh
           sh test/check-store-policy-test.sh
-      # The live drift check (geekdojo/geekdojo-brain#804, TC-804-11): the
-      # pinned api tarball's openbao-policy/ against rasputin-control-plane's
-      # storepolicy/ at the same tag, plus its two controls. Red while the api
-      # pin predates the policy files, by design: the image would not build
-      # either. release.yml's validate job runs it too.
-      - name: Store policy live drift check
-        run: sh test/store-policy-live-drift.sh
       # release.yml's publish step runs scripts/release-target-guard.sh before
       # and after `gh release create` to prove the tag is on the commit the
       # images were built from. Every exit status, against a throwaway git
@@ -332,6 +325,14 @@ jobs:
       # the image's shell.
       - name: Release target guard tests
         run: bash test/release-target-guard-test.sh
+      # The live drift check (geekdojo/geekdojo-brain#804, TC-804-11): the
+      # pinned api tarball's openbao-policy/ against rasputin-control-plane's
+      # storepolicy/ at the same tag, plus its two controls. Red while the api
+      # pin predates the policy files, by design: the image would not build
+      # either. release.yml's validate job runs it too. It is the job's last
+      # step, so while it is red every other step still runs and reports.
+      - name: Store policy live drift check
+        run: sh test/store-policy-live-drift.sh
 
   # The /etc/shadow swap is a BUILD-ORDER claim, and nothing here used to test
   # the build. cc74fb4 put the swap in post-build.sh, where Buildroot's mkusers
@@ -437,20 +438,6 @@ jobs:
       - uses: actions/checkout@v4
       - name: Store paths against real systemd-tmpfiles (fresh node, re-assert, OTA contents kept)
         run: sh test/store-paths-functional.sh
-      # The store's unit (geekdojo/geekdojo-brain#755) under real systemd 258.7
-      # as PID 1 with the real pinned bao, downloaded and checked against
-      # openbao.hash, on the overlay's openbao.hcl byte for byte (#756): wanted
-      # by post-build.sh's link under preset-all, skipped off the control plane
-      # and before its CA and leaf exist, failed without its seal key, 990:990
-      # with no capabilities and no core, credentials only it and root can read,
-      # writes only in its two directories, the memory conditions, the start
-      # limit after repeated crashes with recovery by reset-failed, and the
-      # shipped config at work: its only socket 127.0.0.1:8200, the TLS
-      # handshake matrix, init and a restart that unseals from the fragment,
-      # log level info and no key material in the journal. Same job as the
-      # store paths: it builds the same image.
-      - name: Store unit against real systemd and the pinned bao (config, conditions, sandbox, credentials, crash loop)
-        run: sh test/store-unit-functional.sh
       # The seal-key oneshot (geekdojo/geekdojo-brain#803) under real systemd
       # 258.7 as PID 1, four boots on one volume: created before the store and
       # the api, untouched on the next boot, refused with the api held back by
@@ -469,3 +456,20 @@ jobs:
       # image.
       - name: API store wiring against real systemd (pulled in, skipped, stopped, restarted)
         run: sh test/api-store-wiring-functional.sh
+      # The store's unit (geekdojo/geekdojo-brain#755) under real systemd 258.7
+      # as PID 1 with the real pinned bao, downloaded and checked against
+      # openbao.hash, on the overlay's openbao.hcl byte for byte (#756): wanted
+      # by post-build.sh's link under preset-all, skipped off the control plane
+      # and before its CA and leaf exist, failed without its seal key, 990:990
+      # with no capabilities and no core, credentials only it and root can read,
+      # writes only in its two directories, the memory conditions, the start
+      # limit after repeated crashes with recovery by reset-failed, and the
+      # shipped config at work: its only socket 127.0.0.1:8200, the TLS
+      # handshake matrix, init and a restart that unseals from the fragment,
+      # log level info and no key material in the journal. Same job as the
+      # store paths: it builds the same image. It reads the pinned api
+      # tarball's policy text (geekdojo/geekdojo-brain#804), so it is red until
+      # the store-arming pin moves, by design; it is the job's last step, so
+      # the seal-key and api-wiring steps above still run and report.
+      - name: Store unit against real systemd and the pinned bao (config, conditions, sandbox, credentials, crash loop)
+        run: sh test/store-unit-functional.sh
