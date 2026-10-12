@@ -308,6 +308,13 @@ jobs:
         env:
           REQUIRE_BUSYBOX: "1"
         run: sh test/store-init-outcome-test.sh
+      # The boot smoke's check that the api reports the secrets store ready
+      # (geekdojo/geekdojo-brain#834): the verdict on GET /api/alerts, the
+      # wait, the post-kill report, the first-run sign-in through an injected
+      # POST, and the soft passkey's output decoded without the helper, under
+      # sh, dash and bash; and the helper's line coverage.
+      - name: Store readiness check tests
+        run: sh test/store-ready-test.sh
       # The store's policy text (geekdojo/geekdojo-brain#804): the drift script
       # against fixtures (a match, a changed byte, a missing and an extra file,
       # an unreadable and an empty side), and the post-build guard that
