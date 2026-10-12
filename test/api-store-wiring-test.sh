@@ -274,30 +274,37 @@ failed_closed() {
 	printf '         it said: %s\n' "$OUT"
 }
 
+# shipped — the scratch tree also gets the shipped store config, when the
+# overlay carries one, so the section 5 controls see the tree as shipped.
+shipped() {
+	[ -f "$OVERLAY$CONFIG" ] || return 0
+	mkdir -p "$(dirname "$T/board/rasputin/common/rootfs-overlay$CONFIG")"
+	cp "$OVERLAY$CONFIG" "$T/board/rasputin/common/rootfs-overlay$CONFIG"
+}
 echo
 echo "5. negative controls: the checker refuses each wrong copy (TC-757-03)"
-tree; run_tree
+tree; shipped; run_tree
 passes "TC-757-03 positive control, the unmodified units"
-tree; edit "$T/$REL_API" after:Wants=openbao.service 'Requires=openbao.service' \
+tree; shipped; edit "$T/$REL_API" after:Wants=openbao.service 'Requires=openbao.service' \
 	&& { run_tree; refused "TC-757-03 Requires=openbao.service added" 'Requires=openbao.service'; }
-tree; edit "$T/$REL_API" after:Wants=openbao.service 'BindsTo=openbao.service' \
+tree; shipped; edit "$T/$REL_API" after:Wants=openbao.service 'BindsTo=openbao.service' \
 	&& { run_tree; refused "TC-757-03 BindsTo=openbao.service added" 'BindsTo=openbao.service'; }
-tree; edit "$T/$REL_API" replace:Wants=openbao.service '' \
+tree; shipped; edit "$T/$REL_API" replace:Wants=openbao.service '' \
 	&& { run_tree; refused "TC-757-03 Wants=openbao.service removed" 'Wants= includes openbao.service'; }
-tree; edit "$T/$REL_API" replace:Environment=RASPUTIN_SECRETSTORE_BACKEND=openbao \
+tree; shipped; edit "$T/$REL_API" replace:Environment=RASPUTIN_SECRETSTORE_BACKEND=openbao \
 	'Environment=RASPUTIN_SECRETSTORE_BACKEND=OpenBao' \
 	&& { run_tree; refused "TC-757-03 BACKEND=OpenBao" 'Environment=RASPUTIN_SECRETSTORE_BACKEND=OpenBao'; }
-tree; edit "$T/$REL_API" replace:Environment=RASPUTIN_SECRETSTORE_BACKEND=openbao \
+tree; shipped; edit "$T/$REL_API" replace:Environment=RASPUTIN_SECRETSTORE_BACKEND=openbao \
 	'Environment="RASPUTIN_SECRETSTORE_BACKEND=openbao "' \
 	&& { run_tree; refused "TC-757-03 a quoted trailing space" 'Environment="RASPUTIN_SECRETSTORE_BACKEND=openbao "'; }
-tree; edit "$T/$REL_API" after:Environment=RASPUTIN_SECRETSTORE_ADDR=https://127.0.0.1:8200 \
+tree; shipped; edit "$T/$REL_API" after:Environment=RASPUTIN_SECRETSTORE_ADDR=https://127.0.0.1:8200 \
 	'Environment=RASPUTIN_SECRETSTORE_CA_FILE=/x' \
 	&& { run_tree; refused "TC-757-03 an extra RASPUTIN_SECRETSTORE_CA_FILE" 'Environment=RASPUTIN_SECRETSTORE_CA_FILE=/x'; }
-tree; edit "$T/$REL_API" before:EnvironmentFile=-/var/lib/rasputin/node.env \
+tree; shipped; edit "$T/$REL_API" before:EnvironmentFile=-/var/lib/rasputin/node.env \
 	'Environment=RASPUTIN_DATA_DIR=/var/lib/rasputin RASPUTIN_SECRETSTORE_BACKEND=mock' \
 	&& { run_tree; refused "TC-757-03 a second, later BACKEND assignment on another line" \
 		'Environment=RASPUTIN_DATA_DIR=/var/lib/rasputin RASPUTIN_SECRETSTORE_BACKEND=mock'; }
-tree; edit "$T/$REL_STORE" replace:Before=rasputin-api.service '' \
+tree; shipped; edit "$T/$REL_STORE" replace:Before=rasputin-api.service '' \
 	&& { run_tree; refused "TC-757-03 the store's Before=rasputin-api.service removed" 'Before= includes rasputin-api.service'; }
 
 echo
