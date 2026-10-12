@@ -311,13 +311,16 @@ jobs:
       # The store's policy text (geekdojo/geekdojo-brain#804): the drift script
       # against fixtures (a match, a changed byte, a missing and an extra file,
       # an unreadable and an empty side), and the post-build guard that
-      # refuses an image whose init.json names a policy file it lacks.
+      # refuses an image whose init.json names a policy file it lacks; and the
+      # pinned api tarball fetch's download-failure and hash-mismatch branches
+      # against a file:// fixture (F-804-18).
       - name: Store policy drift and post-build guard tests
         env:
           REQUIRE_BUSYBOX: "1"
         run: |
           sh test/store-policy-drift-test.sh
           sh test/check-store-policy-test.sh
+          sh test/api-tarball-test.sh
       # release.yml's publish step runs scripts/release-target-guard.sh before
       # and after `gh release create` to prove the tag is on the commit the
       # images were built from. Every exit status, against a throwaway git
