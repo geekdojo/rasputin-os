@@ -42,10 +42,9 @@
 #             using stored unseal key", "error unsealing core" and "failed to
 #             automatically unseal after initialization". A static seal's
 #             check is deterministic, so one such line is final.
-# The store being stopped or restarted ends it too: PartOf= stops this unit.
-# A store that crashes into its start limit mid-wait does not (no requirement
-# dependency, which would cut the store's crash loop short); the bound below
-# ends that wait.
+# The store leaving active ends it too: PartOf= stops this unit when the store
+# is stopped or restarted, and when it crashes, into its start limit included,
+# because Restart=always queues a restart job on each exit of the store.
 # One case reports nothing: a bao that hangs before logging any result. It
 # sends no notify after READY, and sys/health cannot tell "not attempted" from
 # "failed". For that case alone the wait stops after RASPUTIN_STOREPROV_

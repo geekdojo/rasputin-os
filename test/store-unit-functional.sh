@@ -62,7 +62,8 @@
 #      (TC-805-27); N to N+1 with no root token (TC-805-29); the no-op
 #      re-apply (TC-805-30); a refused write (TC-805-31); a wrong-key store
 #      that ends on bao's own failure line, not a timer (TC-805-32); the store
-#      stopped mid-wait (TC-805-33); the provisioner's leaf absent
+#      stopped mid-wait (TC-805-33); the store crashing into its start limit
+#      mid-wait (F-805-19); the provisioner's leaf absent
 #      (TC-805-34); and #833's read point (TC-805-41)
 #      The provisioner holds Requisite= and PartOf= on the store, never a
 #      requirement dependency, which cuts scenario 6's and scenario 8's crash
@@ -71,8 +72,9 @@
 #      leaves it inactive (scenario 3, TC-805-27), a stopped store stops it
 #      mid-wait and it records failed (TC-805-33), and a restarted store
 #      re-runs it under a new run_id (TC-805-30, TC-805-41). A store that
-#      crashes into its start limit mid-wait no longer stops it; the wait's
-#      10 s bound (rasputin-os EXCEPTIONS.md EX-1) ends that wait.
+#      crashes mid-wait stops it too, into its start limit with NRestarts
+#      still StartLimitBurst: Restart=always queues a restart job on every
+#      exit, the refused last one included, and PartOf= carries it (F-805-19).
 # The provisioner runs in every scenario from 2 on, as on a node: openbao's
 # Wants= pulls it in. Scenario 3's first boot carries TC-805-27's empty
 # provision.tsv half, and scenario 7 its four policies and three roles
@@ -1292,6 +1294,51 @@ prov_settled "$pprev" || fails=$((fails + 1))
 pid6=$(pshow InvocationID); prec=$(inside "cat $PRECORD")
 check "TC-805-33 the store started again pulls the provisioner in: a new run_id with its outcome" \
 	"$(yes_if eval '[ "$pid6" != "$pid5" ] && [ "$(pfield run_id "$prec")" = "$pid6" ] && [ "$(pfield outcome "$prec")" = applied ]')" "$prec"
+
+echo "  -- the store crashes into its start limit mid-wait (F-805-19)"
+# TC-805-33's one-item provision.tsv, already applied, so TC-805-34 still
+# finds nothing to add once the store is back.
+sprev=$(show InvocationID); k=0 pidk="" pcl=""
+# Restart=always queues a restart job on every exit of the store, the last one
+# too (which the start limit then refuses), and PartOf= carries each to the
+# provisioner, so each kill stops its run mid-wait and none reaches the bound.
+# TEST HARNESS: the wrong key and LogLevelMax=notice as in TC-805-33, so each
+# run of the store is sealed and silent and the provisioner is mid-wait; and a
+# StartLimitIntervalSec of an hour, so the kills below, each paced on the fact
+# that the store's next run is up and followed, reach the store's own
+# StartLimitBurst however long bao takes to start here.
+inside "install -m 0600 /root/wrong-key $V/openbao-seal/seal-key
+printf '[Service]\nLogLevelMax=notice\n' >/etc/systemd/system/openbao.service.d/harness-silent.conf
+printf '[Unit]\nStartLimitIntervalSec=1h\n' >/etc/systemd/system/openbao.service.d/harness-startlimit.conf
+systemctl daemon-reload; systemctl stop rasputin-api.service openbao.service; systemctl reset-failed openbao.service $PROV 2>/dev/null
+systemctl start --no-block openbao.service" >/dev/null 2>&1
+burst=$(show StartLimitBurst)
+while [ "$k" -lt "$burst" ]; do
+	k=$((k + 1))
+	wait_for "kill $k of $burst: the store's next run is active and the provisioner is following that run's journal" \
+		"s=\$(systemctl show openbao.service -p InvocationID --value) && [ \"\$s\" != '$sprev' ] && [ \"\$(systemctl show openbao.service -p ActiveState --value)\" = active ] && [ \"\$(systemctl show $PROV -p ActiveState --value)\" = activating ] && grep -qa \"[_]SYSTEMD_INVOCATION_ID=\$s\" /proc/[0-9]*/cmdline" \
+		|| { fails=$((fails + 1)); break; }
+	sprev=$(show InvocationID); pidk=$(pshow InvocationID); pcl=$(pshow InactiveExitTimestampMonotonic)
+	inside "kill -KILL $(show MainPID)" >/dev/null 2>&1
+done
+wait_for "the store is failed at its start limit and the provisioner has no job and is not activating" \
+	"[ \"\$(systemctl show openbao.service -p ActiveState --value)\" = failed ] && [ -z \"\$(systemctl show openbao.service -p Job --value)\" ] && [ -z \"\$(systemctl show $PROV -p Job --value)\" ] && [ \"\$(systemctl show $PROV -p ActiveState --value)\" != activating ]" \
+	|| fails=$((fails + 1))
+nr=$(show NRestarts)
+check "F-805-19 the store's crash loop still runs to NRestarts = StartLimitBurst = $burst (got '$nr')" "$(yes_if [ "$nr" = "$burst" ])"
+check "F-805-19 the journal says 'Start request repeated too quickly'" \
+	"$(yes_if contains 'Start request repeated too quickly' "$(inside "journalctl -u openbao.service _PID=1 INVOCATION_ID=$sprev --no-pager -o cat; journalctl -u openbao.service --no-pager -o cat | tail -5")")"
+prec=$(inside "cat $PRECORD"); pend=$(pshow InactiveEnterTimestampMonotonic)
+check "F-805-19 the last run, killed into the start limit, records failed, naming the stop, under its own run_id ($pidk)" \
+	"$(yes_if eval '[ "$(pfield outcome "$prec")" = failed ] && [ "$(pfield run_id "$prec")" = "$pidk" ] && contains "stopped" "$prec"')" "$prec"
+pj=$(inside "journalctl -u $PROV _SYSTEMD_INVOCATION_ID=$pidk --no-pager -o cat")
+check "F-805-19 no line names the bound" "$(yes_if not_contains 'logged no unseal result within' "$pj$prec")" "$pj"
+check "F-805-19 the last run ended before the bound: its start to its end is under 10 s ($(( (${pend:-0} - ${pcl:-0}) / 1000 )) ms)" \
+	"$(yes_if eval '[ "${pcl:-0}" -gt 0 ] && [ "${pend:-0}" -gt "$pcl" ] && [ $(( pend - pcl )) -lt 10000000 ]')"
+left=$(followers)
+check "F-805-19 no journal follower is left anywhere" "$(yes_if [ -z "$left" ])" "$left"
+inside "rm -f /etc/systemd/system/openbao.service.d/harness-silent.conf /etc/systemd/system/openbao.service.d/harness-startlimit.conf; systemctl daemon-reload; systemctl reset-failed openbao.service $PROV" >/dev/null 2>&1
+put_seal
 
 echo "  -- the provisioner's leaf absent while the store runs (TC-805-34)"
 inside "rm -f $V/tls/openbao-provisioner/leaf.pem $V/tls/openbao-provisioner/leaf.key" >/dev/null

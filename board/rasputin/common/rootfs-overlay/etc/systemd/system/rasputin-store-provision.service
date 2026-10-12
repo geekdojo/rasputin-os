@@ -13,10 +13,10 @@ Description=Secrets store provisioner
 # openbao.service's Wants= pulls this in on each start of the store, and it
 # runs after it. Requisite=: a store that is condition-skipped leaves this
 # inactive. PartOf=: a store that is stopped or restarted stops this run (and
-# the stop hook records it). Neither is a requirement dependency, which would
-# cut the store's crash loop short of its StartLimitBurst; so a store that
-# crashes into its start limit mid-wait does not stop this run, and the wait's
-# bound (rasputin-os EXCEPTIONS.md EX-1) ends it.
+# the stop hook records it), and so does one that crashes, into its start limit
+# included: Restart=always queues a restart job on each exit of the store,
+# which PartOf= carries here. Neither is a requirement dependency, which would
+# cut the store's crash loop short of its StartLimitBurst.
 Requisite=openbao.service
 PartOf=openbao.service
 After=openbao.service

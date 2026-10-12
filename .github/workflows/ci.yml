@@ -35,6 +35,9 @@ name: ci
 on:
   pull_request:
     branches: [main]
+  # A PR stacked on another branch gets no pull_request run, so its suite is
+  # dispatched on the branch by hand (geekdojo/geekdojo-brain#805, F-805-22).
+  workflow_dispatch:
 
 permissions:
   contents: read
