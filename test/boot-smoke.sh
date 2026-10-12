@@ -36,6 +36,15 @@ test -f "$IMG" || { echo "::error::no image at $IMG"; exit 1; }
 mkdir -p "$WORK"
 # Seed lookup, OVMF and the per-arch QEMU line, shared with test/update-smoke.sh.
 . "$(dirname "$0")/lib/qemu-common.sh"
+# The store readiness check (geekdojo/geekdojo-brain#834): the verdict on the
+# api's report, the wait and the post-kill report; and the first-run sign-in
+# that reading the report needs, with the soft passkey it runs.
+# shellcheck source=test/lib/store-ready.sh
+. "$(dirname "$0")/lib/store-ready.sh"
+# shellcheck source=test/lib/api-session.sh
+. "$(dirname "$0")/lib/api-session.sh"
+# shellcheck disable=SC2034 # read by api_session
+SOFT_PASSKEY="$(dirname "$0")/lib/soft-passkey.py"
 
 # Host-side forwards into the guest. The same numbers serve both arches: the two
 # smoke jobs run on separate runners, so they never collide.
@@ -76,7 +85,12 @@ DNS_PORT=15353
 # kernel-match and store-init lines are written by then, so those three polls
 # end on their first read and the real worst case stays inside the qemu
 # timeout; a stuck one is still reported by its own assertion.
-BOOT_BUDGET=900 ; MU_TRIES=120 ; FB_TRIES=60 ; API_TRIES=48 ; ATREST_TRIES=60 ; TS_TRIES=30 ; KM_TRIES=30 ; SI_TRIES=30
+# SR_TRIES is the api's report that the secrets store is ready
+# (geekdojo/geekdojo-brain#834; 2s apart, 60s ceiling), read from
+# GET /api/alerts once the store-init line is in. Like the polls above, it
+# ends the moment the fact is true, and a stuck one is reported by its own
+# assertion.
+BOOT_BUDGET=900 ; MU_TRIES=120 ; FB_TRIES=60 ; API_TRIES=48 ; ATREST_TRIES=60 ; TS_TRIES=30 ; KM_TRIES=30 ; SI_TRIES=30 ; SR_TRIES=30
 case "$ARCH" in
   amd64|arm64) ;;
   *) echo "::error::unknown arch '$ARCH' (expected amd64 or arm64)"; exit 1 ;;
@@ -431,12 +445,46 @@ if [ "$api" = 1 ]; then
 fi
 SI_AT=$(( $(date +%s) - START ))
 
+# The api reports the secrets store ready (geekdojo/geekdojo-brain#834). Its
+# only report is GET /api/alerts, which needs a session: a store in any state
+# but ready raises a "secret-store:" alert there. The smoke signs in through
+# first-run registration, open on this fresh control plane, then polls the
+# list here, before the kill, and the outcome is asserted after it. Only once
+# the store-init line is in: until then there is nothing to ask about.
+#
+# The SR_ variables are set before the gate because this script runs under
+# set -u, and the report reads all of them on every path.
+SR_STAGE="" SR_REASON="" SR_RC="" SR_LAST="" SR_AT=""
+SR_JAR="$WORK/store-ready.jar"
+# smoke_post URL BODYFILE OUTFILE JAR — api_session's POST.
+smoke_post() {
+  curl -sk -c "$4" -b "$4" --max-time 10 -H 'Content-Type: application/json' \
+    --data-binary "@$2" -o "$3" -w '%{http_code}' "$1" || true
+}
+# smoke_fetch — store_ready_wait's FETCH: prints the code and the body's path.
+smoke_fetch() {
+  rm -f "$WORK/alerts.body"
+  printf '%s %s\n' "$(curl -sk -b "$SR_JAR" --max-time 5 -o "$WORK/alerts.body" -w '%{http_code}' \
+    "https://127.0.0.1:${HTTPS_PORT}/api/alerts" || true)" "$WORK/alerts.body"
+}
+if [ "$sirep" = 1 ]; then
+  (umask 077; : > "$SR_JAR")
+  mkdir -p "$WORK/store-ready"
+  SR_STAGE="signin"
+  if SR_REASON=$(api_session smoke_post "https://127.0.0.1:${HTTPS_PORT}" "https://${RPID}" "$SR_JAR" "$WORK/store-ready"); then
+    SR_STAGE="wait"
+    store_ready_wait "$SR_TRIES" 2 smoke_fetch die_if_qemu_gone
+    SR_RC=$?
+  fi
+fi
+SR_AT=$(( $(date +%s) - START ))
+
 TOTAL=$(( $(date +%s) - START ))
 
 kill "$QPID" 2>/dev/null || true
 echo "----- last 60 lines of console -----"; tail -60 "$CONSOLE_LOG" || true
 echo "----- $ARCH smoke timings (seconds from qemu start) -----"
-echo "multi-user=${MU_AT}s firstboot=${FB_AT}s api+ui+dns=${API_AT}s atrest-verdict=${ATREST_AT}s tailscale-report=${TS_AT}s kernel-match=${KM_AT}s store-init=${SI_AT}s total(incl. 70s soak)=${TOTAL}s"
+echo "multi-user=${MU_AT}s firstboot=${FB_AT}s api+ui+dns=${API_AT}s atrest-verdict=${ATREST_AT}s tailscale-report=${TS_AT}s kernel-match=${KM_AT}s store-init=${SI_AT}s store-ready=${SR_AT}s total(incl. 70s soak)=${TOTAL}s"
 
 # ------------------------------------------------------------ assertions ------
 [ "$ok" = 1 ] || { echo "::error::$ARCH image did not reach multi-user in QEMU"; exit 1; }
@@ -619,6 +667,12 @@ case "$SI_LINE" in
   "") echo "::error::no 'rasputin-store-init:' line reached the serial console in ${SI_AT}s — the secrets store's first start was never recorded on a fresh control plane: the api did not mint its leaf and restart the store, the store never started, or openbao.service lost its outcome hooks."; exit 1 ;;
   *) echo "::error::the secrets store's first start on a fresh control plane did not report outcome=initialised: $SI_LINE"; exit 1 ;;
 esac
+
+# The api reports the store ready (geekdojo/geekdojo-brain#834), polled above,
+# before the kill. store_ready_report names the fact that never came true: the
+# check never ran, the sign-in failed, or the store never read ready.
+rm -f "$SR_JAR"
+store_ready_report "$SR_STAGE" "$SR_REASON" "$SR_RC" "$SR_LAST" "$SR_AT" || exit 1
 
 [ "$api" = 1 ] \
   || { echo "::error::rasputin-api never answered /healthz on :80 on the controlplane boot — unit failed to start, RASPUTIN_HTTP_ADDR regressed, or networking broke; see console artifact"; exit 1; }
