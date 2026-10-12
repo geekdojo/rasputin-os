@@ -42,9 +42,23 @@ NotifyAccess=main
 User=openbao
 Group=openbao
 # The main config is baked into the image at /etc/rasputin/openbao/openbao.hcl
-# (#756). The seal fragment arrives as a credential and is named by its literal
-# path, because bao expands no variable in its config (#679 Q3).
-ExecStart=/usr/bin/bao server -config=/etc/rasputin/openbao/openbao.hcl -config=/run/credentials/openbao.service/seal.hcl
+# (#756), and the self-init stanzas beside it in init.json (#804): on a store
+# whose core is not initialised, bao creates the policies (their text from
+# /usr/share/rasputin/openbao-policy/, which the api tarball ships), the kv-v2
+# mount, cert auth and the api's and rotation job's roles, once, and keeps no
+# root token. The seal fragment arrives as a credential and is named by its
+# literal path, because bao expands no variable in its config (#679 Q3).
+ExecStart=/usr/bin/bao server -config=/etc/rasputin/openbao/openbao.hcl -config=/etc/rasputin/openbao/init.json -config=/run/credentials/openbao.service/seal.hcl
+# The self-init outcome (#804): one console and journal line and the record
+# /run/rasputin-store-init/outcome, which #833's reader turns into a job and an
+# alert. pre notes a start that begins on an empty data directory; started
+# (after READY, which on an empty store comes only after self-init) records
+# initialised; stopped records failed if that start ended first. `+` runs the
+# script as root outside this sandbox, because the record is root's; `-`
+# means nothing it does fails the store: it reports, it does not gate.
+ExecStartPre=-+/usr/lib/rasputin/store-init/rasputin-store-init.sh pre
+ExecStartPost=-+/usr/lib/rasputin/store-init/rasputin-store-init.sh started
+ExecStopPost=-+/usr/lib/rasputin/store-init/rasputin-store-init.sh stopped
 # Everything root writes for the store reaches it here (#754): the store's uid
 # can read none of these source directories, and only it and root can read the
 # copies systemd makes under /run/credentials/openbao.service/.

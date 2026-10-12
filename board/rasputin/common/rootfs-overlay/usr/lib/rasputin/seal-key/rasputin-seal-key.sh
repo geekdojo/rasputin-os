@@ -96,16 +96,16 @@ REFUSAL="The secrets store has data but no seal key, so this control plane will 
 
 umask 077
 
-# log PRIORITY LINE — stdout (the journal, where systemd turns the <N> prefix
-# into PRIORITY) and /dev/kmsg (every console= device).
-log() {
-	printf '<%s>rasputin-seal-key: %s\n' "$1" "$2"
-	# The line on stdout is in the journal either way, so a failed console copy
-	# must not change the outcome or the exit status: the run carries on, and
-	# the warning on stderr (also the journal) says the console missed it.
-	printf '<%s>rasputin-seal-key: %s\n' "$1" "$2" > "$KMSG" 2>/dev/null \
-		|| printf '<4>rasputin-seal-key: The log line could not be written to %s, so the console did not get it.\n' "$KMSG" >&2
-}
+# The log line and the record writer, shared with rasputin-store-init.sh
+# (geekdojo/geekdojo-brain#804): /usr/lib/rasputin/outcome/outcome.sh, found
+# beside this script's directory so a test runs the overlay's copy.
+OUTCOME_TAG=rasputin-seal-key
+OUTCOME_KMSG=$KMSG
+. "$(dirname "$0")/../outcome/outcome.sh"
+
+# log PRIORITY LINE — stdout (the journal) and /dev/kmsg (every console=
+# device); outcome.sh's outcome_log.
+log() { outcome_log "$1" "$2"; }
 
 # finish OUTCOME KEY_ID REASON — write the record (and the gate on refusal),
 # log the line, and exit with the outcome's status. Every path ends here.
@@ -116,19 +116,10 @@ finish() {
 		refused) _prio=2 _rc=2 ;;
 		*) _prio=3 _rc=1 ;;
 	esac
-	_boot_id=$(cat "$BOOTID_SRC" 2>/dev/null) || _boot_id=""
-	[ -n "$_boot_id" ] || _boot_id=-
-	if ! { rm -f "$RECORD_TMP" \
-		&& printf 'outcome=%s\nboot_id=%s\nkey_id=%s\nreason=%s\n' \
-			"$_outcome" "$_boot_id" "$_key_id" "$_reason" > "$RECORD_TMP" \
-		&& chmod 600 "$RECORD_TMP" \
-		&& mv -f "$RECORD_TMP" "$RECORD"; } 2>/dev/null; then
-		# Best effort, its error dropped on purpose: the failure is logged on the
-		# next line, no reader opens the temp name (only $RECORD), it is on
-		# tmpfs, and the next run's write starts by removing it.
-		rm -f "$RECORD_TMP" 2>/dev/null
-		log 3 "The outcome record $RECORD could not be written, so only this journal line carries the outcome."
-	fi
+	# A failed write is logged by outcome_record; the outcome line below still
+	# carries the outcome, so the run goes on to it.
+	outcome_record "$RECORD" "$RECORD_TMP" "outcome=$_outcome" \
+		"boot_id=$(outcome_boot_id "$BOOTID_SRC")" "key_id=$_key_id" "reason=$_reason" || :
 	if [ "$_outcome" = refused ] && ! { printf '%s\n' "$_reason" > "$GATE"; } 2>/dev/null; then
 		log 3 "The gate file $GATE could not be written, so rasputin-api.service is not held back by this refusal."
 	fi

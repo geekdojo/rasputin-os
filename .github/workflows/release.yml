@@ -100,6 +100,13 @@ jobs:
       # runner.
       - name: API store wiring and pin guard
         run: sh test/api-store-wiring-test.sh
+      # The secrets store's policy text (geekdojo/geekdojo-brain#804): the
+      # pinned api tarball must carry rasputin-control-plane's storepolicy/ at
+      # the same tag, byte for byte. ci.yml runs only on pull requests, so a
+      # tag or dispatch would otherwise build an image from text nothing
+      # compared; the post-build guard then holds the image to the tarball.
+      - name: Store policy live drift check
+        run: sh test/store-policy-live-drift.sh
 
   build:
     needs: validate

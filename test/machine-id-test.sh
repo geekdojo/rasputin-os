@@ -587,8 +587,14 @@ make_target() {
 	cp "$SHIM" "$_d/usr/lib/rasputin/machine-id/rasputin-init"
 	chmod +x "$_d/usr/lib/rasputin/machine-id/rasputin-init"
 	ln -s "${2:-../lib/systemd/systemd}" "$_d/sbin/init"
+	# The secrets store's policy text, which post-build.sh's guard reads
+	# (geekdojo/geekdojo-brain#804); BUILD_DIR is Buildroot's, exported to it.
+	rm -rf "$BUILD_DIR"
+	store_policy_fixture "$ROOT" "$_d" "$BUILD_DIR" || exit 2
 	unset _d
 }
+. "$ROOT/test/lib/store-policy-fixture.sh"
+BUILD_DIR="$TMP/build"; export BUILD_DIR
 # post_build DIR — run it; sets OUT and RC.
 post_build() { OUT=$(sh "$POSTBUILD" "$1" n100 2>&1); RC=$?; }
 

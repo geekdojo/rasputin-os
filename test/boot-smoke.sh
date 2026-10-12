@@ -68,7 +68,15 @@ DNS_PORT=15353
 # report (ordered only After=tailscaled) has normally already arrived.
 # KM_TRIES is the kernel-match verdict poll (2s apart, 60s ceiling); like the
 # tailscale report it normally arrived long before the polls above finish.
-BOOT_BUDGET=900 ; MU_TRIES=120 ; FB_TRIES=60 ; API_TRIES=48 ; ATREST_TRIES=60 ; TS_TRIES=30 ; KM_TRIES=30
+# SI_TRIES is the secrets store's self-init line (geekdojo/geekdojo-brain#804;
+# 2s apart, 60s ceiling). The api mints the store's leaf in the background
+# after it starts and then restarts the store, so the line can come after
+# /healthz answers; by the end of the polls above it normally has. With it the
+# worst case is 790 + 60 + 60 = 910s of polling ceilings, but the tailscale,
+# kernel-match and store-init lines are written by then, so those three polls
+# end on their first read and the real worst case stays inside the qemu
+# timeout; a stuck one is still reported by its own assertion.
+BOOT_BUDGET=900 ; MU_TRIES=120 ; FB_TRIES=60 ; API_TRIES=48 ; ATREST_TRIES=60 ; TS_TRIES=30 ; KM_TRIES=30 ; SI_TRIES=30
 case "$ARCH" in
   amd64|arm64) ;;
   *) echo "::error::unknown arch '$ARCH' (expected amd64 or arm64)"; exit 1 ;;
@@ -408,12 +416,27 @@ if [ "$ok" = 1 ]; then
 fi
 KM_AT=$(( $(date +%s) - START ))
 
+# The secrets store's self-init (geekdojo/geekdojo-brain#804, TC-804-23).
+# rasputin-store-init.sh writes one "rasputin-store-init:" line to /dev/kmsg
+# when the store's first start ends, initialised or failed. Arrival is polled
+# here, before the kill; the outcome is asserted after it.
+sirep=0
+if [ "$api" = 1 ]; then
+  i=0
+  while [ "$i" -lt "$SI_TRIES" ]; do
+    if grep -qa "rasputin-store-init: " "$CONSOLE_LOG"; then sirep=1; break; fi
+    die_if_qemu_gone "the secrets store's self-init line"
+    i=$((i + 1)); sleep 2
+  done
+fi
+SI_AT=$(( $(date +%s) - START ))
+
 TOTAL=$(( $(date +%s) - START ))
 
 kill "$QPID" 2>/dev/null || true
 echo "----- last 60 lines of console -----"; tail -60 "$CONSOLE_LOG" || true
 echo "----- $ARCH smoke timings (seconds from qemu start) -----"
-echo "multi-user=${MU_AT}s firstboot=${FB_AT}s api+ui+dns=${API_AT}s atrest-verdict=${ATREST_AT}s tailscale-report=${TS_AT}s kernel-match=${KM_AT}s total(incl. 70s soak)=${TOTAL}s"
+echo "multi-user=${MU_AT}s firstboot=${FB_AT}s api+ui+dns=${API_AT}s atrest-verdict=${ATREST_AT}s tailscale-report=${TS_AT}s kernel-match=${KM_AT}s store-init=${SI_AT}s total(incl. 70s soak)=${TOTAL}s"
 
 # ------------------------------------------------------------ assertions ------
 [ "$ok" = 1 ] || { echo "::error::$ARCH image did not reach multi-user in QEMU"; exit 1; }
@@ -579,6 +602,22 @@ case "$SK_LINE" in
   "rasputin-seal-key: outcome=created "*) echo "seal key created at boot: ${SK_LINE%% reason=*}" ;;
   "") echo "::error::no 'rasputin-seal-key:' line reached the serial console — nothing created the secrets store's seal key on a fresh control plane. Check rasputin-seal-key.service is in the overlay and enabled."; exit 1 ;;
   *) echo "::error::the seal-key oneshot did not create a key on a FRESH control plane: $SK_LINE"; exit 1 ;;
+esac
+
+# The store initialised itself (geekdojo/geekdojo-brain#804, TC-804-23). A
+# freshly flashed control plane's store starts on an empty data directory, so
+# its first start must end in exactly one "outcome=initialised" line and no
+# "outcome=failed" line. A missing line fails like a wrong one: silence means
+# the store never started, or nothing recorded what its first start did.
+SI_LINE="$(grep -ao 'rasputin-store-init: .*' "$CONSOLE_LOG" | tr -d '\r' | head -1)"
+if grep -aq 'rasputin-store-init: outcome=failed' "$CONSOLE_LOG"; then
+  echo "::error::the secrets store's self-init FAILED on a fresh control plane, and that store will refuse to unseal on every later start: $(grep -ao 'rasputin-store-init: outcome=failed.*' "$CONSOLE_LOG" | tr -d '\r' | head -1)"
+  exit 1
+fi
+case "$SI_LINE" in
+  "rasputin-store-init: outcome=initialised "*) echo "secrets store initialised itself at first start: ${SI_LINE%% reason=*}" ;;
+  "") echo "::error::no 'rasputin-store-init:' line reached the serial console in ${SI_AT}s — the secrets store's first start was never recorded on a fresh control plane: the api did not mint its leaf and restart the store, the store never started, or openbao.service lost its outcome hooks."; exit 1 ;;
+  *) echo "::error::the secrets store's first start on a fresh control plane did not report outcome=initialised: $SI_LINE"; exit 1 ;;
 esac
 
 [ "$api" = 1 ] \

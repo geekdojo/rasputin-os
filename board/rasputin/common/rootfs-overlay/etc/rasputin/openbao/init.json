@@ -1,0 +1,111 @@
+{
+  "initialize": [
+    {
+      "policies": {
+        "request": [
+          {
+            "policy-rasputin-api": {
+              "operation": "update",
+              "path": "sys/policies/acl/rasputin-api",
+              "data": {
+                "policy": {
+                  "eval_type": "string",
+                  "eval_source": "file",
+                  "path": "/usr/share/rasputin/openbao-policy/rasputin-api.hcl"
+                }
+              }
+            }
+          },
+          {
+            "policy-rasputin-seal-rotate": {
+              "operation": "update",
+              "path": "sys/policies/acl/rasputin-seal-rotate",
+              "data": {
+                "policy": {
+                  "eval_type": "string",
+                  "eval_source": "file",
+                  "path": "/usr/share/rasputin/openbao-policy/rasputin-seal-rotate.hcl"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "secrets": {
+        "request": [
+          {
+            "kv-mount": {
+              "operation": "update",
+              "path": "sys/mounts/rasputin-secrets",
+              "data": {
+                "type": "kv",
+                "options": {
+                  "version": "2"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "auth": {
+        "request": [
+          {
+            "enable-cert": {
+              "operation": "update",
+              "path": "sys/auth/cert",
+              "data": {
+                "type": "cert"
+              }
+            }
+          },
+          {
+            "role-rasputin-api": {
+              "operation": "update",
+              "path": "auth/cert/certs/rasputin-api",
+              "data": {
+                "certificate": {
+                  "eval_type": "string",
+                  "eval_source": "file",
+                  "path": "/run/credentials/openbao.service/store-ca.pem"
+                },
+                "allowed_common_names": [
+                  "rasputin-api"
+                ],
+                "token_policies": [
+                  "rasputin-api"
+                ],
+                "token_no_default_policy": true,
+                "token_ttl": "1h"
+              }
+            }
+          },
+          {
+            "role-rasputin-seal-rotate": {
+              "operation": "update",
+              "path": "auth/cert/certs/rasputin-seal-rotate",
+              "data": {
+                "certificate": {
+                  "eval_type": "string",
+                  "eval_source": "file",
+                  "path": "/run/credentials/openbao.service/store-ca.pem"
+                },
+                "allowed_common_names": [
+                  "rasputin-seal-rotate"
+                ],
+                "token_policies": [
+                  "rasputin-seal-rotate"
+                ],
+                "token_no_default_policy": true,
+                "token_ttl": "1h"
+              }
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

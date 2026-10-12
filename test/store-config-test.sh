@@ -47,6 +47,8 @@ for f in checks.sh hcl-keys.sh unit-directives.sh mk-var.sh listen-sockets.sh; d
 done
 command -v make >/dev/null 2>&1 \
 	|| { echo "FAILED: GNU make is not on PATH, and the openbao user is read from openbao.mk with it."; exit 1; }
+command -v jq >/dev/null 2>&1 \
+	|| { echo "FAILED: jq is not on PATH, and the store's self-init config (init.json) is read with it."; exit 1; }
 
 . "$LIB/checks.sh"
 . "$LIB/hcl-keys.sh"
@@ -63,6 +65,11 @@ CONFIG=$(configs "$(directives "$ROOT/$REL_UNIT")" | head -1)
 	|| { echo "FAILED: the ExecStart of $ROOT/$REL_UNIT names no -config=, so there is no store config to check."; exit 1; }
 [ -f "$ROOT/$REL_OVERLAY$CONFIG" ] \
 	|| { echo "FAILED: the store's config $ROOT/$REL_OVERLAY$CONFIG (ExecStart's first -config) is missing, so it cannot be checked."; exit 1; }
+# The self-init config is ExecStart's second -config (geekdojo-brain#804).
+INIT=$(configs "$(directives "$ROOT/$REL_UNIT")" | sed -n 2p)
+case "$INIT" in /etc/*) ;; *) echo "FAILED: ExecStart's second -config ($INIT) is not a file under /etc, so there is no self-init config to check."; exit 1 ;; esac
+[ -f "$ROOT/$REL_OVERLAY$INIT" ] \
+	|| { echo "FAILED: the store's self-init config $ROOT/$REL_OVERLAY$INIT (ExecStart's second -config) is missing, so it cannot be checked."; exit 1; }
 
 # The static user, from the package (S7). Fields: name uid group gid ...
 USERS=$(mk_var "$ROOT/$REL_MK" OPENBAO_USERS) || { echo "FAILED: could not read OPENBAO_USERS from $ROOT/$REL_MK."; exit 1; }
@@ -117,13 +124,15 @@ verify() (
 	LISTENER='listener "tcp"'
 
 	echo "  -- the exact keys of each scope (TC-756-01)"
-	setof "TC-756-01 the top level holds exactly api_addr, disable_clustering, ui, log_level, one listener \"tcp\" and one storage \"pebbledb\"" \
+	# Since geekdojo-brain#804 the top level also holds the one audit stanza.
+	setof "TC-756-01 the top level holds exactly api_addr, disable_clustering, ui, log_level, one listener \"tcp\", one storage \"pebbledb\" and one audit \"file\" \"rasputin\"" \
 		"$(keys '')" 'api_addr
 disable_clustering
 ui
 log_level
 listener "tcp" {
-storage "pebbledb" {'
+storage "pebbledb" {
+audit "file" "rasputin" {'
 	setof "TC-756-01 the listener \"tcp\" block holds exactly address, the three TLS files, the client-cert requirement and the two disable_unauthed_* options" \
 		"$(keys "$LISTENER")" 'address
 tls_cert_file
@@ -184,12 +193,14 @@ $(keys "${_b% \{}")"
 	_bad=$(printf '%s\n' "$_all" | grep -E '^(current_key|current_key_id|token)$' || true)
 	check "TC-756-04 no current_key, current_key_id or token key in any scope" "$(yes_if [ -z "$_bad" ])" \
 		"found: $(printf '%s' "$_bad" | tr '\n' '|')"
+	# Since geekdojo-brain#804 init.json is the second -config, so the seal
+	# fragment is the last.
 	_seal_name=$(cred /var/lib/rasputin/openbao-seal/seal.hcl)
-	_second=$(configs "$D" | sed -n 2p)
+	_last=$(configs "$D" | tail -n 1)
 	_st=1
-	[ -n "$_seal_name" ] && [ "$_second" = "$CREDS/$_seal_name" ] && _st=0
-	check "TC-756-04 ExecStart's second -config is the seal.hcl credential's copy ($CREDS/${_seal_name:-?})" \
-		"$_st" "second -config: ${_second:-none}"
+	[ -n "$_seal_name" ] && [ "$_last" = "$CREDS/$_seal_name" ] && _st=0
+	check "TC-756-04 ExecStart's last -config is the seal.hcl credential's copy ($CREDS/${_seal_name:-?})" \
+		"$_st" "last -config: ${_last:-none}"
 	_ll=$(words "$D" Service ExecStart | grep -e '^-log-level' || true)
 	check "TC-756-04 ExecStart has no -log-level" "$(yes_if [ -z "$_ll" ])" "found: $_ll"
 	_env=$(printf '%s\n' "$D" | grep BAO_LOG_LEVEL || true)
@@ -214,6 +225,71 @@ $(keys "${_b% \{}")"
 	_install=$(grep -nE '^[[:space:]]*\[Install\]' "$U" || true)
 	check "TC-756-05 the unit has no [Install] section" "$(yes_if [ -z "$_install" ])" "found: $_install"
 
+	echo "  -- the audit stanza (TC-804-13 (1), (2))"
+	AUDIT='audit "file" "rasputin"'
+	setof "TC-804-13 the audit \"file\" \"rasputin\" block holds exactly one options block" "$(keys "$AUDIT")" 'options {'
+	setof "TC-804-13 the audit options hold exactly file_path, mode, log_raw and hmac_accessor" \
+		"$(keys "$AUDIT / options")" 'file_path
+mode
+log_raw
+hmac_accessor'
+	value_is "TC-804-13 audit mode = 0600" "$AUDIT / options" mode 0600
+	value_is "TC-804-13 audit log_raw = false (every string value HMACed)" "$AUDIT / options" log_raw false
+	value_is "TC-804-13 audit hmac_accessor = true" "$AUDIT / options" hmac_accessor true
+	_fp=$(hcl_get "$H" "$AUDIT / options" file_path 2>&1)
+	check "TC-804-13 the audit file_path ($_fp) sits in one of the unit's ReadWritePaths directories" "$(yes_if contains "
+$(dirname "$_fp")
+" "
+$(words "$D" Service ReadWritePaths)
+")" "ReadWritePaths: $(words "$D" Service ReadWritePaths | tr '\n' ' ')"
+	_init=$(printf '%s\n' "$_top" | grep -E '^initialize( |$)' || true)
+	check "TC-804-13 openbao.hcl has no initialize stanza (self-init is init.json's)" "$(yes_if [ -z "$_init" ])" "found: $_init"
+
+	echo "  -- the self-init config, init.json (TC-804-13 (3) to (6))"
+	J="$R/$REL_OVERLAY$INIT"
+	_ca_name=$(cred /var/lib/rasputin/trust/store-ca.pem)
+	CA_PATH="$CREDS/${_ca_name:-<no store-ca.pem credential>}"
+	# reqs — one "PATH<TAB>OPERATION" per request, in order.
+	_reqs=$(jq -r '.initialize[] | to_entries[] | .value.request[] | to_entries[] | .value | "\(.path)\t\(.operation)"' "$J" 2>&1)
+	# #805 PINS: two policies and two roles. geekdojo-brain#805 adds the
+	# provisioner's policy and role here and updates this list (F-804-11).
+	check "TC-804-13 init.json's requests are exactly the two policies, the mount, cert auth and the two roles, in order" \
+		"$(yes_if [ "$(printf '%s\n' "$_reqs" | cut -f1)" = 'sys/policies/acl/rasputin-api
+sys/policies/acl/rasputin-seal-rotate
+sys/mounts/rasputin-secrets
+sys/auth/cert
+auth/cert/certs/rasputin-api
+auth/cert/certs/rasputin-seal-rotate' ])" "got: $(printf '%s' "$_reqs" | cut -f1 | tr '\n' '|')"
+	_ops=$(printf '%s\n' "$_reqs" | cut -f2 | sort -u)
+	check "TC-804-13 every request's operation is update" "$(yes_if [ "$_ops" = update ])" "got: $(printf '%s' "$_ops" | tr '\n' '|')"
+	_audit=$(printf '%s\n' "$_reqs" | cut -f1 | grep '^sys/audit' || true)
+	check "TC-804-13 no request touches sys/audit (a failed one leaves a store that never unseals)" "$(yes_if [ -z "$_audit" ])" "found: $_audit"
+	_af=$(jq '[.. | objects | select(has("allow_failure"))] | length' "$J" 2>&1)
+	check "TC-804-13 no allow_failure anywhere" "$(yes_if [ "$_af" = 0 ])" "found $_af"
+	_tok=$(jq '[.. | objects | select(has("token"))] | length' "$J" 2>&1)
+	check "TC-804-13 no token field anywhere" "$(yes_if [ "$_tok" = 0 ])" "found $_tok"
+	_env=$(jq -r '[.. | objects | select(has("eval_source")) | .eval_source | select(. != "file")] | unique | join(",")' "$J" 2>&1)
+	check "TC-804-13 no env or other non-file source" "$(yes_if [ -z "$_env" ])" "found: $_env"
+	# req PATH — the data of the request on PATH, compact.
+	req() { jq -c --arg p "$1" '[.initialize[] | to_entries[] | .value.request[] | to_entries[] | .value | select(.path == $p) | .data] | if length == 1 then .[0] else "requests on that path: \(length)" end' "$J" 2>&1; }
+	check "TC-804-13 the mount is kv version 2" \
+		"$(yes_if [ "$(req sys/mounts/rasputin-secrets)" = '{"type":"kv","options":{"version":"2"}}' ])" "got: $(req sys/mounts/rasputin-secrets)"
+	check "TC-804-13 cert auth is enabled" "$(yes_if [ "$(req sys/auth/cert)" = '{"type":"cert"}' ])" "got: $(req sys/auth/cert)"
+	for _p in rasputin-api rasputin-seal-rotate; do
+		_want_pol=$(jq -cn --arg p "/usr/share/rasputin/openbao-policy/$_p.hcl" '{policy: {eval_type: "string", eval_source: "file", path: $p}}')
+		check "TC-804-13 policy $_p is read from /usr/share/rasputin/openbao-policy/$_p.hcl through a file source" \
+			"$(yes_if [ "$(req "sys/policies/acl/$_p")" = "$_want_pol" ])" "got: $(req "sys/policies/acl/$_p")"
+		_want_role=$(jq -cn --arg n "$_p" --arg ca "$CA_PATH" '{certificate: {eval_type: "string", eval_source: "file", path: $ca}, allowed_common_names: [$n], token_policies: [$n], token_no_default_policy: true, token_ttl: "1h"}')
+		check "TC-804-13 role $_p: CN $_p only, policy $_p only, token_no_default_policy, the store CA credential ($CA_PATH) as its certificate" \
+			"$(yes_if [ "$(req "auth/cert/certs/$_p")" = "$_want_role" ])" "got: $(req "auth/cert/certs/$_p")"
+	done
+	_binders=$(jq -r '.initialize[] | to_entries[] | .value.request[] | to_entries[] | .value | select(((.data.token_policies // []) + (.data.policies // [])) | index("rasputin-seal-rotate")) | .path' "$J" 2>&1)
+	check "TC-804-13 rasputin-seal-rotate is bound only by its own role" \
+		"$(yes_if [ "$_binders" = auth/cert/certs/rasputin-seal-rotate ])" "bound by: $(printf '%s' "$_binders" | tr '\n' '|')"
+	_stray=$(jq -r --arg ca "$CA_PATH" '[.. | objects | select(.eval_source? == "file") | .path | select((startswith("/usr/share/rasputin/openbao-policy/") or . == $ca) | not)] | join(",")' "$J" 2>&1)
+	check "TC-804-13 every file source is under /usr/share/rasputin/openbao-policy/ or is the store CA credential" \
+		"$(yes_if [ -z "$_stray" ])" "outside: $_stray"
+
 	[ "$fails" -eq 0 ]
 )
 
@@ -223,11 +299,11 @@ check "the shipped openbao.hcl, openbao.service and post-build.sh pass every che
 
 # --- negative controls (TC-756-06) --------------------------------------------------
 N=0
-# tree — a scratch copy of the five files verify reads. Sets T.
+# tree — a scratch copy of the six files verify reads. Sets T.
 tree() {
 	N=$((N + 1))
 	T="$SCRATCH/t$N"
-	for _rel in "$REL_UNIT" "$REL_TMPFILES" "$REL_POSTBUILD" "$REL_MK" "$REL_OVERLAY$CONFIG"; do
+	for _rel in "$REL_UNIT" "$REL_TMPFILES" "$REL_POSTBUILD" "$REL_MK" "$REL_OVERLAY$CONFIG" "$REL_OVERLAY$INIT"; do
 		mkdir -p "$(dirname "$T/$_rel")"
 		cp "$ROOT/$_rel" "$T/$_rel"
 	done
@@ -315,6 +391,52 @@ tree; edit "$T/$REL_POSTBUILD" "replace:$LINK" '' \
 	&& refused 'the post-build link removed' 'multi-user.target.wants/openbao.service' 'got 0'
 tree; edit "$T/$REL_POSTBUILD" "after:$LINK" "$LINK" \
 	&& refused 'the post-build link duplicated' 'multi-user.target.wants/openbao.service' 'got 2'
+
+# TC-804-13: one injection per audit and self-init check.
+# jqedit FILE FILTER — FILE rewritten by jq FILTER; the copy must change.
+jqedit() {
+	cp "$1" "$1.orig"
+	if ! jq "$2" "$1.orig" >"$1" || cmp -s "$1" "$1.orig"; then
+		check "the control's jq edit changed $(basename "$1") ($2)" 1
+		rm -f "$1.orig"; return 1
+	fi
+	rm -f "$1.orig"
+}
+INIT_REL="$REL_OVERLAY$INIT"
+# role DATA-FILTER — a jq filter applying DATA-FILTER to the rasputin-api role's data.
+api_role() { printf '(.initialize[] | .auth? // empty | .request[] | ."role-rasputin-api"? // empty | .data) |= (%s)' "$1"; }
+tree; edit "$T/$HCL_REL" 'replace:    mode = "0600"' '    mode = "0644"' \
+	&& refused 'audit mode = "0644"' 'audit mode = 0600' 'got: 0644'
+tree; edit "$T/$HCL_REL" 'replace:    log_raw = "false"' '    log_raw = "true"' \
+	&& refused 'audit log_raw = "true"' 'log_raw = false'
+tree; edit "$T/$HCL_REL" 'replace:    hmac_accessor = "true"' '    hmac_accessor = "false"' \
+	&& refused 'audit hmac_accessor = "false"' 'hmac_accessor = true'
+tree; edit "$T/$HCL_REL" 'replace:    file_path = "/var/lib/rasputin/openbao-audit/audit.log"' '    file_path = "/var/lib/rasputin/audit.log"' \
+	&& refused 'audit file_path outside the ReadWritePaths' 'audit file_path (/var/lib/rasputin/audit.log)'
+tree; edit "$T/$HCL_REL" 'after:    hmac_accessor = "true"' '    prefix = "x"' \
+	&& refused 'an extra audit option' 'file_path, mode, log_raw and hmac_accessor' 'prefix'
+tree; edit "$T/$HCL_REL" append 'initialize "policies" {\n  x = "y"\n}' \
+	&& refused 'an initialize stanza in openbao.hcl' 'no initialize stanza' 'initialize'
+tree; jqedit "$T/$INIT_REL" '.initialize += [{"audit": {"request": [{"audit-file": {"operation": "update", "path": "sys/audit/file", "data": {"type": "file"}}}]}}]' \
+	&& refused 'a sys/audit request in init.json' 'no request touches sys/audit' 'sys/audit/file'
+tree; jqedit "$T/$INIT_REL" '.initialize[0].policies.request[0]."policy-rasputin-api".allow_failure = true' \
+	&& refused 'allow_failure on a request' 'no allow_failure anywhere' 'found 1'
+tree; jqedit "$T/$INIT_REL" '.initialize[0].policies.token = "root"' \
+	&& refused 'a token field' 'no token field anywhere' 'found 1'
+tree; jqedit "$T/$INIT_REL" '.initialize[0].policies.request[0]."policy-rasputin-api".data.policy.eval_source = "env"' \
+	&& refused 'an env source' 'no env or other non-file source' 'env'
+tree; jqedit "$T/$INIT_REL" '.initialize[1].secrets.request += [{"kv-extra": {"operation": "update", "path": "sys/mounts/extra", "data": {"type": "kv"}}}]' \
+	&& refused 'an extra mount request' "init.json's requests are exactly" 'sys/mounts/extra'
+tree; jqedit "$T/$INIT_REL" "$(api_role '.allowed_common_names = ["*"]')" \
+	&& refused 'the api role admitting any CommonName' 'role rasputin-api: CN rasputin-api only' '"allowed_common_names":["*"]'
+tree; jqedit "$T/$INIT_REL" "$(api_role '.token_no_default_policy = false')" \
+	&& refused 'the api role keeping the default policy' 'role rasputin-api' '"token_no_default_policy":false'
+tree; jqedit "$T/$INIT_REL" "$(api_role '.certificate.path = "/run/credentials/openbao.service/server.pem"')" \
+	&& refused 'the api role trusting the server leaf, not the store CA' 'role rasputin-api' 'server.pem'
+tree; jqedit "$T/$INIT_REL" "$(api_role '.token_policies = ["rasputin-api", "rasputin-seal-rotate"]')" \
+	&& refused 'the api role also granting the rotation policy' 'rasputin-seal-rotate is bound only by its own role' 'auth/cert/certs/rasputin-api'
+tree; jqedit "$T/$INIT_REL" '.initialize[0].policies.request[1]."policy-rasputin-seal-rotate".data.policy.path = "/tmp/rasputin-seal-rotate.hcl"' \
+	&& refused 'a policy file source outside openbao-policy/' 'every file source is under /usr/share/rasputin/openbao-policy/' '/tmp/rasputin-seal-rotate.hcl'
 
 # --- the libraries, table-tested (TC-756-07) ----------------------------------------
 echo
@@ -444,7 +566,7 @@ full_root() {
 	cp "$0" "$T/test/store-config-test.sh"
 	for f in checks.sh hcl-keys.sh unit-directives.sh mk-var.sh listen-sockets.sh; do cp "$LIB/$f" "$T/test/lib/"; done
 }
-for gone in "$REL_OVERLAY$CONFIG" "$REL_UNIT" "$REL_POSTBUILD" test/lib/hcl-keys.sh; do
+for gone in "$REL_OVERLAY$CONFIG" "$REL_OVERLAY$INIT" "$REL_UNIT" "$REL_POSTBUILD" test/lib/hcl-keys.sh; do
 	full_root
 	rm -f "${T:?}/$gone"
 	out=$("$SH_BIN" "$T/test/store-config-test.sh" "$T" 2>&1); rc=$?

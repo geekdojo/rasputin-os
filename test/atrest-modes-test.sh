@@ -552,12 +552,40 @@ store_cases() {
 	out=$(run_audit "$R2"); rc=$?
 	ok "TC-754-11 a public leaf certificate in an unswept store directory passes" \
 		"$(yes_if passed "$rc" "$out")" "$out"
+	# Since geekdojo-brain#804 openbao-audit/ is swept (TC-804-17 below), so
+	# only the data directory's contents are left to the store.
 	R2=$(world); V2="$R2/var/lib/rasputin"
 	: >"$V2/openbao/data.db"; chmod 0644 "$V2/openbao/data.db"
-	: >"$V2/openbao-audit/audit.log"; chmod 0644 "$V2/openbao-audit/audit.log"
 	out=$(run_audit "$R2"); rc=$?
-	ok "TC-754-11 store-owned contents are not swept" \
+	ok "TC-754-11 the store's data contents are not swept" \
 		"$(yes_if passed "$rc" "$out")" "$out"
+
+	# TC-804-17: the audit log (geekdojo-brain#804). The stanza writes it
+	# 0600 as the store's uid; the row holds it there (the harness copy
+	# rewrites 990 to this user), and the sweep holds every other file in
+	# openbao-audit/, #799's rotated copies included, to owner-only.
+	A="$VAR_RASPUTIN/openbao-audit/audit.log"
+	R2=$(world); V2="$R2/var/lib/rasputin"
+	: >"$R2$A"; chmod 0600 "$R2$A"
+	out=$(run_audit "$R2"); rc=$?
+	ok "TC-804-17 audit.log at 0600, owned as declared, passes" "$(yes_if passed "$rc" "$out")" "$out"
+	chmod 0644 "$R2$A"
+	out=$(run_audit "$R2"); rc=$?
+	ok "TC-804-17 audit.log at 0644 is refused" "$(yes_if [ "$rc" -ne 0 ])" "$out"
+	ok "TC-804-17 the failure names audit.log and its mode" \
+		"$(yes_if says "$A is 0644, declared 0600" "$out")" "$out"
+	chmod 0600 "$R2$A"
+	: >"$V2/openbao-audit/audit.log.1"; chmod 0644 "$V2/openbao-audit/audit.log.1"
+	out=$(run_audit "$R2"); rc=$?
+	ok "TC-804-17 a 0644 rotated copy is refused" "$(yes_if [ "$rc" -ne 0 ])" "$out"
+	ok "TC-804-17 the sweep names the rotated copy" \
+		"$(yes_if says 'openbao-audit/audit.log.1 is 0644 in a swept tree' "$out")" "$out"
+	chmod 0600 "$V2/openbao-audit/audit.log.1"
+	out=$(run_audit "$R2"); rc=$?
+	ok "TC-804-17 a 0600 rotated copy passes the sweep" "$(yes_if passed "$rc" "$out")" "$out"
+	out=$(audit_with "$INVENTORY" "$R2" -u "$ME" -g "$MYGID")
+	ok "TC-804-17 the shipped inventory holds audit.log to uid $OPENBAO_ID" \
+		"$(yes_if says "$A is owned by uid $ME, not $OPENBAO_ID" "$out")" "$out"
 
 	# TC-754-12: the directories are required, the files optional.
 	for p in $STORE_DIRS; do
@@ -734,7 +762,13 @@ sweeps=$(awk '$1 == "sweep" { print $2 }' "$INVENTORY")
 listed() { printf '%s\n' "$2" | grep -qxF -- "$1"; }
 ok "TC-754-02 openbao-seal is swept" \
 	"$(yes_if listed "$VAR_RASPUTIN/openbao-seal" "$sweeps")" "$sweeps"
-for p in "$VAR_RASPUTIN/openbao" "$VAR_RASPUTIN/openbao-audit" "$VAR_RASPUTIN/tls" \
+# Since geekdojo-brain#804 openbao-audit is swept as well (TC-804-17).
+ok "TC-804-17 openbao-audit is swept" \
+	"$(yes_if listed "$VAR_RASPUTIN/openbao-audit" "$sweeps")" "$sweeps"
+ok "TC-804-17 the inventory declares openbao-audit/audit.log optional 0600, 990:990" \
+	"$(yes_if [ "$(inv_row "$VAR_RASPUTIN/openbao-audit/audit.log")" = "0600 optional 990 990 5" ])" \
+	"inventory: $(inv_row "$VAR_RASPUTIN/openbao-audit/audit.log")"
+for p in "$VAR_RASPUTIN/openbao" "$VAR_RASPUTIN/tls" \
 	"$VAR_RASPUTIN/tls/openbao-server" "$VAR_RASPUTIN/tls/openbao-client"; do
 	ok "TC-754-02 $p is not swept" \
 		"$(yes_if not listed "$p" "$sweeps")" "$sweeps"
@@ -773,8 +807,9 @@ ok "TC-754-13 the harness inventory keeps every non-comment line" \
 	"$(yes_if [ "$(grep -Ecv '^[[:space:]]*(#|$)' "$INVENTORY")" = "$(grep -Ecv '^[[:space:]]*(#|$)' "$HARNESS_INV")" ])"
 ok "TC-754-13 the harness inventory keeps every sweep line" \
 	"$(yes_if [ "$(grep '^sweep' "$INVENTORY")" = "$(grep '^sweep' "$HARNESS_INV")" ])"
-ok "TC-754-13 the harness inventory rewrote both store-owned rows" \
-	"$(yes_if [ "$(awk -v u="$ME" -v g="$MYGID" '$4 == u && $5 == g' "$HARNESS_INV" | grep -c 'rasputin/openbao')" -eq 2 ])" \
+# Three since geekdojo-brain#804: the two directories and audit.log.
+ok "TC-754-13 the harness inventory rewrote all three store-owned rows" \
+	"$(yes_if [ "$(awk -v u="$ME" -v g="$MYGID" '$4 == u && $5 == g' "$HARNESS_INV" | grep -c 'rasputin/openbao')" -eq 3 ])" \
 	"$(grep openbao "$HARNESS_INV")"
 ok "TC-754-13 the shipped inventory is untouched" \
 	"$(yes_if [ "$(cksum <"$INVENTORY")" = "$SHIPPED_SUM_BEFORE" ])"

@@ -300,6 +300,31 @@ jobs:
       # the wiring under real systemd.
       - name: API store wiring tests
         run: sh test/api-store-wiring-test.sh
+      # The secrets store's self-init outcome writer (geekdojo/geekdojo-brain#804):
+      # every branch of rasputin-store-init.sh against a scratch tree, the
+      # record's three lines and mode, and the journal and console lines,
+      # under dash, bash, busybox ash and busybox's own applets.
+      - name: Store self-init outcome tests
+        env:
+          REQUIRE_BUSYBOX: "1"
+        run: sh test/store-init-outcome-test.sh
+      # The store's policy text (geekdojo/geekdojo-brain#804): the drift script
+      # against fixtures (a match, a changed byte, a missing and an extra file,
+      # an unreadable and an empty side), and the post-build guard that
+      # refuses an image whose init.json names a policy file it lacks.
+      - name: Store policy drift and post-build guard tests
+        env:
+          REQUIRE_BUSYBOX: "1"
+        run: |
+          sh test/store-policy-drift-test.sh
+          sh test/check-store-policy-test.sh
+      # The live drift check (geekdojo/geekdojo-brain#804, TC-804-11): the
+      # pinned api tarball's openbao-policy/ against rasputin-control-plane's
+      # storepolicy/ at the same tag, plus its two controls. Red while the api
+      # pin predates the policy files, by design: the image would not build
+      # either. release.yml's validate job runs it too.
+      - name: Store policy live drift check
+        run: sh test/store-policy-live-drift.sh
       # release.yml's publish step runs scripts/release-target-guard.sh before
       # and after `gh release create` to prove the tag is on the commit the
       # images were built from. Every exit status, against a throwaway git

@@ -3,7 +3,9 @@
 # systemd 258.7 as PID 1 (the release Buildroot 2026.08 builds into the image)
 # and the REAL pinned bao, downloaded for this machine's architecture and
 # checked against package/openbao/openbao.hash (geekdojo/geekdojo-brain#755),
-# running the image's own main config, openbao.hcl, byte for byte (#756).
+# running the image's own main config, openbao.hcl, and self-init config,
+# init.json, byte for byte (#756, #804), with the policy files taken from the
+# pinned rasputin-api tarball (#804).
 #
 # WHY THIS EXISTS. The unit is nothing but systemd configuration around a
 # third-party binary, and what matters about it is what systemd and bao do with
@@ -14,13 +16,14 @@
 #
 # Scenarios, in one container, in this order:
 #   0  the test fails closed: no docker, a failed download, a tarball that
-#      does not match openbao.hash and a tree with no openbao.hcl each stop it
-#      with a sentence (TC-755-08, TC-756-10)
+#      does not match openbao.hash and a tree with no openbao.hcl or no
+#      init.json each stop it with a sentence (TC-755-08, TC-756-10)
 #   1  wanted: post-build.sh's link survives real preset-all, and the unit is
 #      enabled (TC-756-11)
 #   2  no role marker: skipped, not failed (TC-755-10)
 #   3  first boot, no leaf or no CA: skipped; then a restart starts it
-#      (TC-755-11)
+#      (TC-755-11). That first real start self-initialises the store from
+#      init.json, so from here on it is initialised (#804).
 #   4  no seal key: fails, never skips (TC-755-12)
 #
 # The seal key and the seal fragment are NOT harness: the real
@@ -31,13 +34,21 @@
 #      credentials, writable paths and memory (TC-755-13 to TC-755-16, 18)
 #   6  repeated crashes: the start limit, then recovery by reset-failed and
 #      start (TC-755-17)
-#   7  the shipped config at work: the only bao socket is 127.0.0.1:8200 at
-#      READY, after init and after a restart (TC-756-12); only a store-CA
-#      client certificate finishes the handshake (TC-756-13); the
-#      unauthenticated rekey and generate-root endpoints (TC-756-14); init,
-#      then a restart that unseals from the oneshot's fragment with no unseal
-#      call (TC-756-15); log level info (TC-756-16); and no key material in
-#      the journal (TC-756-17)
+#   7  the shipped config at work, on an emptied data directory: the store
+#      initialises itself with no sys/init call, leaves t=0 n=0 and no root
+#      token, holds the tarball's policy text, the kv-v2 mount, exactly the
+#      two roles and one audit device whose file is 0600 990:990 and HMACs a
+#      written value, and the outcome record says initialised (TC-804-18); a
+#      restart runs no self-init and changes none of it, unsealing from the
+#      oneshot's fragment with no unseal call (TC-804-19, TC-756-15); the
+#      only bao socket is 127.0.0.1:8200 (TC-756-12); only a store-CA client
+#      certificate finishes the handshake (TC-756-13); the unauthenticated
+#      rekey and generate-root endpoints (TC-756-14); log level info
+#      (TC-756-16); and no key material or token in the journal (TC-756-17)
+#   8  a forced failed self-init, one policy file missing: bao's ERROR line,
+#      a <3> rasputin-store-init: outcome=failed line and record, later
+#      starts refusing to unseal into the start limit, the record unchanged,
+#      and no token in the journal (TC-804-20)
 #
 # The main config is the overlay's openbao.hcl, installed byte for byte
 # (TC-756-09); this test writes no config of its own.
@@ -46,22 +57,31 @@
 #   * the openbao user, which mkusers creates on the image from OPENBAO_USERS;
 #   * a throwaway PKI (test/lib/test-pki.sh) standing in for the store CA and
 #     the server leaf the api mints (#758), plus a foreign CA's client leaf;
-#   * scenario 7's sys/init, one recovery share, its response kept in a 0600
-#     file in the container and never printed (initialisation proper is
-#     #804's);
+#   * the policy files under /usr/share/rasputin/openbao-policy/, which
+#     package/rasputin-api installs on the image, copied in from the pinned api
+#     tarball (test/lib/api-tarball.sh, checked against rasputin-api.hash);
+#   * scenario 7's test-only inspector: a drop-in ExecStart that is the
+#     shipped one plus -config=/etc/rasputin/openbao/test-inspector.json, a
+#     self-init stanza adding one read-only role for the test's own leaf, so
+#     the test can read what self-init made without a root token;
+#   * a drop-in Environment= pointing rasputin-store-init.sh's console line at
+#     a file, because in a privileged container /dev/kmsg is the host's;
+#   * scenario 8's missing policy file;
 #   * `mount --make-rshared /`. A booted image gets a shared root from systemd
 #     itself (mount-setup); a container's root is private, and without this the
 #     credentials systemd mounts never reach the service.
 #
 # NOT COVERED: the image's kernel and squashfs (test/update-smoke.sh), memory
-# under load (F3.6), initialisation proper and the audit stanza (#804), the
-# api's first-boot handoff (#758), F3.3's alert itself (#760), and the other
+# under load (F3.6), the api's first-boot handoff (#758), F3.3's alert itself
+# (#760), the job and alert for a failed init (#833), and the other
 # architecture: CI runs this on amd64. The unauthenticated-endpoint codes in
 # scenario 7 cannot tell the options from their defaults; their placement is
 # test/store-config-test.sh's.
 #
-# Needs: docker with privileged containers, openssl, GNU make, curl, network
-# access to the OpenBao release. Linux runner or Docker Desktop.
+# Needs: docker with privileged containers, openssl, GNU make, curl, jq,
+# network access to the OpenBao and control-plane releases. Linux runner or
+# Docker Desktop. RASPUTIN_API_TARBALL is test/lib/api-tarball.sh's test-only
+# override; CI never sets it.
 # Run:   sh test/store-unit-functional.sh
 #
 # Every wait below has a deadline and fails naming the fact that never became
@@ -73,6 +93,10 @@ OVERLAY="$ROOT/board/rasputin/common/rootfs-overlay"
 UNIT="$OVERLAY/etc/systemd/system/openbao.service"
 TMPFILES="$OVERLAY/usr/lib/tmpfiles.d/rasputin.conf"
 CONFIG="$OVERLAY/etc/rasputin/openbao/openbao.hcl"
+INIT="$OVERLAY/etc/rasputin/openbao/init.json"
+STOREINIT="$OVERLAY/usr/lib/rasputin/store-init/rasputin-store-init.sh"
+OUTCOME_LIB="$OVERLAY/usr/lib/rasputin/outcome/outcome.sh"
+APIPKG="$ROOT/package/rasputin-api"
 POSTBUILD="$ROOT/board/rasputin/common/post-build.sh"
 PKG="$ROOT/package/openbao"
 TLS_REFUSAL="$ROOT/test/lib/tls-refusal.sh"
@@ -84,14 +108,16 @@ PORT=8200
 
 # --- fail closed (scenario 0 checks this) ------------------------------------
 command -v docker >/dev/null 2>&1 || { echo "FAILED: this test needs docker, and docker is not on PATH."; exit 1; }
-for t in openssl make curl tar; do
+for t in openssl make curl tar jq; do
 	command -v "$t" >/dev/null 2>&1 || { echo "FAILED: this test needs $t, and it is not on PATH."; exit 1; }
 done
-for f in "$UNIT" "$TMPFILES" "$POSTBUILD" "$PKG/openbao.mk" "$PKG/openbao.hash" "$TLS_REFUSAL"; do
+for f in "$UNIT" "$TMPFILES" "$POSTBUILD" "$PKG/openbao.mk" "$PKG/openbao.hash" "$TLS_REFUSAL" \
+	"$STOREINIT" "$OUTCOME_LIB" "$APIPKG/rasputin-api.mk" "$APIPKG/rasputin-api.hash"; do
 	[ -f "$f" ] || { echo "FAILED: the file $f is missing."; exit 1; }
 done
 # The store's main config, which this test never writes for itself (TC-756-10).
 [ -f "$CONFIG" ] || { echo "FAILED: the store's main config $CONFIG is missing, and this test runs only the shipped one."; exit 1; }
+[ -f "$INIT" ] || { echo "FAILED: the store's self-init config $INIT is missing, and this test runs only the shipped one."; exit 1; }
 
 . "$ROOT/test/lib/checks.sh"
 . "$ROOT/test/lib/mk-var.sh"
@@ -99,7 +125,9 @@ done
 . "$ROOT/test/lib/container-systemd.sh"
 . "$ROOT/test/lib/test-pki.sh"
 . "$ROOT/test/lib/listen-sockets.sh"
+. "$ROOT/test/lib/api-tarball.sh"
 neither() { ! contains "$1" "$3" && ! contains "$2" "$3"; }
+not_contains() { ! contains "$1" "$2"; }
 
 SCRATCH=$(mktemp -d)
 cleanup() { ctr_cleanup; rm -rf "$SCRATCH"; }
@@ -136,6 +164,10 @@ echo "  $SOURCE matches openbao.hash"
 tar -xzf "$SCRATCH/$SOURCE" -C "$SCRATCH" bao \
 	|| { echo "FAILED: $SOURCE has no bao in it."; exit 1; }
 
+# --- the policy files, from the pinned api tarball (#804) ----------------------
+api_policy_fetch "$ROOT" "$BR_ARCH" "$SCRATCH/api" || exit 1
+echo "  policy files from api $API_VERSION: $(ls "$API_POLICY" | tr '\n' ' ')"
+
 echo
 echo "0. the test fails closed (TC-755-08)"
 SH_BIN=$(command -v sh)
@@ -151,13 +183,19 @@ check "with no docker nothing reports success or a skip" "$(yes_if neither passe
 # a directory holding a tarball of the right name and the wrong content.
 fake_root() {
 	_r="$SCRATCH/$1"
-	mkdir -p "$_r/test/lib" "$_r/package/openbao" "$_r/board/rasputin/common/rootfs-overlay/etc/systemd/system" \
+	mkdir -p "$_r/test/lib" "$_r/package/openbao" "$_r/package/rasputin-api" \
+		"$_r/board/rasputin/common/rootfs-overlay/etc/systemd/system" \
 		"$_r/board/rasputin/common/rootfs-overlay/usr/lib/tmpfiles.d" \
+		"$_r/board/rasputin/common/rootfs-overlay/usr/lib/rasputin/store-init" \
+		"$_r/board/rasputin/common/rootfs-overlay/usr/lib/rasputin/outcome" \
 		"$_r/board/rasputin/common/rootfs-overlay/etc/rasputin/openbao"
 	cp "$0" "$_r/test/store-unit-functional.sh"
 	cp "$ROOT"/test/lib/*.sh "$_r/test/lib/"
 	cp "$UNIT" "$_r/board/rasputin/common/rootfs-overlay/etc/systemd/system/"
-	cp "$CONFIG" "$_r/board/rasputin/common/rootfs-overlay/etc/rasputin/openbao/"
+	cp "$CONFIG" "$INIT" "$_r/board/rasputin/common/rootfs-overlay/etc/rasputin/openbao/"
+	cp "$STOREINIT" "$_r/board/rasputin/common/rootfs-overlay/usr/lib/rasputin/store-init/"
+	cp "$OUTCOME_LIB" "$_r/board/rasputin/common/rootfs-overlay/usr/lib/rasputin/outcome/"
+	cp "$APIPKG/rasputin-api.mk" "$APIPKG/rasputin-api.hash" "$_r/package/rasputin-api/"
 	cp "$POSTBUILD" "$_r/board/rasputin/common/"
 	cp "$TMPFILES" "$_r/board/rasputin/common/rootfs-overlay/usr/lib/tmpfiles.d/"
 	cp "$PKG/openbao.hash" "$_r/package/openbao/"
@@ -183,19 +221,30 @@ check "TC-756-10 with no openbao.hcl the test exits non-zero" "$(yes_if [ "$rc" 
 check "TC-756-10 with no openbao.hcl the message names the missing config" "$(yes_if contains 'openbao.hcl is missing' "$out")" "$out"
 check "TC-756-10 with no openbao.hcl nothing reports success or a skip" "$(yes_if neither passed skip "$out")" "$out"
 printf '         it said: %s\n' "$out"
+_r=$(fake_root noinit "file://$SCRATCH/badsite")
+rm -f "$SCRATCH/noinit/board/rasputin/common/rootfs-overlay/etc/rasputin/openbao/init.json"
+out=$("$SH_BIN" "$_r" 2>&1); rc=$?
+check "TC-804-18 with no init.json the test exits non-zero" "$(yes_if [ "$rc" -ne 0 ])" "exit=$rc"
+check "TC-804-18 with no init.json the message names the missing config" "$(yes_if contains 'init.json is missing' "$out")" "$out"
+check "TC-804-18 with no init.json nothing reports success or a skip" "$(yes_if neither passed skip "$out")" "$out"
+printf '         it said: %s\n' "$out"
 # The 258.7 pin refusal is f43_systemd_is_pinned, shown by
 # test/store-paths-functional.sh (TC-754-17).
 
 # --- the test PKI (TEST HARNESS: stands in for the CA and leaf the api mints) ---
 # server: the store CA's serverAuth leaf, SAN 127.0.0.1; it is also the
 # "serverAuth only" client of TC-756-13. client: the store CA's clientAuth
-# leaf. foreign: a clientAuth leaf from a CA the store does not trust.
+# leaf. api: the leaf the api mints for itself, CN rasputin-api (#758).
+# inspector: the test-only inspector's leaf. foreign: a clientAuth leaf from a
+# CA the store does not trust.
 P="$SCRATCH/pki"
 mkdir -p "$P"
 {
 	mint_ca "$P/ca.key" "$P/store-ca.pem" store-unit-test-ca &&
 	mint_leaf "$P/server.key" "$P/server.pem" store-unit-test-server "$P/store-ca.pem" "$P/ca.key" serverAuth IP:127.0.0.1 &&
 	mint_leaf "$P/client.key" "$P/client.pem" store-unit-test-client "$P/store-ca.pem" "$P/ca.key" clientAuth &&
+	mint_leaf "$P/api.key" "$P/api.pem" rasputin-api "$P/store-ca.pem" "$P/ca.key" clientAuth &&
+	mint_leaf "$P/inspector.key" "$P/inspector.pem" store-unit-test-inspector "$P/store-ca.pem" "$P/ca.key" clientAuth &&
 	mint_ca "$P/foreign-ca.key" "$P/foreign-ca.pem" store-unit-test-foreign-ca &&
 	mint_leaf "$P/foreign.key" "$P/foreign.pem" store-unit-test-foreign "$P/foreign-ca.pem" "$P/foreign-ca.key" clientAuth
 } || { echo "FAILED: openssl could not make the test PKI."; exit 1; }
@@ -205,8 +254,9 @@ f43_systemd_image "$IMAGE" || exit 1
 ctr_boot "the store unit" "$IMAGE" -v "$OVERLAY:/overlay:ro" || exit 1
 echo "in the container: $(inside 'systemctl --version | head -1')"
 if ! { docker cp "$SCRATCH/bao" "$CID:/usr/bin/bao" >/dev/null && docker cp "$P" "$CID:/pki" >/dev/null \
-	&& docker cp "$TLS_REFUSAL" "$CID:/root/tls-refusal.sh" >/dev/null; }; then
-	echo "FAILED: could not copy bao, the test PKI and test/lib/tls-refusal.sh into the container."; exit 1
+	&& docker cp "$TLS_REFUSAL" "$CID:/root/tls-refusal.sh" >/dev/null \
+	&& docker cp "$API_POLICY" "$CID:/root/openbao-policy" >/dev/null; }; then
+	echo "FAILED: could not copy bao, the test PKI, test/lib/tls-refusal.sh and the policy files into the container."; exit 1
 fi
 
 inside "
@@ -224,9 +274,21 @@ chown 0:0 /usr/bin/bao && chmod 0755 /usr/bin/bao
 mkdir -p $V && chmod 0755 $V
 install -D -m 0644 /overlay/usr/lib/tmpfiles.d/rasputin.conf /usr/lib/tmpfiles.d/rasputin.conf
 systemd-tmpfiles --create /usr/lib/tmpfiles.d/rasputin.conf >/dev/null 2>&1 || true
-# The unit and the main config, verbatim from the overlay.
+# The unit, the main and self-init configs and the outcome writer with its
+# library, verbatim from the overlay.
 install -m 0644 /overlay/etc/systemd/system/openbao.service /etc/systemd/system/openbao.service
 install -D -m 0644 /overlay/etc/rasputin/openbao/openbao.hcl /etc/rasputin/openbao/openbao.hcl
+install -D -m 0644 /overlay/etc/rasputin/openbao/init.json /etc/rasputin/openbao/init.json
+install -D -m 0755 /overlay/usr/lib/rasputin/store-init/rasputin-store-init.sh /usr/lib/rasputin/store-init/rasputin-store-init.sh
+install -D -m 0644 /overlay/usr/lib/rasputin/outcome/outcome.sh /usr/lib/rasputin/outcome/outcome.sh
+# TEST HARNESS: package/rasputin-api installs the policy files on the image;
+# here they come from the pinned api tarball, at the package's 0644.
+mkdir -p /usr/share/rasputin/openbao-policy
+install -m 0644 /root/openbao-policy/*.hcl /usr/share/rasputin/openbao-policy/
+# TEST HARNESS: in a privileged container /dev/kmsg is the host's, so the
+# outcome writer's console line goes to a file the test reads instead.
+mkdir -p /etc/systemd/system/openbao.service.d
+printf '[Service]\nEnvironment=RASPUTIN_STOREINIT_KMSG=/run/store-init-console\n' >/etc/systemd/system/openbao.service.d/harness-console.conf
 systemctl daemon-reload
 " || { echo "FAILED: could not install the unit, its config and the test harness into the container."; exit 1; }
 echo
@@ -235,6 +297,11 @@ want_sha=$(openssl dgst -sha256 -r "$CONFIG" | cut -d' ' -f1)
 got_sha=$(inside "sha256sum /etc/rasputin/openbao/openbao.hcl" | cut -d' ' -f1)
 r=1; [ -n "$want_sha" ] && [ "$got_sha" = "$want_sha" ] && r=0
 check "TC-756-09 the installed openbao.hcl is the overlay's, byte for byte (sha256 $got_sha)" "$r" \
+	"overlay $want_sha, installed $got_sha"
+want_sha=$(openssl dgst -sha256 -r "$INIT" | cut -d' ' -f1)
+got_sha=$(inside "sha256sum /etc/rasputin/openbao/init.json" | cut -d' ' -f1)
+r=1; [ -n "$want_sha" ] && [ "$got_sha" = "$want_sha" ] && r=0
+check "TC-804-18 the installed init.json is the overlay's, byte for byte (sha256 $got_sha)" "$r" \
 	"overlay $want_sha, installed $got_sha"
 
 # The seal key and fragment, from the real oneshot (#803, TC-803-24), run as
@@ -374,8 +441,9 @@ check "core limit is 0 soft and 0 hard (TC-755-14)" \
 
 echo "  -- credentials (TC-755-15)"
 code=$(health)
-check "sys/health over TLS with a client cert from the test CA answers 501, not initialised (got '$code')" \
-	"$(yes_if [ "$code" = 501 ])"
+# 200 since #804: scenario 3's first real start initialised the store itself.
+check "sys/health over TLS with a client cert from the test CA answers 200: initialised by its own self-init in scenario 3 (got '$code')" \
+	"$(yes_if [ "$code" = 200 ])"
 n=$(as_uid "$BAO_UID" "wc -c <$CREDS/seal-key")
 check "uid $BAO_UID reads the 32-byte seal-key (got '$n' bytes)" "$(yes_if [ "$n" = 32 ])"
 for c in seal-key seal.hcl store-ca.pem server.pem server.key; do
@@ -474,7 +542,7 @@ check "with the valid seal.hcl back, reset-failed then start brings it back acti
 inside "systemctl stop openbao.service" >/dev/null 2>&1
 
 echo
-echo "7. the shipped config at work (TC-756-12 to TC-756-17)"
+echo "7. self-init on the shipped config, and the config at work (TC-804-18, TC-804-19, TC-756-12 to TC-756-17)"
 # store_get PATH [CURL_ARG ...] — the HTTP code of PATH with the store-CA client
 # certificate and no token. --max-time bounds the one call.
 store_get() {
@@ -491,11 +559,150 @@ only_loopback() {
 	check "TC-756-12 $1: bao's only LISTEN socket is 127.0.0.1:$PORT (got '$(printf '%s' "$_ol" | tr '\n' ' ')')" \
 		"$(yes_if [ "$_ol" = "127.0.0.1:$PORT" ])"
 }
+# cursor — the journal's current cursor, so a later read covers only what came
+# after it.
+cursor() { inside "journalctl --show-cursor -n 0 -o cat" | sed -n 's/^-- cursor: //p'; }
+# journal_after CURSOR [ARG ...] — openbao.service's journal after CURSOR.
+journal_after() { _ja=$1; shift; inside "journalctl -u openbao.service --after-cursor='$_ja' --no-pager -o cat $*"; }
+# The line bao logs when it runs the self-init stanzas, its self-init marker
+# (internal/command/server.go), measured with v2.7.1: absent on a start that
+# finds the store initialised.
+SELFINIT_LINE='beginning post-unseal configuration'
+RECORD=/run/rasputin-store-init/outcome
 
-inside "systemctl reset-failed openbao.service 2>/dev/null; systemctl start openbao.service" >/dev/null 2>&1
+# TEST HARNESS: the inspector. Its self-init stanza adds one policy and one
+# role, for the test's own leaf, that can list and read what self-init made and
+# nothing else. It reaches bao through a drop-in ExecStart that is the shipped
+# line plus one -config, read from the unit so it cannot drift from it.
+SHIPPED_EXEC=$(sed -n 's/^ExecStart=//p' "$UNIT")
+cat >"$SCRATCH/test-inspector.json" <<'JSON'
+{"initialize": [{"test-inspector": {"request": [
+  {"policy-test-inspector": {"operation": "update", "path": "sys/policies/acl/test-inspector", "data": {"policy":
+    "path \"sys/policies/acl\" { capabilities = [\"list\"] }\npath \"sys/policies/acl/*\" { capabilities = [\"read\"] }\npath \"sys/mounts\" { capabilities = [\"read\"] }\npath \"auth/cert/certs\" { capabilities = [\"list\"] }\npath \"sys/audit\" { capabilities = [\"read\", \"sudo\"] }\npath \"auth/token/accessors\" { capabilities = [\"list\", \"sudo\"] }\npath \"auth/token/lookup-accessor\" { capabilities = [\"update\"] }\n"}}},
+  {"role-test-inspector": {"operation": "update", "path": "auth/cert/certs/store-unit-test-inspector", "data": {
+    "certificate": {"eval_type": "string", "eval_source": "file", "path": "/run/credentials/openbao.service/store-ca.pem"},
+    "allowed_common_names": ["store-unit-test-inspector"], "token_policies": ["test-inspector"], "token_no_default_policy": true}}}
+]}}]}
+JSON
+# TEST HARNESS, run in the container: logs in and reads, keeping every token
+# in a 0600 file and never printing one. `inspect` prints one "KEY<TAB>JSON"
+# line per read; `write` writes the sentinel through the api's role and prints
+# the status.
+cat >"$SCRATCH/store-read.sh" <<'READ'
+#!/bin/sh
+set -u
+umask 077
+U=https://127.0.0.1:8200/v1
+c() { curl -s --max-time 30 --cacert /pki/store-ca.pem "$@"; }
+# login LEAF ROLE FILE — the token, into FILE, and a header file beside it.
+login() {
+	c --cert "/pki/$1.pem" --key "/pki/$1.key" -X POST --data "{\"name\":\"$2\"}" "$U/auth/cert/login" \
+		| sed -n 's/.*"client_token":"\([^"]*\)".*/\1/p' >"$3"
+	[ -s "$3" ] || return 1
+	printf 'X-Vault-Token: %s\n' "$(cat "$3")" >"$3.hdr"
+}
+get() { c --cert /pki/inspector.pem --key /pki/inspector.key -H "@/root/insp.token.hdr" "$@"; }
+case "$1" in
+	inspect)
+		login inspector store-unit-test-inspector /root/insp.token || { echo "login	failed"; exit 1; }
+		printf 'policies\t%s\n' "$(get "$U/sys/policies/acl?list=true")"
+		printf 'roles\t%s\n' "$(get "$U/auth/cert/certs?list=true")"
+		printf 'mounts\t%s\n' "$(get "$U/sys/mounts")"
+		printf 'audit\t%s\n' "$(get "$U/sys/audit")"
+		for p in rasputin-api rasputin-seal-rotate; do
+			printf 'policy-%s\t%s\n' "$p" "$(get "$U/sys/policies/acl/$p")"
+		done
+		for a in $(get "$U/auth/token/accessors?list=true" | sed 's/.*"keys":\[\([^]]*\)\].*/\1/; s/[",]/ /g'); do
+			printf 'token\t%s\n' "$(get -X POST --data "{\"accessor\":\"$a\"}" "$U/auth/token/lookup-accessor")"
+		done
+		;;
+	write)
+		login api rasputin-api /root/api.token || { echo "login failed"; exit 1; }
+		od -An -N12 -tx1 /dev/urandom | tr -d ' \n' >/root/sentinel
+		c --cert /pki/api.pem --key /pki/api.key -H "@/root/api.token.hdr" -o /dev/null -w '%{http_code}' \
+			-X POST --data "{\"data\":{\"v\":\"$(cat /root/sentinel)\"}}" "$U/rasputin-secrets/data/apps/store-unit-test"
+		;;
+esac
+READ
+docker cp "$SCRATCH/test-inspector.json" "$CID:/etc/rasputin/openbao/test-inspector.json" >/dev/null \
+	&& docker cp "$SCRATCH/store-read.sh" "$CID:/root/store-read.sh" >/dev/null \
+	|| { echo "FAILED: could not copy the inspector's config and reader into the container."; exit 1; }
+# field KEY TEXT — the JSON of the line KEY in an inspect read.
+field() { printf '%s\n' "$2" | awk -F'\t' -v k="$1" '$1 == k { sub(/^[^\t]*\t/, ""); print; exit }'; }
+# view TEXT — what self-init made, one line per fact, for comparing two reads.
+view() {
+	printf 'policies %s\n' "$(field policies "$1" | jq -c '.data.keys | sort')"
+	printf 'roles %s\n' "$(field roles "$1" | jq -c '.data.keys | sort')"
+	printf 'mount %s\n' "$(field mounts "$1" | jq -c '.data["rasputin-secrets/"] | {type, options, accessor, uuid}')"
+	printf 'audit %s\n' "$(field audit "$1" | jq -c '.data')"
+	for _p in rasputin-api rasputin-seal-rotate; do
+		printf 'policy-%s %s\n' "$_p" "$(field "policy-$_p" "$1" | jq -j '.data.policy' | openssl dgst -sha256 -r | cut -d' ' -f1)"
+	done
+	printf 'root-tokens %s\n' "$(printf '%s\n' "$1" | awk -F'\t' '$1 == "token" { sub(/^[^\t]*\t/, ""); print }' | jq -s '[.[] | select(.data.policies | index("root"))] | length')"
+}
+
+# An empty data directory, as on a fresh flash: what the earlier scenarios'
+# first start initialised is cleared, with its audit log and this boot's
+# record, and the inspector's drop-in goes in before the start that inits.
+inside "systemctl stop openbao.service; systemctl reset-failed openbao.service 2>/dev/null
+rm -rf $V/openbao/* $V/openbao/.[!.]* $V/openbao-audit/* /run/rasputin-store-init /run/store-init-console
+printf '[Service]\nExecStart=\nExecStart=%s -config=/etc/rasputin/openbao/test-inspector.json\n' '$SHIPPED_EXEC' >/etc/systemd/system/openbao.service.d/harness-inspector.conf
+systemctl daemon-reload" >/dev/null 2>&1
+check "the data directory is empty before the start that initialises" "$(yes_if [ -z "$(inside "ls -A $V/openbao")" ])"
+C7=$(cursor)
+inside "systemctl start openbao.service" >/dev/null 2>&1
 st=$(show ActiveState)
 check "systemctl start returns with the store active on the shipped config (got '$st')" "$(yes_if [ "$st" = active ])"
-only_loopback "after systemctl start returns (READY, not initialised)"
+wait_for "sys/health answers 200 after the store's own self-init" "$HEALTH_200" || fails=$((fails + 1))
+only_loopback "after the start that initialised it"
+
+echo "  -- self-init (TC-804-18)"
+j7=$(journal_after "$C7")
+check "TC-804-18 (1) bao ran its self-init stanzas on this start ('$SELFINIT_LINE')" "$(yes_if contains "$SELFINIT_LINE" "$j7")"
+check "TC-804-18 (1) sys/health answers 200 (got '$(store_get sys/health)')" "$(yes_if [ "$(store_get sys/health)" = 200 ])"
+ss=$(inside "curl -s --max-time $CTR_DEADLINE --cacert /pki/store-ca.pem --cert /pki/client.pem --key /pki/client.key https://127.0.0.1:$PORT/v1/sys/seal-status")
+check "TC-804-18 (1) seal-status: initialized, unsealed, t=0 n=0 (got $(printf '%s' "$ss" | jq -c '{initialized, sealed, t, n}' 2>&1))" \
+	"$(yes_if [ "$(printf '%s' "$ss" | jq -c '{initialized, sealed, t, n}' 2>/dev/null)" = '{"initialized":true,"sealed":false,"t":0,"n":0}' ])"
+r7=$(inside "sh /root/store-read.sh inspect")
+v7=$(view "$r7")
+printf '%s\n' "$v7" | sed 's/^/         /'
+check "TC-804-18 (2) zero tokens carry the root policy" "$(yes_if contains 'root-tokens 0' "$v7")" "$v7"
+for p in rasputin-api rasputin-seal-rotate; do
+	want=$(openssl dgst -sha256 -r "$API_POLICY/$p.hcl" | cut -d' ' -f1)
+	check "TC-804-18 (2) policy $p's text in the store is the api tarball's, byte for byte" \
+		"$(yes_if contains "policy-$p $want" "$v7")" "$v7"
+done
+check "TC-804-18 (2) rasputin-secrets/ is a kv mount, version 2" \
+	"$(yes_if [ "$(field mounts "$r7" | jq -c '.data["rasputin-secrets/"] | [.type, .options.version]')" = '["kv","2"]' ])" "$(field mounts "$r7" | jq -c '.data["rasputin-secrets/"]' 2>&1)"
+# #805 PINS: exactly the two roles. geekdojo-brain#805 adds the provisioner's
+# role to init.json and updates this list (geekdojo-brain#804, F-804-11).
+check "TC-804-18 (2) the cert roles are exactly the two plus the inspector" \
+	"$(yes_if contains 'roles ["rasputin-api","rasputin-seal-rotate","store-unit-test-inspector"]' "$v7")" "$v7"
+check "TC-804-18 (2) exactly one audit device, a file at /var/lib/rasputin/openbao-audit/audit.log" \
+	"$(yes_if [ "$(field audit "$r7" | jq -c '.data | [length, (.[] | .type, .options.file_path)]')" = '[1,"file","/var/lib/rasputin/openbao-audit/audit.log"]' ])" "$(field audit "$r7" | jq -c .data 2>&1)"
+code=$(inside "sh /root/store-read.sh write")
+check "TC-804-18 (3) the api's role writes a value under rasputin-secrets/data/apps/ (got '$code')" "$(yes_if [ "$code" = 200 ])"
+audit=$(inside "stat -c '%a %u:%g' $V/openbao-audit/audit.log; grep -c 'hmac-sha256:' $V/openbao-audit/audit.log; grep -c -F -f /root/sentinel $V/openbao-audit/audit.log; grep -c '\"path\":\"sys/init\"' $V/openbao-audit/audit.log")
+set -- $audit
+check "TC-804-18 (3) audit.log is 0600 $BAO_UID:$BAO_GID (got '${1:-} ${2:-}')" "$(yes_if [ "${1:-} ${2:-}" = "600 $BAO_UID:$BAO_GID" ])"
+check "TC-804-18 (3) audit.log holds hmac-sha256: values (got ${3:-0} lines)" "$(yes_if [ "${3:-0}" -gt 0 ])"
+check "TC-804-18 (3) audit.log does not hold the written value (got ${4:-?} lines)" "$(yes_if [ "${4:-}" = 0 ])"
+check "TC-804-18 (1) no request ever reached sys/init (got ${5:-?} audit lines)" "$(yes_if [ "${5:-}" = 0 ])"
+rec7=$(inside "stat -c '%a %u' $RECORD; cat $RECORD")
+boot=$(inside "cat /proc/sys/kernel/random/boot_id")
+r=1
+[ "$(printf '%s\n' "$rec7" | sed -n '1p;2p;3p' | cut -d= -f1 | tr '\n' ' ')" = "600 0 outcome boot_id " ] \
+	&& contains "outcome=initialised
+boot_id=$boot
+reason=" "$rec7" && [ "$(printf '%s\n' "$rec7" | wc -l | tr -d ' ')" = 4 ] && r=0
+check "TC-804-18 (4) the record is 0600 root and exactly outcome=initialised, this boot's boot_id and a reason" "$r" "$rec7"
+line=$(journal_after "$C7" -p info..info | grep 'rasputin-store-init: outcome=initialised' || true)
+check "TC-804-18 (4) the journal has one info-level rasputin-store-init: outcome=initialised line" \
+	"$(yes_if [ "$(printf '%s\n' "$line" | grep -c 'outcome=initialised')" = 1 ])" "$line"
+[ -n "$line" ] && printf '         journal: %s\n' "$line"
+check "TC-804-18 (4) the console line is the journal's, with its <6>" \
+	"$(yes_if [ "$(inside "cat /run/store-init-console")" = "<6>$line" ])" "console: $(inside "cat /run/store-init-console")"
+REC7_SHA=$(inside "sha256sum $RECORD" | cut -d' ' -f1)
 
 echo "  -- the handshake (TC-756-13)"
 # tls_refused LABEL REASON CURL_ARGS — refused inside TLS: the store's own
@@ -522,17 +729,6 @@ tls_refused "no client certificate" "provide a certificate" ""
 tls_refused "a clientAuth certificate from a foreign CA" "certificate signed by unknown authority" "--cert /pki/foreign.pem --key /pki/foreign.key"
 tls_refused "a store-CA certificate with serverAuth only" "certificate specifies an incompatible key usage" "--cert /pki/server.pem --key /pki/server.key"
 
-echo "  -- init, then a restart that unseals from the fragment (TC-756-15)"
-# TEST HARNESS: one recovery share. The response holds the root token and the
-# share, so it goes to a 0600 file in the container and is never printed.
-code=$(inside "umask 077; curl -sS --max-time $CTR_DEADLINE -o /root/init.json -w '%{http_code}' --cacert /pki/store-ca.pem --cert /pki/client.pem --key /pki/client.key -X PUT --data '{\"recovery_shares\":1,\"recovery_threshold\":1}' https://127.0.0.1:$PORT/v1/sys/init 2>&1")
-check "TC-756-15 sys/init answers 200 (got '$code')" "$(yes_if [ "$code" = 200 ])"
-mode=$(inside "stat -c %a /root/init.json")
-check "TC-756-15 the init response file is mode 0600 (got '$mode')" "$(yes_if [ "$mode" = 600 ])"
-wait_for "sys/health answers 200 after init" "$HEALTH_200" || fails=$((fails + 1))
-check "TC-756-15 sys/health answers 200 after init (got '$(store_get sys/health)')" "$(yes_if [ "$(store_get sys/health)" = 200 ])"
-only_loopback "after init, with sys/health answering 200"
-
 echo "  -- the unauthenticated rekey and generate-root endpoints (TC-756-14)"
 # These codes cannot tell disable_unauthed_* from their defaults; the options'
 # placement is held by test/store-config-test.sh (TC-756-02, TC-756-06).
@@ -541,6 +737,8 @@ for e in sys/rekey/init:405 sys/rekey-recovery-key/init:404 sys/generate-root/at
 	check "TC-756-14 GET ${e%:*} with a client certificate and no token answers ${e##*:} (got '$code')" "$(yes_if [ "$code" = "${e##*:}" ])"
 done
 
+echo "  -- a restart: no self-init, nothing changed, unsealed from the fragment (TC-804-19, TC-756-15)"
+C8=$(cursor)
 inside "systemctl restart openbao.service" >/dev/null 2>&1
 st=$(show ActiveState)
 check "TC-756-15 systemctl restart returns with the store active (got '$st')" "$(yes_if [ "$st" = active ])"
@@ -548,7 +746,24 @@ wait_for "sys/health answers 200 after the restart, with no unseal call" "$HEALT
 check "TC-756-15 after the restart sys/health answers 200 with no unseal call (got '$(store_get sys/health)')" \
 	"$(yes_if [ "$(store_get sys/health)" = 200 ])"
 only_loopback "after systemctl restart, with sys/health answering 200 again"
-seal_is_oneshots "TC-756-15 after init and restart"
+seal_is_oneshots "TC-756-15 after self-init and restart"
+j8=$(journal_after "$C8")
+check "TC-804-19 the restart ran no self-init (no '$SELFINIT_LINE')" "$(yes_if not_contains "$SELFINIT_LINE" "$j8")"
+check "TC-804-19 the restart printed no rasputin-store-init: line" "$(yes_if not_contains 'rasputin-store-init:' "$j8")"
+# The outcome hooks run as root outside the sandbox (`+`); none of the unit's
+# processes may fail its execution setup (credentials included) on the start
+# that initialised or on the restart, or test/boot-smoke.sh's generic
+# "Failed at step" check would fail the image.
+check "TC-804-18 no process of the unit failed its execution setup on the start that initialised or the restart" \
+	"$(yes_if not_contains 'Failed at step' "$j7$j8")" "$(printf '%s\n%s\n' "$j7" "$j8" | grep 'Failed' | head -3)"
+check "TC-804-19 the record is unchanged, byte for byte" "$(yes_if [ "$(inside "sha256sum $RECORD" | cut -d' ' -f1)" = "$REC7_SHA" ])"
+# #805 PINS: the comparison carries TC-804-18's two roles and two policies.
+# geekdojo-brain#805 adds the provisioner's to init.json; this read then holds
+# three of each (geekdojo-brain#804, F-804-11).
+r8=$(inside "sh /root/store-read.sh inspect")
+v8=$(view "$r8")
+check "TC-804-19 policies, roles, the mount, the audit device and the policy text are identical, with still zero root tokens" \
+	"$(yes_if [ "$v8" = "$v7" ])" "before: $(printf '%s' "$v7" | tr '\n' '|') after: $(printf '%s' "$v8" | tr '\n' '|')"
 
 echo "  -- the journal (TC-756-16, TC-756-17)"
 journal=$(inside "journalctl -u openbao.service --no-pager -o cat")
@@ -558,7 +773,12 @@ check "TC-756-16 the journal has bao's 'Log Level: info' banner line" "$(yes_if 
 noisy=$(printf '%s\n' "$journal" | grep -c -e '\[TRACE\]' -e '\[DEBUG\]')
 check "TC-756-16 no [TRACE] or [DEBUG] line in the journal (got $noisy)" "$(yes_if [ "$noisy" = 0 ])"
 # The search runs inside the container, so no value is printed or passed on
-# a command line: each value is a file, read by grep -f. Counts only.
+# a command line: each value is a file, read by grep -f. Counts only. Since
+# #804 self-init leaves no root token and no recovery share, so the tokens
+# searched for are the two this test logged in with, and the token SHAPES are
+# searched too: Vault's hv[sbr]. form, which the test plan names, and
+# OpenBao's own [sbr]. form, which is what v2.7.1 issues (measured: s. plus
+# 24 characters).
 cat >"$SCRATCH/scan-journal.sh" <<'SCAN'
 #!/bin/sh
 set -u
@@ -573,10 +793,10 @@ grep -v '^-----' /pki/server.key | while IFS= read -r l; do
 	i=$((i + 1))
 	printf '%s\n' "$l" >"$N/server-key-$i"
 done
-sed -n 's/.*"root_token":"\([^"]*\)".*/\1/p' /root/init.json >"$N/root-token"
-sed -n 's/.*"recovery_keys":\["\([^"]*\)".*/\1/p' /root/init.json >"$N/recovery-hex"
-sed -n 's/.*"recovery_keys_base64":\["\([^"]*\)".*/\1/p' /root/init.json >"$N/recovery-b64"
-journalctl -u openbao.service --no-pager -o cat >/root/journal.txt
+cp /root/api.token "$N/api-token"
+cp /root/insp.token "$N/inspector-token"
+cp /root/sentinel "$N/kv-value"
+journalctl --no-pager -o cat >/root/journal.txt
 cat "$N"/* >/root/control.txt
 n=0 empty=0 hits=0 control=0
 for f in "$N"/*; do
@@ -585,20 +805,69 @@ for f in "$N"/*; do
 	grep -q -F -f "$f" /root/journal.txt && hits=$((hits + 1))
 	grep -q -F -f "$f" /root/control.txt && control=$((control + 1))
 done
+V='hv[sbr]\.[A-Za-z0-9]{24}'
+B='(^|[^A-Za-z0-9])[sbr]\.[A-Za-z0-9]{24}([^A-Za-z0-9]|$)'
+vj=$(grep -c -E "$V" /root/journal.txt); bj=$(grep -c -E "$B" /root/journal.txt); bc=$(grep -c -E "$B" /root/control.txt)
 rm -rf "$N" /root/journal.txt /root/control.txt
-echo "needles=$n empty=$empty journal=$hits control=$control"
+echo "needles=$n empty=$empty journal=$hits control=$control vault_shape=$vj bao_shape=$bj bao_shape_control=$bc"
 SCAN
 docker cp "$SCRATCH/scan-journal.sh" "$CID:/root/scan-journal.sh" >/dev/null || check "the journal scan is copied into the container" 1
 scan=$(inside "sh /root/scan-journal.sh")
 echo "  scan: $scan"
 n=$(printf '%s' "$scan" | sed -n 's/.*needles=\([0-9]*\).*/\1/p')
 r=1; [ "${n:-0}" -ge 6 ] && contains ' empty=0 ' "$scan" && r=0
-check "TC-756-17 the search has the seal key (hex, base64), server.key's lines, the root token and the recovery share (hex, base64), none empty" \
+check "TC-756-17 the search has the seal key (hex, base64), server.key's lines, both tokens and the written value, none empty" \
 	"$r" "$scan"
-r=1; [ -n "$n" ] && contains " control=$n" "$scan" && r=0
+r=1; [ -n "$n" ] && contains " control=$n " "$scan" && r=0
 check "TC-756-17 positive control: the same search finds every value in a file that holds them" "$r" "$scan"
-check "TC-756-17 none of them is in the openbao.service journal" "$(yes_if contains ' journal=0 ' "$scan")" "$scan"
+check "TC-756-17 none of them is in the journal, every unit and the kernel's included" "$(yes_if contains ' journal=0 ' "$scan")" "$scan"
+check "TC-804-18 positive control: the OpenBao token shape matches the tokens themselves" \
+	"$(yes_if eval 'printf "%s" "$scan" | grep -q "bao_shape_control=[1-9]"')" "$scan"
+check "TC-804-18 no token shape (hv[sbr]. or OpenBao's [sbr].) in the journal" \
+	"$(yes_if contains 'vault_shape=0 bao_shape=0 ' "$scan")" "$scan"
 inside "systemctl stop openbao.service" >/dev/null 2>&1
+
+echo
+echo "8. a forced failed self-init: one policy file missing (TC-804-20)"
+# TEST HARNESS: the shipped ExecStart again (no inspector), an empty data
+# directory, and rasputin-api.hcl moved away, as an image whose tarball lacked
+# it would be (the post-build guard refuses to build that image).
+inside "systemctl reset-failed openbao.service 2>/dev/null
+rm -f /etc/systemd/system/openbao.service.d/harness-inspector.conf
+rm -rf $V/openbao/* $V/openbao/.[!.]* $V/openbao-audit/* /run/rasputin-store-init /run/store-init-console
+mv /usr/share/rasputin/openbao-policy/rasputin-api.hcl /root/rasputin-api.hcl.moved
+systemctl daemon-reload" >/dev/null 2>&1
+C9=$(cursor)
+inside "systemctl start openbao.service" >/dev/null 2>&1
+wait_for "openbao.service is failed with no job, after a failed self-init and the starts that refuse to unseal" \
+	'[ "$(systemctl show openbao.service -p ActiveState --value)" = failed ] && [ -z "$(systemctl show openbao.service -p Job --value)" ]' \
+	|| fails=$((fails + 1))
+j9=$(journal_after "$C9")
+err=$(printf '%s\n' "$j9" | grep -m1 '\[ERROR\] failed to initialize' || true)
+check "TC-804-20 (1) bao logs 'failed to initialize' at ERROR" "$(yes_if [ -n "$err" ])" "$(printf '%s' "$j9" | tail -5 | tr '\n' '|')"
+[ -n "$err" ] && printf '         journal: %s\n' "$(printf '%s' "$err" | cut -c1-160)"
+fl=$(journal_after "$C9" -p err..err | grep 'rasputin-store-init: outcome=failed' || true)
+check "TC-804-20 (2) one error-level rasputin-store-init: outcome=failed line" \
+	"$(yes_if [ "$(printf '%s\n' "$fl" | grep -c 'outcome=failed')" = 1 ])" "$fl"
+[ -n "$fl" ] && printf '         journal: %s\n' "$fl"
+rec9=$(inside "cat $RECORD")
+check "TC-804-20 (2) the record says outcome=failed, naming the service result" \
+	"$(yes_if eval 'contains "outcome=failed" "$rec9" && contains "(service result exit-code, status " "$rec9" && contains "it will refuse to unseal until its data directory is cleared." "$rec9"')" "$rec9"
+check "TC-804-20 (2) the console line is the journal's, with its <3>" \
+	"$(yes_if [ "$(inside "cat /run/store-init-console")" = "<3>$fl" ])" "console: $(inside "cat /run/store-init-console")"
+check "TC-804-20 (3) later starts refuse to unseal ('self-initialization failed: refusing to unseal')" \
+	"$(yes_if contains 'self-initialization failed: refusing to unseal' "$j9")"
+st="$(show ActiveState) $(show Result) $(show NRestarts)"
+check "TC-804-20 (3) the unit ends failed at its start limit (ActiveState Result NRestarts: '$st')" \
+	"$(yes_if contains "failed exit-code $(show StartLimitBurst)" "$st")"
+check "TC-804-20 (3) the journal says 'Start request repeated too quickly'" \
+	"$(yes_if contains 'Start request repeated too quickly' "$(inside "journalctl -u openbao.service --after-cursor='$C9' --no-pager -o cat")")"
+check "TC-804-20 (4) the record still says failed, from the first start only" \
+	"$(yes_if eval 'contains "outcome=failed" "$(inside "cat $RECORD")" && [ "$(printf "%s\n" "$j9" | grep -c "rasputin-store-init: outcome=")" = 1 ]')" "$(inside "cat $RECORD")"
+tokens=$(inside "journalctl --no-pager -o cat | grep -c -E 'hv[sbr]\.[A-Za-z0-9]{24}|(^|[^A-Za-z0-9])[sbr]\.[A-Za-z0-9]{24}([^A-Za-z0-9]|\$)'")
+check "TC-804-20 (5) no token shape in the journal (got ${tokens:-?} lines)" "$(yes_if [ "${tokens:-}" = 0 ])"
+inside "systemctl stop openbao.service; systemctl reset-failed openbao.service 2>/dev/null
+mv /root/rasputin-api.hcl.moved /usr/share/rasputin/openbao-policy/rasputin-api.hcl" >/dev/null 2>&1
 
 echo
 if [ "$fails" -eq 0 ]; then

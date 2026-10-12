@@ -114,8 +114,24 @@ $(values "$D" "$1" "$2")
 	exactly Service NotifyAccess main
 	exactly Service User openbao
 	exactly Service Group openbao
+	# TC-804-14: the main config, then the self-init config, then the seal
+	# fragment; and the three outcome hooks, each `-+` (ignored on failure, run
+	# as root outside the sandbox) with its phase (geekdojo-brain#804).
 	exactly Service ExecStart \
-		'/usr/bin/bao server -config=/etc/rasputin/openbao/openbao.hcl -config=/run/credentials/openbao.service/seal.hcl'
+		'/usr/bin/bao server -config=/etc/rasputin/openbao/openbao.hcl -config=/etc/rasputin/openbao/init.json -config=/run/credentials/openbao.service/seal.hcl'
+	exactly Service ExecStartPre '-+/usr/lib/rasputin/store-init/rasputin-store-init.sh pre'
+	exactly Service ExecStartPost '-+/usr/lib/rasputin/store-init/rasputin-store-init.sh started'
+	exactly Service ExecStopPost '-+/usr/lib/rasputin/store-init/rasputin-store-init.sh stopped'
+	for _hook in ExecStartPre ExecStartPost ExecStopPost; do
+		_exe=$(values "$D" Service "$_hook" | sed 's/^[-+@:!]*//; s/ .*$//')
+		check "TC-804-14 $_hook runs a script that ships executable in the overlay ($_exe)" \
+			"$(yes_if test -n "$_exe" -a -x "$OVERLAY$_exe")" "no executable at $OVERLAY$_exe"
+	done
+	while IFS= read -r _cfg; do
+		check "TC-804-14 ExecStart's -config=$_cfg ships in the overlay" "$(yes_if [ -f "$OVERLAY$_cfg" ])" "no file at $OVERLAY$_cfg"
+	done <<-EOF_CFG
+	$(words "$D" Service ExecStart | sed -n 's|^-config=\(/etc/.*\)$|\1|p')
+	EOF_CFG
 	check "[Service] exactly five LoadCredential lines" \
 		"$(yes_if [ "$(count "$D" Service LoadCredential)" -eq 5 ])" "got $(count "$D" Service LoadCredential)"
 	includes Service LoadCredential seal-key:/var/lib/rasputin/openbao-seal/seal-key
@@ -255,6 +271,16 @@ refuses "ReadWritePaths widened to /var/lib/rasputin" \
 	"ReadWritePaths /var/lib/rasputin has"
 refuses "GOMEMLIMIT=200MiB, above MemoryMax" 'replace:Environment=GOMEMLIMIT=60MiB' \
 	'Environment=GOMEMLIMIT=200MiB' 'GOMEMLIMIT (209715200 bytes) is below MemoryMax'
+# TC-804-14: a hook that could fail the store, one in the store's sandbox, and
+# an ExecStart without the self-init config.
+refuses "ExecStartPre without the - prefix" 'replace:ExecStartPre=-+/usr/lib/rasputin/store-init/rasputin-store-init.sh pre' \
+	'ExecStartPre=+/usr/lib/rasputin/store-init/rasputin-store-init.sh pre' '[Service] ExecStartPre=-+'
+refuses "ExecStopPost without the + prefix" 'replace:ExecStopPost=-+/usr/lib/rasputin/store-init/rasputin-store-init.sh stopped' \
+	'ExecStopPost=-/usr/lib/rasputin/store-init/rasputin-store-init.sh stopped' '[Service] ExecStopPost=-+'
+refuses "ExecStart without init.json" \
+	'replace:ExecStart=/usr/bin/bao server -config=/etc/rasputin/openbao/openbao.hcl -config=/etc/rasputin/openbao/init.json -config=/run/credentials/openbao.service/seal.hcl' \
+	'ExecStart=/usr/bin/bao server -config=/etc/rasputin/openbao/openbao.hcl -config=/run/credentials/openbao.service/seal.hcl' \
+	'[Service] ExecStart=/usr/bin/bao server -config=/etc/rasputin/openbao/openbao.hcl -config=/etc/rasputin/openbao/init.json'
 
 # --- the test fails closed (TC-755-07) -------------------------------------------
 echo

@@ -11,8 +11,13 @@
 # by its literal path under /run/credentials/openbao.service/. Those copies come
 # from the unit's LoadCredential= lines (#754).
 #
-# Left out on purpose: telemetry, cluster_addr, a unix listener, and the audit
-# stanza (#804).
+# The self-init stanzas are NOT here: they are init.json beside this file, the
+# second -config, because hcl-keys.sh reads flat HCL and refuses the request
+# maps (#804). The audit device IS here, as a declarative stanza: created as a
+# self-init request it fails the first start and leaves a store that never
+# unseals (#680 Q1, Q8), and a stanza is re-applied on every start.
+#
+# Left out on purpose: telemetry, cluster_addr and a unix listener.
 #
 # test/store-config-test.sh asserts every key here; test/store-unit-functional.sh
 # runs this file, byte for byte, on the real pinned bao under real systemd.
@@ -40,4 +45,20 @@ listener "tcp" {
 
 storage "pebbledb" {
   path = "/var/lib/rasputin/openbao"
+}
+
+# S11 (#684, #804): the audit log is a file on the persistent partition, in the
+# store's own 0700 directory (a ReadWritePaths= entry of the unit), never
+# stdout or journald, which drop lines. mode keeps it owner-only; the at-rest
+# inventory declares it 0600 990:990 and sweeps the directory. log_raw = false
+# HMACs every string value with the store's own key, and hmac_accessor does
+# the same for token accessors, so no secret or token reaches the file. The
+# path is the contract #799's rotation job reads.
+audit "file" "rasputin" {
+  options {
+    file_path = "/var/lib/rasputin/openbao-audit/audit.log"
+    mode = "0600"
+    log_raw = "false"
+    hmac_accessor = "true"
+  }
 }
