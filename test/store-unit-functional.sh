@@ -2,7 +2,8 @@
 # Functional test for the secrets store's unit, openbao.service, against REAL
 # systemd 258.7 as PID 1 (the release Buildroot 2026.08 builds into the image)
 # and the REAL pinned bao, downloaded for this machine's architecture and
-# checked against package/openbao/openbao.hash (geekdojo/geekdojo-brain#755).
+# checked against package/openbao/openbao.hash (geekdojo/geekdojo-brain#755),
+# running the image's own main config, openbao.hcl, byte for byte (#756).
 #
 # WHY THIS EXISTS. The unit is nothing but systemd configuration around a
 # third-party binary, and what matters about it is what systemd and bao do with
@@ -12,9 +13,11 @@
 # test cannot show any of that, and neither can a stub ExecStart.
 #
 # Scenarios, in one container, in this order:
-#   0  the test fails closed: no docker, a failed download and a tarball that
-#      does not match openbao.hash each stop it with a sentence (TC-755-08)
-#   1  installed, not wanted: real preset-all leaves it static (TC-755-09)
+#   0  the test fails closed: no docker, a failed download, a tarball that
+#      does not match openbao.hash and a tree with no openbao.hcl each stop it
+#      with a sentence (TC-755-08, TC-756-10)
+#   1  wanted: post-build.sh's link survives real preset-all, and the unit is
+#      enabled (TC-756-11)
 #   2  no role marker: skipped, not failed (TC-755-10)
 #   3  first boot, no leaf or no CA: skipped; then a restart starts it
 #      (TC-755-11)
@@ -28,22 +31,34 @@
 #      credentials, writable paths and memory (TC-755-13 to TC-755-16, 18)
 #   6  repeated crashes: the start limit, then recovery by reset-failed and
 #      start (TC-755-17)
+#   7  the shipped config at work: the only bao socket is 127.0.0.1:8200 at
+#      READY, after init and after a restart (TC-756-12); only a store-CA
+#      client certificate finishes the handshake (TC-756-13); the
+#      unauthenticated rekey and generate-root endpoints (TC-756-14); init,
+#      then a restart that unseals from the oneshot's fragment with no unseal
+#      call (TC-756-15); log level info (TC-756-16); and no key material in
+#      the journal (TC-756-17)
+#
+# The main config is the overlay's openbao.hcl, installed byte for byte
+# (TC-756-09); this test writes no config of its own.
 #
 # TEST HARNESS, not from the image, and labelled where it is done:
 #   * the openbao user, which mkusers creates on the image from OPENBAO_USERS;
-#   * the store's main config, which is #756's to bake: a listener on
-#     127.0.0.1:8200 naming the credentials, and PebbleDB in the data
-#     directory;
-#   * a throwaway PKI standing in for the store CA and the server leaf the
-#     api mints (#758);
+#   * a throwaway PKI (test/lib/test-pki.sh) standing in for the store CA and
+#     the server leaf the api mints (#758), plus a foreign CA's client leaf;
+#   * scenario 7's sys/init, one recovery share, its response kept in a 0600
+#     file in the container and never printed (initialisation proper is
+#     #804's);
 #   * `mount --make-rshared /`. A booted image gets a shared root from systemd
 #     itself (mount-setup); a container's root is private, and without this the
 #     credentials systemd mounts never reach the service.
 #
-# NOT COVERED: the image's kernel, squashfs and memory under load (#756's
-# smoke, F3.6), the store's real config, init and unseal (#756, #804), the
+# NOT COVERED: the image's kernel and squashfs (test/update-smoke.sh), memory
+# under load (F3.6), initialisation proper and the audit stanza (#804), the
 # api's first-boot handoff (#758), F3.3's alert itself (#760), and the other
-# architecture: CI runs this on amd64.
+# architecture: CI runs this on amd64. The unauthenticated-endpoint codes in
+# scenario 7 cannot tell the options from their defaults; their placement is
+# test/store-config-test.sh's.
 #
 # Needs: docker with privileged containers, openssl, GNU make, curl, network
 # access to the OpenBao release. Linux runner or Docker Desktop.
@@ -57,7 +72,10 @@ ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 OVERLAY="$ROOT/board/rasputin/common/rootfs-overlay"
 UNIT="$OVERLAY/etc/systemd/system/openbao.service"
 TMPFILES="$OVERLAY/usr/lib/tmpfiles.d/rasputin.conf"
+CONFIG="$OVERLAY/etc/rasputin/openbao/openbao.hcl"
+POSTBUILD="$ROOT/board/rasputin/common/post-build.sh"
 PKG="$ROOT/package/openbao"
+TLS_REFUSAL="$ROOT/test/lib/tls-refusal.sh"
 IMAGE=rasputin-store-unit-functional:f43-systemd-258.7
 CTR_DEADLINE="${STORE_UNIT_TEST_DEADLINE:-60}"
 V=/var/lib/rasputin
@@ -69,14 +87,18 @@ command -v docker >/dev/null 2>&1 || { echo "FAILED: this test needs docker, and
 for t in openssl make curl tar; do
 	command -v "$t" >/dev/null 2>&1 || { echo "FAILED: this test needs $t, and it is not on PATH."; exit 1; }
 done
-for f in "$UNIT" "$TMPFILES" "$PKG/openbao.mk" "$PKG/openbao.hash"; do
+for f in "$UNIT" "$TMPFILES" "$POSTBUILD" "$PKG/openbao.mk" "$PKG/openbao.hash" "$TLS_REFUSAL"; do
 	[ -f "$f" ] || { echo "FAILED: the file $f is missing."; exit 1; }
 done
+# The store's main config, which this test never writes for itself (TC-756-10).
+[ -f "$CONFIG" ] || { echo "FAILED: the store's main config $CONFIG is missing, and this test runs only the shipped one."; exit 1; }
 
 . "$ROOT/test/lib/checks.sh"
 . "$ROOT/test/lib/mk-var.sh"
 . "$ROOT/test/lib/f43-systemd.sh"
 . "$ROOT/test/lib/container-systemd.sh"
+. "$ROOT/test/lib/test-pki.sh"
+. "$ROOT/test/lib/listen-sockets.sh"
 neither() { ! contains "$1" "$3" && ! contains "$2" "$3"; }
 
 SCRATCH=$(mktemp -d)
@@ -130,10 +152,13 @@ check "with no docker nothing reports success or a skip" "$(yes_if neither passe
 fake_root() {
 	_r="$SCRATCH/$1"
 	mkdir -p "$_r/test/lib" "$_r/package/openbao" "$_r/board/rasputin/common/rootfs-overlay/etc/systemd/system" \
-		"$_r/board/rasputin/common/rootfs-overlay/usr/lib/tmpfiles.d"
+		"$_r/board/rasputin/common/rootfs-overlay/usr/lib/tmpfiles.d" \
+		"$_r/board/rasputin/common/rootfs-overlay/etc/rasputin/openbao"
 	cp "$0" "$_r/test/store-unit-functional.sh"
 	cp "$ROOT"/test/lib/*.sh "$_r/test/lib/"
 	cp "$UNIT" "$_r/board/rasputin/common/rootfs-overlay/etc/systemd/system/"
+	cp "$CONFIG" "$_r/board/rasputin/common/rootfs-overlay/etc/rasputin/openbao/"
+	cp "$POSTBUILD" "$_r/board/rasputin/common/"
 	cp "$TMPFILES" "$_r/board/rasputin/common/rootfs-overlay/usr/lib/tmpfiles.d/"
 	cp "$PKG/openbao.hash" "$_r/package/openbao/"
 	sed "s|^OPENBAO_SITE = .*|OPENBAO_SITE = $2|" "$PKG/openbao.mk" >"$_r/package/openbao/openbao.mk"
@@ -149,32 +174,39 @@ out=$("$SH_BIN" "$(fake_root badhash "file://$SCRATCH/badsite")" 2>&1); rc=$?
 check "a tarball that does not match openbao.hash exits non-zero" "$(yes_if [ "$rc" -ne 0 ])" "exit=$rc"
 check "the mismatch names openbao.hash" "$(yes_if contains 'does not match openbao.hash' "$out")" "$out"
 check "a mismatch reports no success or skip" "$(yes_if neither passed skip "$out")" "$out"
+# No openbao.hcl in the overlay (TC-756-10): a stop with a sentence, never a
+# config of the test's own.
+_r=$(fake_root noconfig "file://$SCRATCH/badsite")
+rm -f "$SCRATCH/noconfig/board/rasputin/common/rootfs-overlay/etc/rasputin/openbao/openbao.hcl"
+out=$("$SH_BIN" "$_r" 2>&1); rc=$?
+check "TC-756-10 with no openbao.hcl the test exits non-zero" "$(yes_if [ "$rc" -ne 0 ])" "exit=$rc"
+check "TC-756-10 with no openbao.hcl the message names the missing config" "$(yes_if contains 'openbao.hcl is missing' "$out")" "$out"
+check "TC-756-10 with no openbao.hcl nothing reports success or a skip" "$(yes_if neither passed skip "$out")" "$out"
+printf '         it said: %s\n' "$out"
 # The 258.7 pin refusal is f43_systemd_is_pinned, shown by
 # test/store-paths-functional.sh (TC-754-17).
 
 # --- the test PKI (TEST HARNESS: stands in for the CA and leaf the api mints) ---
+# server: the store CA's serverAuth leaf, SAN 127.0.0.1; it is also the
+# "serverAuth only" client of TC-756-13. client: the store CA's clientAuth
+# leaf. foreign: a clientAuth leaf from a CA the store does not trust.
 P="$SCRATCH/pki"
 mkdir -p "$P"
-printf 'subjectAltName=IP:127.0.0.1\nextendedKeyUsage=serverAuth\n' >"$P/server.ext"
-printf 'extendedKeyUsage=clientAuth\n' >"$P/client.ext"
 {
-	openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 2 \
-		-subj /CN=store-unit-test-ca -keyout "$P/ca.key" -out "$P/store-ca.pem" \
-		-addext basicConstraints=critical,CA:TRUE -addext keyUsage=critical,keyCertSign &&
-	for n in server client; do
-		openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj "/CN=store-unit-test-$n" \
-			-keyout "$P/$n.key" -out "$P/$n.csr" &&
-		openssl x509 -req -in "$P/$n.csr" -CA "$P/store-ca.pem" -CAkey "$P/ca.key" -set_serial "0x$(openssl rand -hex 8)" \
-			-days 2 -extfile "$P/$n.ext" -out "$P/$n.pem" || exit 1
-	done
-} >/dev/null 2>&1 || { echo "FAILED: openssl could not make the test PKI."; exit 1; }
+	mint_ca "$P/ca.key" "$P/store-ca.pem" store-unit-test-ca &&
+	mint_leaf "$P/server.key" "$P/server.pem" store-unit-test-server "$P/store-ca.pem" "$P/ca.key" serverAuth IP:127.0.0.1 &&
+	mint_leaf "$P/client.key" "$P/client.pem" store-unit-test-client "$P/store-ca.pem" "$P/ca.key" clientAuth &&
+	mint_ca "$P/foreign-ca.key" "$P/foreign-ca.pem" store-unit-test-foreign-ca &&
+	mint_leaf "$P/foreign.key" "$P/foreign.pem" store-unit-test-foreign "$P/foreign-ca.pem" "$P/foreign-ca.key" clientAuth
+} || { echo "FAILED: openssl could not make the test PKI."; exit 1; }
 
 # --- the container ---------------------------------------------------------------
 f43_systemd_image "$IMAGE" || exit 1
 ctr_boot "the store unit" "$IMAGE" -v "$OVERLAY:/overlay:ro" || exit 1
 echo "in the container: $(inside 'systemctl --version | head -1')"
-if ! { docker cp "$SCRATCH/bao" "$CID:/usr/bin/bao" >/dev/null && docker cp "$P" "$CID:/pki" >/dev/null; }; then
-	echo "FAILED: could not copy bao and the test PKI into the container."; exit 1
+if ! { docker cp "$SCRATCH/bao" "$CID:/usr/bin/bao" >/dev/null && docker cp "$P" "$CID:/pki" >/dev/null \
+	&& docker cp "$TLS_REFUSAL" "$CID:/root/tls-refusal.sh" >/dev/null; }; then
+	echo "FAILED: could not copy bao, the test PKI and test/lib/tls-refusal.sh into the container."; exit 1
 fi
 
 inside "
@@ -192,26 +224,18 @@ chown 0:0 /usr/bin/bao && chmod 0755 /usr/bin/bao
 mkdir -p $V && chmod 0755 $V
 install -D -m 0644 /overlay/usr/lib/tmpfiles.d/rasputin.conf /usr/lib/tmpfiles.d/rasputin.conf
 systemd-tmpfiles --create /usr/lib/tmpfiles.d/rasputin.conf >/dev/null 2>&1 || true
-# The unit, verbatim.
+# The unit and the main config, verbatim from the overlay.
 install -m 0644 /overlay/etc/systemd/system/openbao.service /etc/systemd/system/openbao.service
-# TEST HARNESS: the main config #756 bakes.
-install -d -m 0755 /etc/rasputin/openbao
-cat >/etc/rasputin/openbao/openbao.hcl <<'EOF'
-api_addr           = \"https://127.0.0.1:$PORT\"
-disable_clustering = true
-listener \"tcp\" {
-  address                            = \"127.0.0.1:$PORT\"
-  tls_cert_file                      = \"$CREDS/server.pem\"
-  tls_key_file                       = \"$CREDS/server.key\"
-  tls_client_ca_file                 = \"$CREDS/store-ca.pem\"
-  tls_require_and_verify_client_cert = true
-}
-storage \"pebbledb\" {
-  path = \"$V/openbao\"
-}
-EOF
+install -D -m 0644 /overlay/etc/rasputin/openbao/openbao.hcl /etc/rasputin/openbao/openbao.hcl
 systemctl daemon-reload
-" || { echo "FAILED: could not install the unit and the test harness into the container."; exit 1; }
+" || { echo "FAILED: could not install the unit, its config and the test harness into the container."; exit 1; }
+echo
+echo "the shipped config (TC-756-09)"
+want_sha=$(openssl dgst -sha256 -r "$CONFIG" | cut -d' ' -f1)
+got_sha=$(inside "sha256sum /etc/rasputin/openbao/openbao.hcl" | cut -d' ' -f1)
+r=1; [ -n "$want_sha" ] && [ "$got_sha" = "$want_sha" ] && r=0
+check "TC-756-09 the installed openbao.hcl is the overlay's, byte for byte (sha256 $got_sha)" "$r" \
+	"overlay $want_sha, installed $got_sha"
 
 # The seal key and fragment, from the real oneshot (#803, TC-803-24), run as
 # root with its production paths. Its kernel-log line goes to /dev/null: in a
@@ -250,23 +274,31 @@ skipped() {
 }
 
 echo
-echo "1. installed, not wanted, under real preset-all (TC-755-09)"
+echo "1. wanted by post-build.sh's link, under real preset-all (TC-756-11)"
+# The link line exactly as post-build.sh has it, run with TARGET_DIR set to a
+# tree holding the shipped unit. test/store-config-test.sh holds it to one line.
+LN_LINE=$(grep -v '^[[:space:]]*#' "$POSTBUILD" | grep 'multi-user\.target\.wants/openbao\.service' | head -1)
+check "TC-756-11 post-build.sh has the line that links openbao.service" "$(yes_if [ -n "$LN_LINE" ])"
+WANTS=/tmp/preset-shipped/etc/systemd/system/multi-user.target.wants/openbao.service
 inside "
 set -e
 for t in shipped control; do
-	mkdir -p /tmp/preset-\$t/etc/systemd/system
+	mkdir -p /tmp/preset-\$t/etc/systemd/system/multi-user.target.wants
 	cp /overlay/etc/systemd/system/openbao.service /tmp/preset-\$t/etc/systemd/system/
 done
 printf '\n[Install]\nWantedBy=multi-user.target\n' >>/tmp/preset-control/etc/systemd/system/openbao.service
+TARGET_DIR=/tmp/preset-shipped
+$LN_LINE
 systemctl --root=/tmp/preset-shipped preset-all >/dev/null 2>&1
 systemctl --root=/tmp/preset-control preset-all >/dev/null 2>&1
-" || check "preset-all ran on both trees" 1
+" || check "TC-756-11 the link line and preset-all ran on both trees" 1
+link=$(inside "readlink $WANTS 2>&1")
+check "TC-756-11 after preset-all the wants link is still there (-> $link)" \
+	"$(yes_if [ "$link" = /etc/systemd/system/openbao.service ])"
 st=$(inside "systemctl --root=/tmp/preset-shipped is-enabled openbao.service 2>&1")
-check "the shipped unit is static after preset-all (got '$st')" "$(yes_if [ "$st" = static ])"
-wants=$(inside "find /tmp/preset-shipped -name openbao.service -path '*.wants/*'")
-check "preset-all made no .wants link for it" "$(yes_if [ -z "$wants" ])" "$wants"
+check "TC-756-11 the shipped unit with post-build.sh's link is enabled after preset-all (got '$st')" "$(yes_if [ "$st" = enabled ])"
 st=$(inside "systemctl --root=/tmp/preset-control is-enabled openbao.service 2>&1")
-check "control: the same unit with [Install] appended comes out enabled (got '$st')" "$(yes_if [ "$st" = enabled ])"
+check "TC-756-11 control: the unit with [Install] appended comes out enabled (got '$st')" "$(yes_if [ "$st" = enabled ])"
 
 echo
 echo "2. no role marker: skipped (TC-755-10)"
@@ -439,6 +471,133 @@ seal_is_oneshots "put_seal after the crash loop"
 inside "systemctl reset-failed openbao.service && systemctl start openbao.service" >/dev/null 2>&1
 st=$(show ActiveState)
 check "with the valid seal.hcl back, reset-failed then start brings it back active (got '$st')" "$(yes_if [ "$st" = active ])"
+inside "systemctl stop openbao.service" >/dev/null 2>&1
+
+echo
+echo "7. the shipped config at work (TC-756-12 to TC-756-17)"
+# store_get PATH [CURL_ARG ...] — the HTTP code of PATH with the store-CA client
+# certificate and no token. --max-time bounds the one call.
+store_get() {
+	_sg_path=$1; shift
+	inside "curl -sS --max-time $CTR_DEADLINE -o /dev/null -w '%{http_code}' --cacert /pki/store-ca.pem --cert /pki/client.pem --key /pki/client.key $* https://127.0.0.1:$PORT/v1/$_sg_path 2>&1"
+}
+# health_is_200 — the wait condition, run inside the container.
+HEALTH_200="[ \"\$(curl -s --max-time $CTR_DEADLINE -o /dev/null -w '%{http_code}' --cacert /pki/store-ca.pem --cert /pki/client.pem --key /pki/client.key https://127.0.0.1:$PORT/v1/sys/health)\" = 200 ]"
+# only_loopback WHEN — the MainPID's LISTEN sockets, read from its own fds,
+# are exactly 127.0.0.1:8200 (TC-756-12).
+only_loopback() {
+	_ol_pid=$(show MainPID)
+	_ol=$(inside "cat /proc/$_ol_pid/net/tcp /proc/$_ol_pid/net/tcp6; ls -l /proc/$_ol_pid/fd" 2>/dev/null | bao_listeners)
+	check "TC-756-12 $1: bao's only LISTEN socket is 127.0.0.1:$PORT (got '$(printf '%s' "$_ol" | tr '\n' ' ')')" \
+		"$(yes_if [ "$_ol" = "127.0.0.1:$PORT" ])"
+}
+
+inside "systemctl reset-failed openbao.service 2>/dev/null; systemctl start openbao.service" >/dev/null 2>&1
+st=$(show ActiveState)
+check "systemctl start returns with the store active on the shipped config (got '$st')" "$(yes_if [ "$st" = active ])"
+only_loopback "after systemctl start returns (READY, not initialised)"
+
+echo "  -- the handshake (TC-756-13)"
+# tls_refused LABEL REASON CURL_ARGS — refused inside TLS: the store's own
+# "http: TLS handshake error" line names REASON, curl gets no HTTP status, and
+# nothing reports a connection refusal. Under TLS 1.3 a client's words for the
+# refusal depend on timing (F-756-16); the store's line does not.
+# test/lib/tls-refusal.sh follows the journal from a cursor taken before the
+# attempt, and `timeout` in the container is its deadline.
+tls_refused() {
+	_tr=$(inside "timeout $CTR_DEADLINE sh /root/tls-refusal.sh openbao.service '$2' curl -sS --max-time $CTR_DEADLINE -o /dev/null -w 'code=%{http_code}' --cacert /pki/store-ca.pem $3 https://127.0.0.1:$PORT/v1/sys/health")
+	_tr_client=$(printf '%s\n' "$_tr" | sed -n 's/^client: //p')
+	_tr_line=$(printf '%s\n' "$_tr" | sed -n 's/^journal: //p')
+	_st=1
+	if contains 'code=000|' "$_tr_client" && ! contains 'onnection refused' "$_tr_client" && ! contains 'Could not connect' "$_tr_client"; then
+		case "$_tr_line" in *"http: TLS handshake error from 127.0.0.1:"*"$2"*) _st=0 ;; esac
+	fi
+	check "TC-756-13 $1 is refused in the TLS handshake (store: ${_tr_line:-none}; curl: ${_tr_client:-none})" "$_st" "$_tr"
+}
+code=$(store_get sys/health)
+r=1
+case "$code" in [1-5][0-9][0-9]) r=0 ;; esac
+check "TC-756-13 control: a store-CA clientAuth certificate gets an HTTP status from sys/health (got '$code')" "$r"
+tls_refused "no client certificate" "provide a certificate" ""
+tls_refused "a clientAuth certificate from a foreign CA" "certificate signed by unknown authority" "--cert /pki/foreign.pem --key /pki/foreign.key"
+tls_refused "a store-CA certificate with serverAuth only" "certificate specifies an incompatible key usage" "--cert /pki/server.pem --key /pki/server.key"
+
+echo "  -- init, then a restart that unseals from the fragment (TC-756-15)"
+# TEST HARNESS: one recovery share. The response holds the root token and the
+# share, so it goes to a 0600 file in the container and is never printed.
+code=$(inside "umask 077; curl -sS --max-time $CTR_DEADLINE -o /root/init.json -w '%{http_code}' --cacert /pki/store-ca.pem --cert /pki/client.pem --key /pki/client.key -X PUT --data '{\"recovery_shares\":1,\"recovery_threshold\":1}' https://127.0.0.1:$PORT/v1/sys/init 2>&1")
+check "TC-756-15 sys/init answers 200 (got '$code')" "$(yes_if [ "$code" = 200 ])"
+mode=$(inside "stat -c %a /root/init.json")
+check "TC-756-15 the init response file is mode 0600 (got '$mode')" "$(yes_if [ "$mode" = 600 ])"
+wait_for "sys/health answers 200 after init" "$HEALTH_200" || fails=$((fails + 1))
+check "TC-756-15 sys/health answers 200 after init (got '$(store_get sys/health)')" "$(yes_if [ "$(store_get sys/health)" = 200 ])"
+only_loopback "after init, with sys/health answering 200"
+
+echo "  -- the unauthenticated rekey and generate-root endpoints (TC-756-14)"
+# These codes cannot tell disable_unauthed_* from their defaults; the options'
+# placement is held by test/store-config-test.sh (TC-756-02, TC-756-06).
+for e in sys/rekey/init:405 sys/rekey-recovery-key/init:404 sys/generate-root/attempt:405; do
+	code=$(store_get "${e%:*}")
+	check "TC-756-14 GET ${e%:*} with a client certificate and no token answers ${e##*:} (got '$code')" "$(yes_if [ "$code" = "${e##*:}" ])"
+done
+
+inside "systemctl restart openbao.service" >/dev/null 2>&1
+st=$(show ActiveState)
+check "TC-756-15 systemctl restart returns with the store active (got '$st')" "$(yes_if [ "$st" = active ])"
+wait_for "sys/health answers 200 after the restart, with no unseal call" "$HEALTH_200" || fails=$((fails + 1))
+check "TC-756-15 after the restart sys/health answers 200 with no unseal call (got '$(store_get sys/health)')" \
+	"$(yes_if [ "$(store_get sys/health)" = 200 ])"
+only_loopback "after systemctl restart, with sys/health answering 200 again"
+seal_is_oneshots "TC-756-15 after init and restart"
+
+echo "  -- the journal (TC-756-16, TC-756-17)"
+journal=$(inside "journalctl -u openbao.service --no-pager -o cat")
+banner=$(printf '%s\n' "$journal" | grep -m1 'Log Level: info' | sed 's/^[[:space:]]*//')
+check "TC-756-16 the journal has bao's 'Log Level: info' banner line" "$(yes_if [ -n "$banner" ])"
+[ -n "$banner" ] && printf '         journal: %s\n' "$banner"
+noisy=$(printf '%s\n' "$journal" | grep -c -e '\[TRACE\]' -e '\[DEBUG\]')
+check "TC-756-16 no [TRACE] or [DEBUG] line in the journal (got $noisy)" "$(yes_if [ "$noisy" = 0 ])"
+# The search runs inside the container, so no value is printed or passed on
+# a command line: each value is a file, read by grep -f. Counts only.
+cat >"$SCRATCH/scan-journal.sh" <<'SCAN'
+#!/bin/sh
+set -u
+umask 077
+N=/root/needles
+rm -rf "$N" /root/journal.txt /root/control.txt
+mkdir "$N"
+od -An -v -tx1 /pki/seal-key | tr -d ' \n' >"$N/seal-hex"
+base64 -w0 /pki/seal-key >"$N/seal-b64"
+i=0
+grep -v '^-----' /pki/server.key | while IFS= read -r l; do
+	i=$((i + 1))
+	printf '%s\n' "$l" >"$N/server-key-$i"
+done
+sed -n 's/.*"root_token":"\([^"]*\)".*/\1/p' /root/init.json >"$N/root-token"
+sed -n 's/.*"recovery_keys":\["\([^"]*\)".*/\1/p' /root/init.json >"$N/recovery-hex"
+sed -n 's/.*"recovery_keys_base64":\["\([^"]*\)".*/\1/p' /root/init.json >"$N/recovery-b64"
+journalctl -u openbao.service --no-pager -o cat >/root/journal.txt
+cat "$N"/* >/root/control.txt
+n=0 empty=0 hits=0 control=0
+for f in "$N"/*; do
+	n=$((n + 1))
+	[ -s "$f" ] || { empty=$((empty + 1)); continue; }
+	grep -q -F -f "$f" /root/journal.txt && hits=$((hits + 1))
+	grep -q -F -f "$f" /root/control.txt && control=$((control + 1))
+done
+rm -rf "$N" /root/journal.txt /root/control.txt
+echo "needles=$n empty=$empty journal=$hits control=$control"
+SCAN
+docker cp "$SCRATCH/scan-journal.sh" "$CID:/root/scan-journal.sh" >/dev/null || check "the journal scan is copied into the container" 1
+scan=$(inside "sh /root/scan-journal.sh")
+echo "  scan: $scan"
+n=$(printf '%s' "$scan" | sed -n 's/.*needles=\([0-9]*\).*/\1/p')
+r=1; [ "${n:-0}" -ge 6 ] && contains ' empty=0 ' "$scan" && r=0
+check "TC-756-17 the search has the seal key (hex, base64), server.key's lines, the root token and the recovery share (hex, base64), none empty" \
+	"$r" "$scan"
+r=1; [ -n "$n" ] && contains " control=$n" "$scan" && r=0
+check "TC-756-17 positive control: the same search finds every value in a file that holds them" "$r" "$scan"
+check "TC-756-17 none of them is in the openbao.service journal" "$(yes_if contains ' journal=0 ' "$scan")" "$scan"
 inside "systemctl stop openbao.service" >/dev/null 2>&1
 
 echo

@@ -13,6 +13,10 @@
 #   values D SECTION KEY
 #       Prints every value KEY has in SECTION of D, one per line, where D is
 #       the output of directives.
+#
+#   words D SECTION KEY
+#       Prints the whitespace-separated words of every KEY in SECTION of D,
+#       one per line.
 
 directives() {
 	awk '
@@ -24,3 +28,5 @@ directives() {
 }
 
 values() { printf '%s\n' "$1" | sed -n "s/^$2|$3=//p"; }
+
+words() { values "$1" "$2" "$3" | tr ' \t' '\n\n' | sed '/^$/d'; }

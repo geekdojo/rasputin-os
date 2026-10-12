@@ -6,8 +6,8 @@
 # almost every way to get one wrong is silent: a watchdog the store never pets
 # kills it every 30 s, a network-online dependency stalls an appliance store
 # that listens only on 127.0.0.1, a MemoryHigh stalls it with no kill and no
-# restart, an [Install] section gets it enabled on every image by preset-all
-# before its config exists. So each directive is pinned at its exact value and
+# restart, an [Install] section would let preset-all decide what post-build.sh's
+# wants link decides (#756). So each directive is pinned at its exact value and
 # in its section, the forbidden ones are refused, and the unit is tied to the
 # files it depends on: the tmpfiles lines that create its directories (#754)
 # and the static user package/openbao declares (S7, read with real GNU make).
@@ -26,12 +26,11 @@ ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 OVERLAY="$ROOT/board/rasputin/common/rootfs-overlay"
 UNIT="$OVERLAY/etc/systemd/system/openbao.service"
 TMPFILES="$OVERLAY/usr/lib/tmpfiles.d/rasputin.conf"
-POSTBUILD="$ROOT/board/rasputin/common/post-build.sh"
 MK="$ROOT/package/openbao/openbao.mk"
 
 # Fail closed, before anything else: a missing input or tool is a failure with
 # a sentence, never a pass over nothing (TC-755-07).
-for f in "$UNIT" "$TMPFILES" "$POSTBUILD" "$MK"; do
+for f in "$UNIT" "$TMPFILES" "$MK"; do
 	[ -f "$f" ] || { echo "FAILED: the file $f is missing, so the store unit cannot be checked."; exit 1; }
 done
 command -v make >/dev/null 2>&1 \
@@ -148,7 +147,7 @@ $(values "$D" "$1" "$2")
 	forbidden "StartLimit setting (ARCH-FACTS: no chosen duration)" '\|StartLimit[A-Za-z]*='
 	forbidden "AmbientCapabilities (no capabilities at all)" '\|AmbientCapabilities='
 	_install=$(grep -nE '^[[:space:]]*\[Install\]' "$U" || true)
-	check "no [Install] section (installed, not wanted)" "$(yes_if [ -z "$_install" ])" \
+	check "no [Install] section (post-build.sh's link enables it, not preset-all)" "$(yes_if [ -z "$_install" ])" \
 		"forbidden line present: $_install"
 
 	echo "  -- ties to #754 and S7 (TC-755-04)"
@@ -204,11 +203,12 @@ verify "$UNIT"; rc=$?
 check "the shipped openbao.service passes every check" "$rc"
 
 echo
-echo "2. not wanted (TC-755-06)"
+echo "2. wanted by post-build.sh, not by the overlay (TC-756-05)"
+# post-build.sh's one wants link is the store's enablement (#756); that line
+# is test/store-config-test.sh's to assert. Here: the overlay carries no link
+# of its own, and the unit no [Install] (section 1's forbidden check).
 wants=$(find "$OVERLAY" -path '*.wants/openbao.service' 2>/dev/null)
-check "no *.wants/openbao.service link in the overlay" "$(yes_if [ -z "$wants" ])" "$wants"
-linked=$(grep -n 'openbao\.service' "$POSTBUILD" || true)
-check "post-build.sh links nothing to openbao.service" "$(yes_if [ -z "$linked" ])" "$linked"
+check "TC-756-05 no *.wants/openbao.service link in the overlay" "$(yes_if [ -z "$wants" ])" "$wants"
 
 # --- negative controls ---------------------------------------------------------
 echo

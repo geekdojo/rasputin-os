@@ -1,10 +1,11 @@
 # The node secrets store (ADR-0010; geekdojo/geekdojo-brain#755). The image's
-# first sandboxed, non-root third-party daemon. Not enabled: there is no
-# [Install] section, so Buildroot's preset-all leaves it `static`, and no
-# *.wants link names it (#756 adds one). It is still started on a control
-# plane: rasputin-api.service carries Wants=openbao.service (#757), so the
-# api's start pulls the store in. Until the api mints the store CA and the
-# server leaf, the conditions below skip it cleanly.
+# first sandboxed, non-root third-party daemon. Wanted on every image by a
+# multi-user.target.wants link that post-build.sh makes (#756); there is no
+# [Install] section, so Buildroot's preset-all leaves that link alone.
+# rasputin-api.service also carries Wants=openbao.service (#757), so the api's
+# start pulls the store in too. The conditions below skip it off the control
+# plane, and on a control plane until the api mints the store CA and the
+# server leaf.
 # test/store-unit-test.sh asserts every line here;
 # test/store-unit-functional.sh runs it under real systemd 258.7 with the real
 # pinned bao.
@@ -40,9 +41,9 @@ NotifyAccess=main
 # S7: the static openbao user and group, 990:990 (package/openbao, OPENBAO_USERS).
 User=openbao
 Group=openbao
-# The main config is #756's to bake. The seal fragment arrives as a credential
-# and is named by its literal path, because bao expands no variable in its seal
-# config (#679 Q3).
+# The main config is baked into the image at /etc/rasputin/openbao/openbao.hcl
+# (#756). The seal fragment arrives as a credential and is named by its literal
+# path, because bao expands no variable in its config (#679 Q3).
 ExecStart=/usr/bin/bao server -config=/etc/rasputin/openbao/openbao.hcl -config=/run/credentials/openbao.service/seal.hcl
 # Everything root writes for the store reaches it here (#754): the store's uid
 # can read none of these source directories, and only it and root can read the

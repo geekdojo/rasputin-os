@@ -7,7 +7,8 @@
 # README.md, CHANGELOG.md at the root), installed to /usr/bin/bao with its
 # licence and an MPL-2.0 source notice. CGO-free static Go (GOARM64=v8.0,
 # GOAMD64=v1), so it runs on the musl userland on a Pi 4's A72 and an N100.
-# No systemd unit and no config here: nothing starts the binary yet.
+# No systemd unit and no config here: both are in the rootfs overlay
+# (openbao.service and /etc/rasputin/openbao/openbao.hcl).
 #
 # The version must equal rasputin-control-plane's
 # go-const:api/internal/secretstoretest/pin.go#OpenBaoRelease, the release the

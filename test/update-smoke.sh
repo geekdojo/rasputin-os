@@ -36,13 +36,25 @@
 #      reports the version package/openbao/openbao.mk pins, its LICENSE and
 #      source notice are there and the notice names that version, the static
 #      openbao user is 990:990, /usr/bin/bao is root:root 0755, and nothing
-#      runs it. Its unit, openbao.service, is installed and not wanted:
-#      `systemctl is-enabled` says static (geekdojo/geekdojo-brain#755).
+#      runs it before its leaf exists.
 #      The seal key (geekdojo/geekdojo-brain#803): an OTA'd control plane never
 #      runs firstboot again, so the every-boot oneshot is what creates its key.
 #      rasputin-seal-key.service's Result is success and it is not in
 #      `systemctl --failed`, the key is 32 bytes 0600 0:0, the fragment is
 #      0600 0:0, and the outcome record says created.
+#      The store itself (geekdojo/geekdojo-brain#756): openbao.service is
+#      enabled, skipped until its server leaf exists, and the api's store CA
+#      is there. Then the harness mints a store-CA server leaf (the image's
+#      api pin does not mint one yet) and restarts it: active as uid 990, its
+#      only socket 127.0.0.1:8200, `bao status` answers "Initialized false"
+#      with a store-CA client leaf and is refused in the TLS handshake, as the
+#      store's own journal records, with none, with a controlplane-CA leaf
+#      and with the server leaf, no OOM kill, and the
+#      at-rest audit passes with the store running. With the role marker
+#      moved aside it is skipped again, naming the role condition, and with
+#      the marker back it is active. The harness's CA keys and test leaves
+#      live only in $WORK/store-pki, which the EXIT trap removes, and the
+#      consoles are searched for them before it does.
 #      Boot 2 is where these live because it is the only boot of THIS
 #      build's rootfs with a shell into the guest, on both arches, and it is an
 #      OTA'd node: its persistent shadow was seeded by the old image and has no
@@ -61,7 +73,9 @@
 #
 # Every assertion is collected and reported; the script exits 1 if any failed,
 # so one run shows the whole picture (a red run lists every broken property, not
-# the first). Every wait is a poll on a checkable fact with a hard try count.
+# the first). Every wait is a poll on a checkable fact with a hard try count,
+# or, for the store's handshake-error lines, a journal follow that ends on the
+# line, bounded by its SSH call's timeout.
 set -u
 
 ARCH="${1:?usage: update-smoke.sh <amd64|arm64> <old.img> <new.raucb> <new.img> <new-version>}"
@@ -74,6 +88,8 @@ HERE="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
 KID="$HERE/../scripts/kernel-id.sh"
 . "$HERE/lib/qemu-common.sh"
 . "$HERE/lib/mk-var.sh"
+. "$HERE/lib/test-pki.sh"
+. "$HERE/lib/listen-sockets.sh"
 
 case "$ARCH" in amd64|arm64) ;; *) echo "::error::unknown arch '$ARCH'"; exit 2 ;; esac
 for f in "$OLD_IMG" "$BUNDLE" "$NEW_IMG"; do
@@ -89,6 +105,13 @@ BUDGET=1800        # hard bound on one QEMU run (a whole boot + install session)
 SSH_TRIES=150      # 2s apart: 300s for dropbear to answer after QEMU starts
 GONE_TRIES=90      # 2s apart: 180s for the guest to power off
 READY_TIMEOUT=600  # one `systemctl is-system-running --wait` call
+STORE_CA_TRIES=60  # 2s apart: 120s for the api to mint the store CA after boot settles
+
+# The store's files on the guest (geekdojo/geekdojo-brain#756).
+STORE_CA=/var/lib/rasputin/trust/store-ca.pem
+MESH_CA=/var/lib/rasputin/trust/mesh-ca.pem
+STORE_LEAF=/var/lib/rasputin/tls/openbao-server/leaf
+GUEST_PKI=/run/update-smoke-store
 
 rm -rf "$WORK"
 mkdir -p "$WORK"
@@ -99,6 +122,8 @@ cleanup() {
 	[ -n "$QPID" ] && kill "$QPID" 2>/dev/null
 	# The key is throwaway, but it is a private key: it does not outlive the run.
 	rm -f "$KEY" "$KEY.pub" "$DISK" "$WORK/bundle.vfat" "$WORK"/*.bin
+	# So are the store's harness CA keys and test leaves (TC-756-24).
+	rm -rf "$WORK/store-pki"
 	return 0
 }
 trap cleanup EXIT
@@ -341,12 +366,6 @@ if boot 2; then
 	expect "boot 2: nothing runs bao (pidof bao)" rc=1 "$(ssh_guest 'pidof bao; echo rc=$?' 2>/dev/null)"
 	expect "boot 2: no failed unit names openbao or bao" "" \
 		"$(ssh_guest 'systemctl --failed --no-legend --plain' 2>/dev/null | grep -i bao)"
-	# Installed, not wanted (geekdojo/geekdojo-brain#755): the unit is on the
-	# image with no [Install] section, so preset-all left it static. The two
-	# checks above cannot tell that from "not installed": nothing starts the
-	# unit either way.
-	expect "boot 2: openbao.service is installed and not wanted" static \
-		"$(ssh_guest 'systemctl is-enabled openbao.service' 2>/dev/null)"
 	# The seal key on an OTA'd, provisioned control plane (TC-803-25). Result
 	# alone is success for a unit that never ran, so the files and the record
 	# are checked too.
@@ -360,6 +379,148 @@ if boot 2; then
 		"$(ssh_guest 'sed -n "s/^outcome=//p" /run/rasputin-seal-key/outcome' 2>/dev/null)"
 	expect "boot 2: systemctl --failed does not list rasputin-seal-key" "" \
 		"$(ssh_guest 'systemctl --failed --no-legend --plain' 2>/dev/null | grep rasputin-seal-key)"
+	# Enabled (geekdojo/geekdojo-brain#756): post-build.sh's wants link, and no
+	# [Install], so preset-all left the link alone (TC-756-18, TC-756-19).
+	expect "boot 2: openbao.service is enabled" enabled \
+		"$(ssh_guest 'systemctl is-enabled openbao.service' 2>/dev/null)"
+	# The api mints the store CA at its start; a poll with a hard try count.
+	_i=0
+	while [ "$(guest_yes "test -s $STORE_CA")" != yes ] && [ "$_i" -lt "$STORE_CA_TRIES" ]; do
+		_i=$((_i + 1)); sleep 2
+	done
+	if [ "$(guest_yes "test -s $STORE_CA")" = yes ]; then
+		pass "boot 2: the api's store CA $STORE_CA exists"
+		STORE_CA_OK=1
+	else
+		fail "boot 2: the api's store CA $STORE_CA never appeared in $((STORE_CA_TRIES * 2))s"
+		STORE_CA_OK=0
+	fi
+	# Skipped before its leaf. At the api pin this image carries, nothing mints
+	# the server leaf, so a leaf here means the api now does: the harness block
+	# below would then overwrite the api's own leaf, and is to go.
+	if [ "$(guest_yes "test -e $STORE_LEAF.pem || test -e $STORE_LEAF.key")" = yes ]; then
+		fail "boot 2: a server leaf already exists at $STORE_LEAF.{pem,key} before the harness wrote one, so the api now mints it. Delete the 'store harness mint' block in test/update-smoke.sh and re-baseline per geekdojo/geekdojo-brain#763."
+		STORE_LEAF_FREE=0
+	else
+		STORE_LEAF_FREE=1
+		expect "boot 2: openbao.service before its leaf: ConditionResult and ActiveState" "no inactive" \
+			"$(ssh_guest 'echo $(systemctl show openbao.service -p ConditionResult --value) $(systemctl show openbao.service -p ActiveState --value)' 2>/dev/null)"
+	fi
+	if [ "$STORE_CA_OK" = 1 ] && [ "$STORE_LEAF_FREE" = 1 ]; then
+		# ---- store harness mint (TC-756-20, TC-756-21) ----------------------
+		# TEST HARNESS, until the image's api mints the leaf (#758; the later
+		# pin bump replaces this block, recorded on #763). The CA keys come
+		# over SSH into $WORK/store-pki (0700, files 0600) and never leave it;
+		# test/lib/test-pki.sh takes every key by file. The server leaf goes
+		# back over SSH stdin, at the at-rest inventory's modes.
+		SP="$WORK/store-pki"
+		(umask 077 && mkdir -p "$SP" \
+			&& ssh_guest "cat $STORE_CA" >"$SP/store-ca.pem" \
+			&& ssh_guest "cat ${STORE_CA%.pem}.key" >"$SP/store-ca.key" \
+			&& ssh_guest "cat $MESH_CA" >"$SP/mesh-ca.pem" \
+			&& ssh_guest "cat ${MESH_CA%.pem}.key" >"$SP/mesh-ca.key") 2>/dev/null \
+			|| fail "boot 2: could not read the store CA and the controlplane CA over SSH"
+		if mint_leaf "$SP/server.key" "$SP/server.pem" update-smoke-store-server "$SP/store-ca.pem" "$SP/store-ca.key" serverAuth IP:127.0.0.1 \
+			&& mint_leaf "$SP/client.key" "$SP/client.pem" update-smoke-store-client "$SP/store-ca.pem" "$SP/store-ca.key" clientAuth \
+			&& mint_leaf "$SP/mesh-client.key" "$SP/mesh-client.pem" update-smoke-mesh-client "$SP/mesh-ca.pem" "$SP/mesh-ca.key" clientAuth \
+			&& ssh_guest "umask 022 && cat >$STORE_LEAF.pem && chmod 0644 $STORE_LEAF.pem" <"$SP/server.pem" \
+			&& ssh_guest "umask 077 && cat >$STORE_LEAF.key && chmod 0600 $STORE_LEAF.key" <"$SP/server.key" \
+			&& ssh_guest "umask 077 && mkdir -p $GUEST_PKI" </dev/null; then
+			for f in store-ca.pem client.pem client.key mesh-client.pem mesh-client.key server.pem server.key; do
+				ssh_guest "umask 077 && cat >$GUEST_PKI/$f" <"$SP/$f" || fail "boot 2: could not copy $f to the guest"
+			done
+			pass "boot 2: the harness wrote a store-CA server leaf to $STORE_LEAF.{pem,key}"
+		else
+			fail "boot 2: the harness could not mint and write the store's test leaves"
+		fi
+		# ---- end of the store harness mint ----------------------------------
+		ssh_guest 'systemctl reset-failed openbao.service; systemctl restart openbao.service' >/dev/null 2>&1
+		expect "boot 2: openbao.service with its leaf is active" active \
+			"$(ssh_guest 'systemctl show openbao.service -p ActiveState --value' 2>/dev/null)"
+		expect "boot 2: the store's MainPID runs as uid 990" 990 \
+			"$(ssh_guest 'p=$(systemctl show openbao.service -p MainPID --value); awk "/^Uid:/ { print \$2 }" /proc/$p/status' 2>/dev/null)"
+		expect "boot 2: bao's only LISTEN socket" 127.0.0.1:8200 \
+			"$(ssh_guest 'p=$(systemctl show openbao.service -p MainPID --value); cat /proc/$p/net/tcp /proc/$p/net/tcp6; ls -l /proc/$p/fd' 2>/dev/null | bao_listeners | tr '\n' ' ' | sed 's/ $//')"
+		# bao_status ARGS — `bao status` against the store, with the guest
+		# copies of the test certificates; its output, then rc=N.
+		bao_status() {
+			ssh_guest "BAO_ADDR=https://127.0.0.1:8200 bao status -ca-cert=$GUEST_PKI/store-ca.pem $1 2>&1; echo rc=\$?" 2>/dev/null | tr -d '\r'
+		}
+		ST="$(bao_status "-client-cert=$GUEST_PKI/client.pem -client-key=$GUEST_PKI/client.key")"
+		if printf '%s\n' "$ST" | grep -Eq '^Initialized[[:space:]]+false$' && printf '%s\n' "$ST" | grep -qx 'rc=2'; then
+			pass "boot 2: bao status with a store-CA client leaf: Initialized false, exit 2"
+		else
+			fail "boot 2: bao status with a store-CA client leaf: want 'Initialized false' and rc=2, got: $(printf '%s' "$ST" | tr '\n' '|')"
+		fi
+		# The refusals. Under TLS 1.3 bao's client reports the store's refusal
+		# as an alert, a failed write or an HTTP/2 setup failure, by timing
+		# (F-756-16), so its words are not the fact. The fact is the store's own
+		# "http: TLS handshake error" line naming the reason, read by
+		# test/lib/tls-refusal.sh on the guest from a cursor taken before the
+		# attempt; the SSH call's timeout is its deadline. With it: rc=1, no
+		# HTTP status, and no connection refusal.
+		ssh_guest "umask 077 && cat >$GUEST_PKI/tls-refusal.sh" <"$HERE/lib/tls-refusal.sh" \
+			|| fail "boot 2: could not copy test/lib/tls-refusal.sh to the guest"
+		for c in "no client certificate|provide a certificate|" \
+			"the controlplane CA's client leaf|certificate signed by unknown authority|-client-cert=$GUEST_PKI/mesh-client.pem -client-key=$GUEST_PKI/mesh-client.key" \
+			"the server leaf as a client|certificate specifies an incompatible key usage|-client-cert=$GUEST_PKI/server.pem -client-key=$GUEST_PKI/server.key"; do
+			_who=${c%%|*}; _rest=${c#*|}; _why=${_rest%%|*}; _args=${_rest#*|}
+			ST="$(ssh_guest "BAO_ADDR=https://127.0.0.1:8200 sh $GUEST_PKI/tls-refusal.sh openbao.service '$_why' bao status -ca-cert=$GUEST_PKI/store-ca.pem $_args" 2>/dev/null | tr -d '\r')"
+			_client=$(printf '%s\n' "$ST" | sed -n 's/^client: //p')
+			_line=$(printf '%s\n' "$ST" | sed -n 's/^journal: //p')
+			case "$_line" in *"http: TLS handshake error from 127.0.0.1:"*"$_why"*) _logged=1 ;; *) _logged=0 ;; esac
+			case "$_client" in *"Code: "*|*"onnection refused"*) _client_ok=0 ;; *"|rc=1") _client_ok=1 ;; *) _client_ok=0 ;; esac
+			if [ "$_logged" = 1 ] && [ "$_client_ok" = 1 ]; then
+				pass "boot 2: bao status with $_who is refused in the TLS handshake: the store logged '$_line'; the client got no HTTP status (rc=1)"
+			else
+				fail "boot 2: bao status with $_who: want the store's 'http: TLS handshake error … $_why' line, rc=1, no HTTP status and no connection refusal, got: $(printf '%s' "${ST:-<nothing; the SSH call ended with no output within ${SSH_CALL_TIMEOUT:-120}s>}" | tr '\n' '|')"
+			fi
+		done
+		expect "boot 2: the store's memory.events oom_kill" 0 \
+			"$(ssh_guest 'awk "\$1 == \"oom_kill\" { print \$2 }" /sys/fs/cgroup$(systemctl show openbao.service -p ControlGroup --value)/memory.events' 2>/dev/null)"
+		AR="$(ssh_guest '/usr/lib/rasputin/atrest/rasputin-atrest-audit.sh -q' 2>/dev/null | tr -d '\r' | grep '^rasputin-atrest: ' | tail -1)"
+		case "$AR" in
+			"rasputin-atrest: PASS checked="[1-9]*) pass "boot 2: the at-rest audit with the store active ($AR)" ;;
+			*) fail "boot 2: the at-rest audit with the store active: want 'rasputin-atrest: PASS checked=N' with N > 0, got '${AR:-<nothing>}'" ;;
+		esac
+		# The role gate on the image (TC-756-22, TC-756-23).
+		ROLE=/var/lib/rasputin/role.controlplane
+		# PID 1 logs to the journal for this step, as it does on a booted image.
+		# On arm64 the harness boots with systemd.log_target=kmsg (arm64_load_slot),
+		# and a PID 1 line sent through kmsg reaches journald with no UNIT= field,
+		# so `journalctl -u` can never name it (F-756-13). The image has busctl and
+		# no systemd-analyze. `journalctl --sync` returns once journald has stored
+		# every line already sent, so each count is read after its fact.
+		PID1_LOG="org.freedesktop.systemd1 /org/freedesktop/systemd1 org.freedesktop.systemd1.Manager LogTarget"
+		_target="$(ssh_guest "busctl get-property $PID1_LOG" 2>/dev/null | tr -d '\r' | sed -n 's/^s "\(.*\)"$/\1/p')"
+		# Without the old target there is nothing to restore it to (F-756-17).
+		[ -n "$_target" ] || fail "boot 2: role marker moved aside: could not read PID 1's LogTarget with busctl, so the step cannot restore it"
+		ssh_guest "busctl set-property $PID1_LOG s journal-or-kmsg" >/dev/null 2>&1
+		expect "boot 2: role marker moved aside: PID 1 logs to the journal for the step (was ${_target:-?})" 's "journal-or-kmsg"' \
+			"$(ssh_guest "busctl get-property $PID1_LOG" 2>/dev/null | tr -d '\r')"
+		_before="$(ssh_guest "journalctl --sync && journalctl -b -u openbao.service --no-pager -o cat | grep -c 'ConditionPathExists=$ROLE'" 2>/dev/null)"
+		ssh_guest "mv $ROLE $ROLE.smoke-aside && systemctl restart openbao.service" >/dev/null 2>&1
+		expect "boot 2: role marker moved aside: openbao.service ConditionResult and ActiveState" "no inactive" \
+			"$(ssh_guest 'echo $(systemctl show openbao.service -p ConditionResult --value) $(systemctl show openbao.service -p ActiveState --value)' 2>/dev/null)"
+		_after="$(ssh_guest "journalctl --sync && journalctl -b -u openbao.service --no-pager -o cat | grep -c 'ConditionPathExists=$ROLE'" 2>/dev/null)"
+		if [ "${_after:-0}" -gt "${_before:-0}" ] 2>/dev/null; then
+			pass "boot 2: role marker moved aside: the journal names ConditionPathExists=$ROLE"
+		else
+			fail "boot 2: role marker moved aside: no new journal line names ConditionPathExists=$ROLE (before ${_before:-?}, after ${_after:-?})"
+		fi
+		if [ -n "$_target" ]; then
+			ssh_guest "busctl set-property $PID1_LOG s $_target" >/dev/null 2>&1
+			expect "boot 2: role marker moved aside: PID 1's log target is restored to $_target" "s \"$_target\"" \
+				"$(ssh_guest "busctl get-property $PID1_LOG" 2>/dev/null | tr -d '\r')"
+		fi
+		expect "boot 2: role marker moved aside: nothing runs bao (pidof bao)" rc=1 "$(ssh_guest 'pidof bao; echo rc=$?' 2>/dev/null)"
+		expect "boot 2: role marker moved aside: no LISTEN socket on port 8200" "" \
+			"$(ssh_guest 'cat /proc/net/tcp /proc/net/tcp6' 2>/dev/null | listening_sockets | grep ':8200$')"
+		ssh_guest "mv $ROLE.smoke-aside $ROLE && systemctl restart openbao.service" >/dev/null 2>&1
+		expect "boot 2: role marker restored: openbao.service is active again" active \
+			"$(ssh_guest 'systemctl show openbao.service -p ActiveState --value' 2>/dev/null)"
+		ssh_guest "rm -rf $GUEST_PKI" >/dev/null 2>&1
+	fi
 	if ! ssh_guest 'systemctl is-active docker' >/dev/null 2>&1; then
 		ssh_guest 'journalctl -b -u docker --no-pager | tail -15' 2>&1 | sed 's/^/    docker: /'
 	fi
@@ -389,6 +550,23 @@ if boot 3; then
 	poweroff_guest
 else
 	fail "slot A did not come back after the rollback"
+fi
+
+# No key material from the store harness on any console (TC-756-24): no PEM
+# private-key text, and no line of any key file's base64. Each line is a
+# pattern file for grep -f, so no value is printed or put on a command line.
+if [ -d "$WORK/store-pki" ]; then
+	_pem="$(cat "$WORK"/console-*.log 2>/dev/null | grep -c 'PRIVATE KEY')"
+	_hits=0
+	for k in "$WORK"/store-pki/*.key; do
+		[ -f "$k" ] || continue
+		grep -v '^-----' "$k" | while IFS= read -r _l; do
+			printf '%s\n' "$_l" >"$WORK/store-pki/needle"
+			if cat "$WORK"/console-*.log 2>/dev/null | grep -q -F -f "$WORK/store-pki/needle"; then echo hit; fi
+		done
+	done >"$WORK/store-pki/hits"
+	_hits="$(grep -c hit "$WORK/store-pki/hits")"
+	expect "the consoles hold no PEM private-key text and no line of the harness's keys (counts)" "0 0" "$_pem $_hits"
 fi
 
 echo "== consoles: $WORK/console-{1,2,3}.log"

@@ -16,8 +16,9 @@
 # bump would crash-loop it on every control plane. While the config named by
 # openbao.service's first -config= is absent from the overlay, the guard holds
 # RASPUTIN_API_VERSION at the last api release without the store client. Once
-# the config exists, the guard checks instead that it holds exactly one
-# listener address and that it is the api's RASPUTIN_SECRETSTORE_ADDR. The guard
+# the config exists, the guard checks instead that its listener "tcp" block
+# holds exactly one address and that it is the api's RASPUTIN_SECRETSTORE_ADDR,
+# read through test/lib/hcl-keys.sh (geekdojo/geekdojo-brain#756). The guard
 # decides on those two facts only.
 #
 # Fails closed. A missing unit, a missing library, no GNU make, a store
@@ -50,7 +51,7 @@ WANT_ADDR=https://127.0.0.1:8200
 for f in "$API_UNIT" "$STORE_UNIT"; do
 	[ -f "$f" ] || { echo "FAILED: the file $f is missing, so the api's store wiring cannot be checked."; exit 1; }
 done
-for f in checks.sh mk-var.sh unit-directives.sh; do
+for f in checks.sh mk-var.sh unit-directives.sh hcl-keys.sh; do
 	[ -f "$LIB/$f" ] || { echo "FAILED: the test library $LIB/$f is missing, so this test cannot run."; exit 1; }
 done
 command -v make >/dev/null 2>&1 \
@@ -59,6 +60,7 @@ command -v make >/dev/null 2>&1 \
 . "$ROOT/test/lib/checks.sh"
 . "$ROOT/test/lib/mk-var.sh"
 . "$ROOT/test/lib/unit-directives.sh"
+. "$ROOT/test/lib/hcl-keys.sh"
 
 D_API=$(directives "$API_UNIT")
 D_STORE=$(directives "$STORE_UNIT")
@@ -73,9 +75,7 @@ PIN=$(mk_var "$MK" RASPUTIN_API_VERSION 2>/dev/null) \
 
 # --- the checker -----------------------------------------------------------------
 #
-# values D SECTION KEY — the shared lib, test/lib/unit-directives.sh.
-# words D SECTION KEY — the space-separated words of every KEY in SECTION.
-words() { values "$1" "$2" "$3" | tr ' \t' '\n\n' | sed '/^$/d'; }
+# values and words D SECTION KEY — the shared lib, test/lib/unit-directives.sh.
 # lines_naming D SECTION KEY WORD — the directive lines of KEY that carry WORD,
 # joined with |, for a failure message.
 lines_naming() {
@@ -170,16 +170,15 @@ if [ ! -f "$OVERLAY$CONFIG" ]; then
 		"RASPUTIN_API_VERSION is $PIN but the store's config $CONFIG is not in the overlay. An api with the store client would mint the store's leaf and restart a store with no config, which crash-loops into failed on every control plane, so the pin stays at $PIN_WITHOUT_CLIENT until the config ships."
 else
 	_want=${WANT_ADDR#https://}
-	_addrs=$(sed -n 's/^[[:space:]]*address[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$OVERLAY$CONFIG")
-	_n=0
-	[ -n "$_addrs" ] && _n=$(printf '%s\n' "$_addrs" | grep -c '')
+	# hcl_get enforces "exactly one": none, or two in the block (or in two
+	# listener "tcp" blocks), is a refusal with its own sentence.
+	_addr=$(hcl_get "$OVERLAY$CONFIG" 'listener "tcp"' address 2>&1); _rc=$?
 	echo "  branch: the store's config $CONFIG is in the overlay, so its listener must be the api's address ($_want); the pin is $PIN"
-	check "TC-757-09 $CONFIG has exactly one listener address (got $_n)" "$(yes_if [ "$_n" -eq 1 ])" \
-		"addresses: $(printf '%s' "$_addrs" | tr '\n' '|')"
+	check "TC-756-30 $CONFIG has exactly one listener address" "$(yes_if [ "$_rc" -eq 0 ])" "$_addr"
 	_st=1
-	[ "$_n" -eq 1 ] && [ "$_addrs" = "$_want" ] && _st=0
-	check "TC-757-09 the listener address is the api's RASPUTIN_SECRETSTORE_ADDR host and port" "$_st" \
-		"the config listens on $(printf '%s' "$_addrs" | tr '\n' '|') but the api's RASPUTIN_SECRETSTORE_ADDR is $WANT_ADDR"
+	[ "$_rc" -eq 0 ] && [ "$_addr" = "$_want" ] && _st=0
+	[ "$_rc" -eq 0 ] && check "TC-756-30 the listener address is the api's RASPUTIN_SECRETSTORE_ADDR host and port" "$_st" \
+		"the config listens on $_addr but the api's RASPUTIN_SECRETSTORE_ADDR is $WANT_ADDR"
 fi
 
 if [ "${API_STORE_WIRING_TREE_ONLY:-0}" = 1 ]; then
@@ -214,7 +213,7 @@ tree() {
 	T="$SCRATCH/t$N"
 	mkdir -p "$T/test/lib" "$(dirname "$T/$REL_API")" "$(dirname "$T/$REL_MK")"
 	cp "$0" "$T/test/api-store-wiring-test.sh"
-	cp "$LIB/checks.sh" "$LIB/mk-var.sh" "$LIB/unit-directives.sh" "$T/test/lib/"
+	cp "$LIB/checks.sh" "$LIB/mk-var.sh" "$LIB/unit-directives.sh" "$LIB/hcl-keys.sh" "$T/test/lib/"
 	cp "$API_UNIT" "$T/$REL_API"
 	cp "$STORE_UNIT" "$T/$REL_STORE"
 	cp "$MK" "$T/$REL_MK"
@@ -304,21 +303,28 @@ tree; edit "$T/$REL_STORE" replace:Before=rasputin-api.service '' \
 echo
 echo "6. the pin guard's controls (TC-757-09)"
 REL_CONFIG="board/rasputin/common/rootfs-overlay$CONFIG"
-# config ADDRESS ... — a synthetic store config in the scratch tree, one tcp
-# listener stanza per ADDRESS.
+# config — a copy of the shipped store config in the scratch tree, for a
+# control to edit (geekdojo/geekdojo-brain#756, TC-756-30).
 config() {
 	mkdir -p "$(dirname "$T/$REL_CONFIG")"
-	for _a in "$@"; do printf 'listener "tcp" {\n  address = "%s"\n}\n' "$_a"; done >"$T/$REL_CONFIG"
+	cp "$OVERLAY$CONFIG" "$T/$REL_CONFIG"
 }
+ADDR_LINE='  address = "127.0.0.1:8200"'
 MOVED=2099.01.0
 move_pin() { edit "$T/$REL_MK" "replace:RASPUTIN_API_VERSION = $PIN" "RASPUTIN_API_VERSION = $MOVED"; }
 tree; move_pin && { run_tree; refused "TC-757-09(a) the pin moved to $MOVED with no config" \
 	"$MOVED" "$CONFIG" "crash-loops"; }
-tree; config 127.0.0.1:8201; run_tree
-refused "TC-757-09(b) a config listening on 127.0.0.1:8201" '127.0.0.1:8201' "$WANT_ADDR"
-tree; config 127.0.0.1:8200 127.0.0.1:8201; run_tree
-refused "TC-757-09(c) a config with two listener addresses" 'exactly one listener address'
-tree; config 127.0.0.1:8200; move_pin && { run_tree; passes "TC-757-09(d) a config on 127.0.0.1:8200, with the pin moved to $MOVED"; }
+tree; config; edit "$T/$REL_CONFIG" "replace:$ADDR_LINE" '  address = "127.0.0.1:8201"' \
+	&& { run_tree; refused "TC-756-30 (TC-757-09(b)) the shipped config with its listener moved to 127.0.0.1:8201" \
+		'127.0.0.1:8201' "$WANT_ADDR"; }
+tree; config; edit "$T/$REL_CONFIG" "after:$ADDR_LINE" '  address = "127.0.0.1:8201"' \
+	&& { run_tree; refused "TC-756-30 (TC-757-09(c)) the shipped config with a second address in its listener" \
+		'exactly one listener address' 'has address 2 times in the listener "tcp" block'; }
+tree; config; edit "$T/$REL_CONFIG" "replace:$ADDR_LINE" '' \
+	&& edit "$T/$REL_CONFIG" 'before:listener "tcp" {' 'address = "127.0.0.1:8200"' \
+	&& { run_tree; refused "TC-756-30 the shipped config with its address at the top level only" \
+		'exactly one listener address' 'has no address in the listener "tcp" block'; }
+tree; config; move_pin && { run_tree; passes "TC-756-30 (TC-757-09(d)) the shipped config, with the pin moved to $MOVED"; }
 tree; _x=$(values "$D_STORE" Service ExecStart)
 edit "$T/$REL_STORE" "replace:ExecStart=$_x" 'ExecStart=/usr/bin/bao server' \
 	&& { run_tree; failed_closed "TC-757-09(e) the store's ExecStart has no -config=" 'names no -config='; }
