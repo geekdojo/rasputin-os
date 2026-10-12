@@ -17,7 +17,8 @@
 #      key 0600 0:0, 32 bytes, delivered to the store (TC-803-19)
 #   2  the same volume: untouched, the key unchanged (TC-803-20)
 #   3  store data and no key: refused; the data unchanged, the store failed at
-#      CREDENTIALS, the api held back by its assertion (TC-803-21)
+#      CREDENTIALS, the api held back by its assertion (TC-803-21). A negative
+#      control then changes the tree and shows the comparison catches it.
 #   4  no data, no key, a 31-byte random source: failed; the api still starts
 #      (TC-803-22)
 #   every boot: no key byte in the journal, kernel messages included
@@ -160,6 +161,9 @@ journal_line() { inside "journalctl -u $1 --no-pager -o json" | grep -F -- "$2" 
 prio_of() { printf '%s\n' "$1" | sed -n 's/.*"PRIORITY":"\([0-9]\)".*/\1/p'; }
 stat_key() { inside "stat -c '%s %a %u %g %Y' $SEAL/seal-key 2>&1"; }
 hexof() { od -An -v -tx1 "$1" | tr -d ' \n'; }
+# same_tree BEFORE AFTER — 0 only when both manifests are non-empty and equal,
+# so a capture that produced nothing can never pass as an unchanged tree.
+same_tree() { [ -n "$1" ] && [ -n "$2" ] && [ "$1" = "$2" ]; }
 
 # no_key_in_journal N — TC-803-23: export boot N's whole journal, kernel
 # messages included, and search it for every key this run produced: raw (as
@@ -235,7 +239,10 @@ no_key_in_journal 2
 echo
 echo "boot 3: store data and no key, so the oneshot refuses and the cluster stays down (TC-803-21)"
 ctr_cleanup
-MANIFEST="cd $V/openbao && find . | sort && find . -type f | sort | xargs sha256sum"
+# manifest_of DIR — the script that lists DIR's names and sha256s. pipefail:
+# a find or sha256sum that fails mid-pipe fails the capture.
+manifest_of() { echo "set -o pipefail && cd $1 && find . | sort && find . -type f | sort | xargs sha256sum"; }
+MANIFEST=$(manifest_of "$V/openbao")
 on_volume "
 set -e
 mkdir -p $V/openbao/sub
@@ -244,7 +251,7 @@ echo more > $V/openbao/sub/000001.sst
 chown -R 990:990 $V/openbao
 rm -f $SEAL/seal-key
 " || check "store data was written and the key removed" 1
-before=$(on_volume "$MANIFEST")
+before=$(on_volume "$MANIFEST"); before_rc=$?
 boot 3 || exit 1
 settled rasputin-seal-key.service failed
 settled openbao.service failed
@@ -252,8 +259,33 @@ st="$(show rasputin-seal-key.service ActiveState) $(show rasputin-seal-key.servi
 check "the oneshot is failed with ExecMainStatus=2 (got '$st')" "$(yes_if [ "$st" = "failed 2" ])"
 r=$(inside "test -e $SEAL/seal-key && echo present || echo absent")
 check "no seal-key exists (got '$r')" "$(yes_if [ "$r" = absent ])"
-after=$(inside "$MANIFEST")
-check "the store's data tree has the same names and sha256s" "$(yes_if [ -n "$before" ] && [ "$before" = "$after" ])" "$after"
+after=$(inside "$MANIFEST"); after_rc=$?
+check "the store's data tree was listed before boot 3 (exit $before_rc)" "$(yes_if [ "$before_rc" = 0 ])" "$before"
+check "the store's data tree was listed in boot 3 (exit $after_rc)" "$(yes_if [ "$after_rc" = 0 ])" "$after"
+check "the store's data tree has the same names and sha256s" "$(yes_if same_tree "$before" "$after")" \
+	"before: $(printf '%s' "$before" | tr '\n' '|') after: $(printf '%s' "$after" | tr '\n' '|')"
+# Negative control: the comparison above must be able to fail. Change the tree
+# as a misbehaving oneshot could, by adding a file and by rewriting one, list
+# it again, and same_tree must say it differs. An empty listing on either side
+# must never count as the same tree.
+inside "echo extra > $V/openbao/sub/000002.sst" || check "negative control: a file was added to the tree" 1
+added=$(inside "$MANIFEST"); added_rc=$?
+check "negative control: the tree with an added file was listed (exit $added_rc)" "$(yes_if [ "$added_rc" = 0 ])" "$added"
+r=0; same_tree "$before" "$added" && r=1
+check "negative control: a tree with an added file is not the same tree" "$r" "$added"
+inside "echo changed > $V/openbao/MANIFEST" || check "negative control: a file in the tree was rewritten" 1
+rewritten=$(inside "$MANIFEST"); rewritten_rc=$?
+check "negative control: the tree with a rewritten file was listed (exit $rewritten_rc)" "$(yes_if [ "$rewritten_rc" = 0 ])" "$rewritten"
+r=0; same_tree "$added" "$rewritten" && r=1
+check "negative control: the same names with a rewritten file is not the same tree" "$r" "$rewritten"
+r=0; same_tree "" "" && r=1
+check "negative control: two empty listings are not the same tree" "$r"
+r=0; same_tree "" "$before" && r=1
+check "negative control: an empty listing before is not the same tree" "$r"
+r=0; same_tree "$before" "" && r=1
+check "negative control: an empty listing after is not the same tree" "$r"
+inside "$(manifest_of "$V/no-such-dir")" >/dev/null 2>&1; r=$?
+check "negative control: listing a tree that is not there fails (exit $r)" "$(yes_if [ "$r" -ne 0 ])"
 st=$(show openbao.service ExecMainStatus)
 check "openbao is failed with ExecMainStatus=243, CREDENTIALS (got '$st')" "$(yes_if [ "$st" = 243 ])"
 line=$(inside "journalctl -u openbao.service --no-pager -o cat" | grep -F 'Failed at step CREDENTIALS' | head -1)
