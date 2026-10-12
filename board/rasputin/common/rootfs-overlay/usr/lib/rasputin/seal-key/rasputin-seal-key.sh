@@ -45,6 +45,19 @@
 #                                               stanza naming the key id and
 #                                               the credential path
 #
+#   A SECOND WRITER: the api's seal-key rotation (geekdojo/geekdojo-brain#830)
+#   rewrites both files, and stages a new key in
+#     /var/lib/rasputin/openbao-seal/rotation/<key id>   32 bytes, 0600 root
+#   which openbao.service loads as seal-rotation_<key id>. Besides the shape
+#   above (Clean), the fragment can be, on a boot in the middle of a rotation:
+#     Staged   current_key_id = the new id, current_key = .../seal-rotation_<new
+#              id>, previous_key_id = the old id, previous_key = .../seal-key
+#     Verify   current_key_id = the new id, current_key = .../seal-rotation_<new
+#              id>, and no previous key
+#   seal-key is always present and 32 bytes, and current_key_id is always the
+#   fragment's first key-id line, so step 1 below reads either shape as
+#   `untouched` with the new key id, and writes nothing.
+#
 #   The journal and console line, one per run (read by #828 / SST-15):
 #     rasputin-seal-key: outcome=<outcome> key_id=<id|-> reason="<sentence>"
 #   on stdout with a syslog priority prefix (<6> created and untouched, <3>

@@ -69,12 +69,14 @@ bytes() {
 	esac
 }
 
-# verify UNIT — prints an ok or FAIL line per assertion and returns the number
-# of failures (capped at 1 for the exit status). Run in a subshell so its
-# $fails is its own.
+# verify UNIT [TMPFILES] — prints an ok or FAIL line per assertion and returns
+# the number of failures (capped at 1 for the exit status). TMPFILES is the
+# shipped one unless a negative control passes a copy. Run in a subshell so
+# its $fails is its own.
 verify() (
 	fails=0
 	U=$1
+	TMPFILES=${2:-$TMPFILES}
 	NAME=$(basename "$U")
 	D=$(directives "$U")
 
@@ -132,13 +134,24 @@ $(values "$D" "$1" "$2")
 	done <<-EOF_CFG
 	$(words "$D" Service ExecStart | sed -n 's|^-config=\(/etc/.*\)$|\1|p')
 	EOF_CFG
-	check "[Service] exactly five LoadCredential lines" \
-		"$(yes_if [ "$(count "$D" Service LoadCredential)" -eq 5 ])" "got $(count "$D" Service LoadCredential)"
+	check "[Service] exactly six LoadCredential lines" \
+		"$(yes_if [ "$(count "$D" Service LoadCredential)" -eq 6 ])" "got $(count "$D" Service LoadCredential)"
 	includes Service LoadCredential seal-key:/var/lib/rasputin/openbao-seal/seal-key
 	includes Service LoadCredential seal.hcl:/var/lib/rasputin/openbao-seal/seal.hcl
 	includes Service LoadCredential store-ca.pem:/var/lib/rasputin/trust/store-ca.pem
 	includes Service LoadCredential server.pem:/var/lib/rasputin/tls/openbao-server/leaf.pem
 	includes Service LoadCredential server.key:/var/lib/rasputin/tls/openbao-server/leaf.key
+	# TC-830-23: the seal rotation's staged key arrives through a directory
+	# source, so an empty directory starts the store and an absent file never
+	# fails it; a file source for the optional key is refused below
+	# (geekdojo/geekdojo-brain#830).
+	includes Service LoadCredential seal-rotation:/var/lib/rasputin/openbao-seal/rotation
+	_rot_files=$(values "$D" Service LoadCredential | sed 's/^[^:]*://' | grep '^/var/lib/rasputin/openbao-seal/rotation/' || true)
+	check "TC-830-23 no LoadCredential file source under openbao-seal/rotation/ (an absent file fails the unit)" \
+		"$(yes_if [ -z "$_rot_files" ])" "file source: $_rot_files"
+	check "TC-830-23 tmpfiles declares d /var/lib/rasputin/openbao-seal/rotation 0700 root root -" \
+		"$(yes_if awk '$1 == "d" && $2 == "/var/lib/rasputin/openbao-seal/rotation" && $3 == "0700" && $4 == "root" && $5 == "root" && $6 == "-" { found = 1 } END { exit !found }' "$TMPFILES")" \
+		"d lines: $(awk '$1 == "d" && $2 == "/var/lib/rasputin/openbao-seal/rotation"' "$TMPFILES" | tr '\n' '|')"
 	exactly Service Restart always
 	exactly Service ProtectSystem strict
 	exactly Service ReadWritePaths '/var/lib/rasputin/openbao /var/lib/rasputin/openbao-audit'
@@ -233,18 +246,30 @@ SCRATCH=$(mktemp -d)
 trap 'rm -rf "$SCRATCH"' EXIT INT TERM
 # refuses DESCRIPTION SECTION LINE [NEEDLE] — a copy of the unit, named as the
 # shipped one, with LINE added to SECTION (for SECTION "new", appended as its
-# own section; for SECTION "replace:OLD", put in place of the line OLD), must
-# fail verify, and the output must name NEEDLE (the line itself by default).
+# own section; for SECTION "replace:OLD", put in place of the line OLD; for
+# SECTION "tmpfiles:OLD", the unit as shipped and the tmpfiles copy with LINE
+# in place of OLD), must fail verify, and the output must name NEEDLE (the
+# line itself by default).
 refuses() {
 	mkdir -p "$SCRATCH/c"
 	_copy="$SCRATCH/c/openbao.service"
+	_tmpf="$TMPFILES"
 	case "$2" in
 		new) { cat "$UNIT"; printf '%s\n' "$3"; } >"$_copy" ;;
 		replace:*) awk -v o="${2#replace:}" -v l="$3" '$0 == o { print l; next } { print }' "$UNIT" >"$_copy" ;;
+		tmpfiles:*)
+			cp "$UNIT" "$_copy"
+			_tmpf="$SCRATCH/c/rasputin.conf"
+			awk -v o="${2#tmpfiles:}" -v l="$3" '$0 == o { print l; next } { print }' "$TMPFILES" >"$_tmpf"
+			cmp -s "$TMPFILES" "$_tmpf" && { check "$1: the injection changed the tmpfiles copy" 1 "nothing was injected"; return; }
+			;;
 		*) awk -v s="[$2]" -v l="$3" '{ print } $0 == s { print l }' "$UNIT" >"$_copy" ;;
 	esac
-	cmp -s "$UNIT" "$_copy" && { check "$1: the injection changed the copy" 1 "nothing was injected"; return; }
-	_out=$(verify "$_copy"); _rc=$?
+	case "$2" in
+		tmpfiles:*) ;;
+		*) cmp -s "$UNIT" "$_copy" && { check "$1: the injection changed the copy" 1 "nothing was injected"; return; } ;;
+	esac
+	_out=$(verify "$_copy" "$_tmpf"); _rc=$?
 	_needle=${4:-$3}
 	_fail_line=$(printf '%s\n' "$_out" | grep -A1 'FAIL' | grep -F -e "$_needle" | head -1)
 	_st=1
@@ -281,6 +306,22 @@ refuses "ExecStart without init.json" \
 	'replace:ExecStart=/usr/bin/bao server -config=/etc/rasputin/openbao/openbao.hcl -config=/etc/rasputin/openbao/init.json -config=/run/credentials/openbao.service/seal.hcl' \
 	'ExecStart=/usr/bin/bao server -config=/etc/rasputin/openbao/openbao.hcl -config=/run/credentials/openbao.service/seal.hcl' \
 	'[Service] ExecStart=/usr/bin/bao server -config=/etc/rasputin/openbao/openbao.hcl -config=/etc/rasputin/openbao/init.json'
+
+# TC-830-23: the seal rotation's directory credential, removed, re-pointed, or
+# joined by a file source for the optional key; and its d line widened.
+ROT_LINE='LoadCredential=seal-rotation:/var/lib/rasputin/openbao-seal/rotation'
+refuses "the seal-rotation directory credential removed" "replace:$ROT_LINE" '# removed' \
+	'[Service] LoadCredential=seal-rotation:/var/lib/rasputin/openbao-seal/rotation'
+refuses "the seal-rotation credential's source changed" "replace:$ROT_LINE" \
+	'LoadCredential=seal-rotation:/var/lib/rasputin/openbao-seal/staged' \
+	'[Service] LoadCredential=seal-rotation:/var/lib/rasputin/openbao-seal/rotation'
+refuses "a second LoadCredential= file line for the optional key" Service \
+	'LoadCredential=seal-rotation-key:/var/lib/rasputin/openbao-seal/rotation/key' \
+	'no LoadCredential file source under openbao-seal/rotation/'
+refuses "the rotation d line at 0750" \
+	'tmpfiles:d /var/lib/rasputin/openbao-seal/rotation  0700 root root -' \
+	'd /var/lib/rasputin/openbao-seal/rotation  0750 root root -' \
+	'tmpfiles declares d /var/lib/rasputin/openbao-seal/rotation 0700 root root -'
 
 # --- the test fails closed (TC-755-07) -------------------------------------------
 echo

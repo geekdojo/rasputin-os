@@ -67,6 +67,14 @@ LoadCredential=seal.hcl:/var/lib/rasputin/openbao-seal/seal.hcl
 LoadCredential=store-ca.pem:/var/lib/rasputin/trust/store-ca.pem
 LoadCredential=server.pem:/var/lib/rasputin/tls/openbao-server/leaf.pem
 LoadCredential=server.key:/var/lib/rasputin/tls/openbao-server/leaf.key
+# The seal-key rotation's staged key (geekdojo/geekdojo-brain#830). A DIRECTORY
+# source: systemd loads every file in it as seal-rotation_<file name>, and an
+# empty directory loads nothing, so the key is optional without a second file
+# source, which fails the unit at the CREDENTIALS step when the file is absent.
+# The api writes rotation/<key id> and a seal fragment naming
+# /run/credentials/openbao.service/seal-rotation_<key id>; tmpfiles makes the
+# directory on every boot, and a missing directory fails the unit (fail closed).
+LoadCredential=seal-rotation:/var/lib/rasputin/openbao-seal/rotation
 # A process exit is a fact, so the store restarts on it. systemd's own restart
 # delay and start limit apply (100 ms; 5 starts in 10 s): this unit chooses no
 # duration (ARCH-FACTS). After a crash loop the unit sits in `failed`, nothing
