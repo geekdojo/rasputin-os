@@ -264,6 +264,18 @@ jobs:
       # the file on the real pinned bao.
       - name: Store config tests
         run: sh test/store-config-test.sh
+      # The helper both TLS-refusal checks run on the store's host
+      # (geekdojo/geekdojo-brain#756): store-unit-functional.sh in its
+      # container and update-smoke.sh on the QEMU guest, under busybox ash.
+      # Each failure path reads to its caller as "the store did not refuse",
+      # so each is pinned: a wrong-reason line is no match, a refused
+      # connection exits without starting a follower, and no cursor or no fifo
+      # exits 1. journalctl, mkfifo and the client are PATH shims; the shim
+      # ending its output is what ends each case, so nothing waits on a timer.
+      - name: TLS-refusal helper tests
+        env:
+          REQUIRE_BUSYBOX: "1"
+        run: sh test/tls-refusal-test.sh
       # The seal-key oneshot (geekdojo/geekdojo-brain#803) decides, on every
       # boot of every control plane, whether to mint the key the whole store is
       # sealed with. Minting one over existing data loses the data; failing
