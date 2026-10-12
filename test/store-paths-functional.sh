@@ -161,8 +161,8 @@ done
 n=$(inside "find $V/openbao-seal/rotation -mindepth 1 | wc -l")
 check "openbao-seal/rotation holds nothing: tmpfiles stages no key" "$(yes_if [ "$n" -eq 0 ])" "$(inside "ls -la $V/openbao-seal/rotation")"
 out=$(audit)
-check "the real audit over the shipped store rows says PASS checked=7 (TC-805-26: the provisioner's directory)" \
-	"$(yes_if contains 'rasputin-atrest: PASS checked=7' "$out")" "$out"
+check "the real audit over the shipped store rows says PASS checked=8 (openbao-seal/rotation, #830; TC-805-26: the provisioner's directory)" \
+	"$(yes_if contains 'rasputin-atrest: PASS checked=8' "$out")" "$out"
 
 echo
 echo "2. an existing install: wrong owners, then widened modes, then a boot"
@@ -193,7 +193,7 @@ check "the re-run reports nothing for any store line" "$(yes_if [ -z "$errs" ])"
 bad=$(all_as_declared)
 check "the re-run puts every directory back at its mode, owner and group" "$(yes_if [ -z "$bad" ])" "$bad"
 out=$(audit)
-check "the audit says PASS again" "$(yes_if contains 'rasputin-atrest: PASS checked=7' "$out")" "$out"
+check "the audit says PASS again" "$(yes_if contains 'rasputin-atrest: PASS checked=8' "$out")" "$out"
 
 echo
 echo "3. the OTA shape: what is already on the partition is kept"

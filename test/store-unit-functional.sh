@@ -1121,6 +1121,9 @@ systemctl daemon-reload" || check "the stub api is installed" 1
 echo "  -- a one-item first boot: the replayed success line (TC-805-27)"
 inside "systemctl stop openbao.service; systemctl reset-failed openbao.service $PROV 2>/dev/null
 rm -rf $V/openbao/* $V/openbao/.[!.]* $V/openbao-audit/* /run/rasputin-store-init /run/rasputin-store-provision /run/store-provision-console" >/dev/null 2>&1
+# Scenario 9 settled the seal on its rotated key B. This first boot starts
+# from the test's key A and its fragment, which TC-805-32 restores later.
+put_seal || check "the test's seal key and fragment are restored" 1
 set_tsv 'mount\trasputin-rel-fb\n'
 pprev=$(pshow InvocationID)
 inside "systemctl start openbao.service" >/dev/null 2>&1
