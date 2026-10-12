@@ -270,6 +270,40 @@ cases() {
 		no_secret "$l" "$S/seal-key"
 	done
 
+	# TC-830-25: a boot in the middle of a seal-key rotation
+	# (geekdojo/geekdojo-brain#830). The api has staged key B in rotation/ and
+	# written the Staged or the Verify fragment, byte for byte as its renderer
+	# writes them; seal-key is still key A. The oneshot reads either as a key
+	# that is present, reports the fragment's current id, and writes nothing.
+	B_ID="rasputin-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+	A_ID="rasputin-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	CRED=file:///run/credentials/openbao.service
+	for shape in staged verify; do
+		KIND=untouched; setup
+		mkdir -p "$S/rotation"; chmod 0700 "$S/rotation"
+		head -c 32 /dev/urandom > "$S/seal-key"
+		head -c 32 /dev/urandom > "$S/rotation/$B_ID"
+		if [ "$shape" = staged ]; then
+			printf 'seal "static" {\n  current_key_id  = "%s"\n  current_key     = "%s/seal-rotation_%s"\n  previous_key_id = "%s"\n  previous_key    = "%s/seal-key"\n}\n' \
+				"$B_ID" "$CRED" "$B_ID" "$A_ID" "$CRED" > "$S/seal.hcl"
+		else
+			printf 'seal "static" {\n  current_key_id = "%s"\n  current_key    = "%s/seal-rotation_%s"\n}\n' \
+				"$B_ID" "$CRED" "$B_ID" > "$S/seal.hcl"
+		fi
+		chmod 0600 "$S/seal-key" "$S/seal.hcl" "$S/rotation/$B_ID"
+		before="$(listing "$S") $(listing "$S/rotation") $(cksum < "$S/seal-key") $(cksum < "$S/seal.hcl") $(cksum < "$S/rotation/$B_ID")"
+		run
+		after="$(listing "$S") $(listing "$S/rotation") $(cksum < "$S/seal-key") $(cksum < "$S/seal.hcl") $(cksum < "$S/rotation/$B_ID")"
+		l="TC-830-25 $shape fragment"
+		ok "$l: exits 0" "$(yes_if test "$RC" = 0)" "rc=$RC $OUT"
+		ok "$l: outcome=untouched" "$(yes_if test "$(rec outcome)" = untouched)" "$(cat "$RUN/outcome" 2>&1)"
+		ok "$l: the record carries the new key id" "$(yes_if test "$(rec key_id)" = "$B_ID")" "$(rec key_id)"
+		ok "$l: the seal tree is unchanged" "$(yes_if test "$before" = "$after")" "before: $before | after: $after"
+		prio_line "$l" "<6>rasputin-seal-key: outcome=untouched key_id=$B_ID reason=\""
+		no_secret "$l (seal-key)" "$S/seal-key"
+		no_secret "$l (staged key)" "$S/rotation/$B_ID"
+	done
+
 	# TC-803-03: an already provisioned node with no store yet: created.
 	KIND=created; setup
 	: > "$P/.provisioned"

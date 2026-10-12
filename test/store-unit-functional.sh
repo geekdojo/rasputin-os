@@ -49,6 +49,14 @@
 #      a <3> rasputin-store-init: outcome=failed line and record, later
 #      starts refusing to unseal into the start limit, the record unchanged,
 #      and no token in the journal (TC-804-20)
+#   9  a seal-key rotation through the shipped unit, by hand as the api's job
+#      does it (geekdojo/geekdojo-brain#830): an empty rotation/ starts the
+#      store with no extra credential; key B staged with the Staged fragment
+#      reaches it as seal-rotation_<id> and opens it; sys/rotate/root answers
+#      204 to the rasputin-seal-rotate role from init.json; Verify (B alone)
+#      and then Clean (seal-key = B) each open it; rotation/ removed fails the
+#      unit at the CREDENTIALS step; and no key byte or token in the journal
+#      (TC-830-26)
 #
 # The main config is the overlay's openbao.hcl, installed byte for byte
 # (TC-756-09); this test writes no config of its own.
@@ -245,6 +253,7 @@ mkdir -p "$P"
 	mint_leaf "$P/client.key" "$P/client.pem" store-unit-test-client "$P/store-ca.pem" "$P/ca.key" clientAuth &&
 	mint_leaf "$P/api.key" "$P/api.pem" rasputin-api "$P/store-ca.pem" "$P/ca.key" clientAuth &&
 	mint_leaf "$P/inspector.key" "$P/inspector.pem" store-unit-test-inspector "$P/store-ca.pem" "$P/ca.key" clientAuth &&
+	mint_leaf "$P/rotate.key" "$P/rotate.pem" rasputin-seal-rotate "$P/store-ca.pem" "$P/ca.key" clientAuth &&
 	mint_ca "$P/foreign-ca.key" "$P/foreign-ca.pem" store-unit-test-foreign-ca &&
 	mint_leaf "$P/foreign.key" "$P/foreign.pem" store-unit-test-foreign "$P/foreign-ca.pem" "$P/foreign-ca.key" clientAuth
 } || { echo "FAILED: openssl could not make the test PKI."; exit 1; }
@@ -868,6 +877,131 @@ tokens=$(inside "journalctl --no-pager -o cat | grep -c -E 'hv[sbr]\.[A-Za-z0-9]
 check "TC-804-20 (5) no token shape in the journal (got ${tokens:-?} lines)" "$(yes_if [ "${tokens:-}" = 0 ])"
 inside "systemctl stop openbao.service; systemctl reset-failed openbao.service 2>/dev/null
 mv /root/rasputin-api.hcl.moved /usr/share/rasputin/openbao-policy/rasputin-api.hcl" >/dev/null 2>&1
+
+echo
+echo "9. a seal-key rotation through the shipped unit (TC-830-26)"
+# The api's job does these steps (geekdojo/geekdojo-brain#830); here each is
+# done by hand, so what is under test is what systemd and bao do with the
+# shipped unit, init.json and policy: the rotation/ directory credential, the
+# Staged and Verify fragments, and the rotation role. The fragments are
+# written byte for byte as the api's renderer writes them.
+# Key A's id: the oneshot's, from the copy of its fragment kept in /pki.
+FRAG_A_ID=$(inside "grep -o 'rasputin-[0-9a-f-]*' /pki/seal.hcl | head -n 1")
+check "TC-830-26 the oneshot's key id is read from its fragment (got '$FRAG_A_ID')" "$(yes_if [ -n "$FRAG_A_ID" ])"
+KEY_B=rasputin-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb
+ROTDIR=$V/openbao-seal/rotation
+cat >"$SCRATCH/rotate-store.sh" <<'ROT'
+#!/bin/sh
+# TEST HARNESS: the rotation job's two store calls, as rasputin-seal-rotate.
+# The token stays in a 0600 file and is never printed. Prints the re-wrap's
+# status and its body's length.
+set -u
+umask 077
+U=https://127.0.0.1:8200/v1
+c() { curl -s --max-time 30 --cacert /pki/store-ca.pem --cert /pki/rotate.pem --key /pki/rotate.key "$@"; }
+c -X POST --data '{"name":"rasputin-seal-rotate"}' "$U/auth/cert/login" \
+	| sed -n 's/.*"client_token":"\([^"]*\)".*/\1/p' >/root/rotate.token
+[ -s /root/rotate.token ] || { echo "login failed"; exit 1; }
+printf 'X-Vault-Token: %s\n' "$(cat /root/rotate.token)" >/root/rotate.token.hdr
+code=$(c -H @/root/rotate.token.hdr -o /root/rotate.body -w '%{http_code}' -X POST "$U/sys/rotate/root")
+echo "$code $(wc -c </root/rotate.body | tr -d ' ')"
+ROT
+docker cp "$SCRATCH/rotate-store.sh" "$CID:/root/rotate-store.sh" >/dev/null || check "the rotation helper is copied into the container" 1
+# creds — the store's credential names, sorted, on one line.
+creds() { inside "ls $CREDS 2>/dev/null | sort | tr '\n' ' '"; }
+# opens LABEL — after a restart, active and sys/health 200.
+opens() {
+	inside "systemctl reset-failed openbao.service 2>/dev/null; systemctl restart openbao.service" >/dev/null 2>&1
+	check "TC-830-26 $1: systemctl restart leaves the store active (got '$(show ActiveState)')" "$(yes_if [ "$(show ActiveState)" = active ])"
+	wait_for "sys/health answers 200 $1" "$HEALTH_200" || fails=$((fails + 1))
+}
+# A fresh store from the oneshot's own key A, initialised by the shipped
+# init.json (which creates the rasputin-seal-rotate role), as on a node.
+inside "systemctl stop openbao.service; systemctl reset-failed openbao.service 2>/dev/null
+rm -rf $V/openbao/* $V/openbao/.[!.]* $V/openbao-audit/* /run/rasputin-store-init /run/store-init-console $ROTDIR/*
+systemctl daemon-reload" >/dev/null 2>&1
+put_seal
+check "TC-830-26 tmpfiles made $ROTDIR at 0700 root (got '$(inside "stat -c '%a %U %G' $ROTDIR")')" \
+	"$(yes_if [ "$(inside "stat -c '%a %U %G' $ROTDIR")" = "700 root root" ])"
+C10=$(cursor)
+opens "with rotation/ empty"
+check "TC-830-26 with rotation/ empty the store gets no extra credential (got '$(creds)')" \
+	"$(yes_if [ "$(creds)" = "seal-key seal.hcl server.key server.pem store-ca.pem " ])"
+
+inside "head -c 32 /dev/urandom >$ROTDIR/$KEY_B && chmod 0600 $ROTDIR/$KEY_B && cp $ROTDIR/$KEY_B /root/key-b
+printf 'seal \"static\" {\n  current_key_id  = \"%s\"\n  current_key     = \"file://$CREDS/seal-rotation_%s\"\n  previous_key_id = \"%s\"\n  previous_key    = \"file://$CREDS/seal-key\"\n}\n' $KEY_B $KEY_B $FRAG_A_ID >$V/openbao-seal/seal.hcl
+chmod 0600 $V/openbao-seal/seal.hcl" || check "TC-830-26 key B and the Staged fragment are written" 1
+opens "on the Staged fragment"
+check "TC-830-26 the staged key reaches the store as seal-rotation_$KEY_B (got '$(creds)')" \
+	"$(yes_if [ "$(creds)" = "seal-key seal-rotation_$KEY_B seal.hcl server.key server.pem store-ca.pem " ])"
+
+rw=$(inside "sh /root/rotate-store.sh")
+check "TC-830-26 sys/rotate/root as rasputin-seal-rotate answers 204 with an empty body (got '$rw')" "$(yes_if [ "$rw" = "204 0" ])"
+
+inside "printf 'seal \"static\" {\n  current_key_id = \"%s\"\n  current_key    = \"file://$CREDS/seal-rotation_%s\"\n}\n' $KEY_B $KEY_B >$V/openbao-seal/seal.hcl" \
+	|| check "TC-830-26 the Verify fragment is written" 1
+opens "on the Verify fragment, the new key alone"
+
+inside "install -m 0600 $ROTDIR/$KEY_B $V/openbao-seal/seal-key
+printf 'seal \"static\" {\n  current_key_id = \"%s\"\n  current_key    = \"%s\"\n}\n' $KEY_B file://$CREDS/seal-key >$V/openbao-seal/seal.hcl" \
+	|| check "TC-830-26 seal-key = B and the Clean fragment are written" 1
+opens "on the Clean fragment with seal-key = B"
+inside "rm -f $ROTDIR/*" >/dev/null 2>&1
+opens "on the Clean fragment with rotation/ emptied"
+check "TC-830-26 settled: no seal-rotation credential (got '$(creds)')" \
+	"$(yes_if [ "$(creds)" = "seal-key seal.hcl server.key server.pem store-ca.pem " ])"
+j10=$(journal_after "$C10")
+check "TC-830-26 no process of the unit failed its execution setup during the rotation" \
+	"$(yes_if not_contains 'Failed at step' "$j10")" "$(printf '%s\n' "$j10" | grep 'Failed' | head -3)"
+
+# rotation/ missing: the directory source is required, so the unit fails at
+# CREDENTIALS rather than starting without it (fail closed); tmpfiles makes it
+# again on every boot.
+C11=$(cursor)
+inside "systemctl stop openbao.service; rmdir $ROTDIR; systemctl reset-failed openbao.service 2>/dev/null; systemctl start openbao.service" >/dev/null 2>&1
+wait_for "openbao.service is failed with rotation/ missing" \
+	'[ "$(systemctl show openbao.service -p ActiveState --value)" = failed ]' || fails=$((fails + 1))
+check "TC-830-26 with rotation/ missing the unit fails at the CREDENTIALS step" \
+	"$(yes_if contains 'Failed at step CREDENTIALS' "$(journal_after "$C11")")" "$(journal_after "$C11" | tail -3 | tr '\n' '|')"
+inside "systemctl reset-failed openbao.service 2>/dev/null; systemd-tmpfiles --create /usr/lib/tmpfiles.d/rasputin.conf >/dev/null 2>&1; true" >/dev/null 2>&1
+
+# The journal holds neither key (hex, base64), the rotation token, nor any
+# token shape. Searched inside the container, values in files; a positive
+# control proves the search finds each needle where it is.
+cat >"$SCRATCH/scan-rotation.sh" <<'SCAN'
+#!/bin/sh
+set -u
+umask 077
+N=/root/rot-needles
+rm -rf "$N"; mkdir "$N"
+for k in /pki/seal-key /root/key-b; do
+	b=$(basename "$k")
+	od -An -v -tx1 "$k" | tr -d ' \n' >"$N/$b-hex"
+	base64 -w0 "$k" >"$N/$b-b64"
+done
+cp /root/rotate.token "$N/rotate-token"
+journalctl --no-pager -o cat >/root/rot-journal.txt
+cat "$N"/* >/root/rot-control.txt
+n=0 empty=0 hits=0 control=0
+for f in "$N"/*; do
+	n=$((n + 1))
+	[ -s "$f" ] || { empty=$((empty + 1)); continue; }
+	grep -q -F -f "$f" /root/rot-journal.txt && hits=$((hits + 1))
+	grep -q -F -f "$f" /root/rot-control.txt && control=$((control + 1))
+done
+B='(^|[^A-Za-z0-9])(hv)?[sbr]\.[A-Za-z0-9]{24}([^A-Za-z0-9]|$)'
+bj=$(grep -c -E "$B" /root/rot-journal.txt)
+rm -rf "$N" /root/rot-journal.txt /root/rot-control.txt /root/key-b /root/rotate.token /root/rotate.token.hdr
+echo "needles=$n empty=$empty journal=$hits control=$control token_shape=$bj"
+SCAN
+docker cp "$SCRATCH/scan-rotation.sh" "$CID:/root/scan-rotation.sh" >/dev/null || check "the rotation scan is copied into the container" 1
+scan=$(inside "sh /root/scan-rotation.sh")
+echo "  scan: $scan"
+check "TC-830-26 the search has both keys (hex, base64) and the rotation token, none empty" \
+	"$(yes_if contains 'needles=5 empty=0 ' "$scan")" "$scan"
+check "TC-830-26 positive control: the search finds every needle where it is" "$(yes_if contains ' control=5 ' "$scan")" "$scan"
+check "TC-830-26 no key byte or token in the journal" \
+	"$(yes_if eval 'contains " journal=0 " "$scan" && contains " token_shape=0" "$scan"')" "$scan"
 
 echo
 if [ "$fails" -eq 0 ]; then

@@ -4,8 +4,9 @@
 # and the real at-rest audit, both run as root over the files the overlay ships.
 # geekdojo/geekdojo-brain#754.
 #
-# WHY THIS EXISTS. The store's six directories are six tmpfiles.d lines and six
-# inventory rows, and three claims about them are readings of systemd's
+# WHY THIS EXISTS. The store's seven directories are seven tmpfiles.d lines and
+# seven inventory rows (openbao-seal/rotation since geekdojo/geekdojo-brain#830),
+# and three claims about them are readings of systemd's
 # behaviour that nothing else here can check:
 #
 #   * a numeric owner (990) works with no such user in /etc/passwd. The test
@@ -56,6 +57,7 @@ V=/var/lib/rasputin
 EXPECTED="$V/openbao 700 990 990
 $V/openbao-audit 700 990 990
 $V/openbao-seal 700 0 0
+$V/openbao-seal/rotation 700 0 0
 $V/tls 700 0 0
 $V/tls/openbao-server 700 0 0
 $V/tls/openbao-client 700 0 0"
@@ -148,13 +150,14 @@ $EXPECTED
 EOF_EXPECTED
 check "tls is 700 0 0, not the 755 tmpfiles gives a missing parent" \
 	"$(yes_if [ "$(stat_of $V/tls)" = '700 0 0' ])" "got: $(stat_of $V/tls)"
+# Files only: openbao-seal/ holds the rotation/ directory tmpfiles makes (#830).
 for d in openbao-seal tls/openbao-server tls/openbao-client; do
-	n=$(inside "find $V/$d -mindepth 1 | wc -l")
+	n=$(inside "find $V/$d -mindepth 1 -type f | wc -l")
 	check "$d holds no files: tmpfiles creates no secret" "$(yes_if [ "$n" -eq 0 ])" "$(inside "ls -la $V/$d")"
 done
 out=$(audit)
-check "the real audit over the shipped store rows says PASS checked=6" \
-	"$(yes_if contains 'rasputin-atrest: PASS checked=6' "$out")" "$out"
+check "the real audit over the shipped store rows says PASS checked=7" \
+	"$(yes_if contains 'rasputin-atrest: PASS checked=7' "$out")" "$out"
 
 echo
 echo "2. an existing install: wrong owners, then widened modes, then a boot"
@@ -185,7 +188,7 @@ check "the re-run reports nothing for any store line" "$(yes_if [ -z "$errs" ])"
 bad=$(all_as_declared)
 check "the re-run puts every directory back at its mode, owner and group" "$(yes_if [ -z "$bad" ])" "$bad"
 out=$(audit)
-check "the audit says PASS again" "$(yes_if contains 'rasputin-atrest: PASS checked=6' "$out")" "$out"
+check "the audit says PASS again" "$(yes_if contains 'rasputin-atrest: PASS checked=7' "$out")" "$out"
 
 echo
 echo "3. the OTA shape: what is already on the partition is kept"

@@ -134,6 +134,10 @@
 0700  required  /var/lib/rasputin/openbao-seal
 0600  optional  /var/lib/rasputin/openbao-seal/seal-key
 0600  optional  /var/lib/rasputin/openbao-seal/seal.hcl
+# rotation/ holds the seal-key rotation's staged key between its stage and its
+# settle (geekdojo/geekdojo-brain#830). Required, as tmpfiles makes it; the
+# files in it fall under openbao-seal's sweep.
+0700  required  /var/lib/rasputin/openbao-seal/rotation
 # tls/ and the two leaf directories are root's, written by the api. Each leaf
 # directory holds leaf.key and leaf.pem. leaf.pem is NOT declared, and the leaf
 # directories are not swept, for the reason trust/ and bus.crt are not: the api

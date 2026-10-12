@@ -96,11 +96,13 @@ awk -v u="$ME" -v g="$MYGID" '
 # never read from the inventory, so a row dropped from it or declared with the
 # wrong owner fails a case below instead of quietly shrinking the table.
 VAR_RASPUTIN=/var/lib/rasputin
-STORE_DIRS="$VAR_RASPUTIN/openbao $VAR_RASPUTIN/openbao-audit $VAR_RASPUTIN/openbao-seal $VAR_RASPUTIN/tls $VAR_RASPUTIN/tls/openbao-server $VAR_RASPUTIN/tls/openbao-client"
+# openbao-seal/rotation is the seal-key rotation's staging directory
+# (geekdojo/geekdojo-brain#830, TC-830-24).
+STORE_DIRS="$VAR_RASPUTIN/openbao $VAR_RASPUTIN/openbao-audit $VAR_RASPUTIN/openbao-seal $VAR_RASPUTIN/openbao-seal/rotation $VAR_RASPUTIN/tls $VAR_RASPUTIN/tls/openbao-server $VAR_RASPUTIN/tls/openbao-client"
 STORE_FILES="$VAR_RASPUTIN/openbao-seal/seal-key $VAR_RASPUTIN/openbao-seal/seal.hcl $VAR_RASPUTIN/tls/openbao-server/leaf.key $VAR_RASPUTIN/tls/openbao-client/leaf.key"
 # The store's own uid owns these two; root owns every other store path.
 STORE_OWNED="$VAR_RASPUTIN/openbao $VAR_RASPUTIN/openbao-audit"
-STORE_ROOT_OWNED="$VAR_RASPUTIN/openbao-seal $VAR_RASPUTIN/openbao-seal/seal-key $VAR_RASPUTIN/openbao-seal/seal.hcl $VAR_RASPUTIN/tls $VAR_RASPUTIN/tls/openbao-server $VAR_RASPUTIN/tls/openbao-server/leaf.key $VAR_RASPUTIN/tls/openbao-client $VAR_RASPUTIN/tls/openbao-client/leaf.key"
+STORE_ROOT_OWNED="$VAR_RASPUTIN/openbao-seal $VAR_RASPUTIN/openbao-seal/rotation $VAR_RASPUTIN/openbao-seal/seal-key $VAR_RASPUTIN/openbao-seal/seal.hcl $VAR_RASPUTIN/tls $VAR_RASPUTIN/tls/openbao-server $VAR_RASPUTIN/tls/openbao-server/leaf.key $VAR_RASPUTIN/tls/openbao-client $VAR_RASPUTIN/tls/openbao-client/leaf.key"
 OPENBAO_ID=990
 
 run_audit() {
@@ -171,8 +173,8 @@ world() {
 	: >"$V/bus/bus.key"; chmod 0600 "$V/bus/bus.key"
 	: >"$V/bus/agent.token"; chmod 0600 "$V/bus/agent.token"
 	: >"$V/bus/join.token"; chmod 0600 "$V/bus/join.token"
-	# The secrets store's six directories and its four secret files
-	# (geekdojo/geekdojo-brain#754), each at its declared mode.
+	# The secrets store's seven directories and its four secret files
+	# (geekdojo/geekdojo-brain#754, #830), each at its declared mode.
 	for d in $STORE_DIRS; do
 		mkdir -p "$R$d"; chmod 0700 "$R$d"
 	done
@@ -482,10 +484,37 @@ store_cases() {
 	# correct tree checked 16: fifteen declared paths, plus console/shadow
 	# visited again by its sweep. #754 adds ten declared paths and the
 	# sweep of openbao-seal/, which visits seal-key and seal.hcl again, so 28.
+	# TC-830-24: #830 adds openbao-seal/rotation, one declared path, so 29.
 	out=$(run_audit "$R"); rc=$?
 	ok "TC-754-05 a correct tree with the store's paths passes" "$(yes_if [ "$rc" -eq 0 ])" "$out"
-	ok "TC-754-05 the verdict is exactly 'PASS checked=28'" \
-		"$(yes_if last_line_matches '^rasputin-atrest: PASS checked=28$' "$out")" "$out"
+	ok "TC-830-24 the verdict is exactly 'PASS checked=29'" \
+		"$(yes_if last_line_matches '^rasputin-atrest: PASS checked=29$' "$out")" "$out"
+
+	# TC-830-24: the rotation directory at 0755 fails naming it; a 0644 file
+	# inside it fails openbao-seal's sweep; a 0600 staged key passes; the
+	# directory absent fails as required.
+	ROT="$VAR_RASPUTIN/openbao-seal/rotation"
+	chmod 0755 "$R$ROT"
+	out=$(run_audit "$R"); rc=$?
+	chmod 0700 "$R$ROT"
+	ok "TC-830-24 openbao-seal/rotation at 0755 is refused" "$(yes_if [ "$rc" -ne 0 ])" "$out"
+	ok "TC-830-24 the failure names openbao-seal/rotation and its mode" \
+		"$(yes_if says "$ROT is 0755, declared 0700" "$out")" "$out"
+	K="$ROT/rasputin-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+	: >"$R$K"; chmod 0644 "$R$K"
+	out=$(run_audit "$R"); rc=$?
+	ok "TC-830-24 a 0644 file in openbao-seal/rotation is refused" "$(yes_if [ "$rc" -ne 0 ])" "$out"
+	ok "TC-830-24 openbao-seal's sweep names it" \
+		"$(yes_if says "$K is 0644 in a swept tree" "$out")" "$out"
+	chmod 0600 "$R$K"
+	out=$(run_audit "$R"); rc=$?
+	ok "TC-830-24 a 0600 staged key in openbao-seal/rotation passes" "$(yes_if passed "$rc" "$out")" "$out"
+	rm -f "$R$K"
+	R2=$(world); rm -rf "$R2$ROT"
+	out=$(run_audit "$R2"); rc=$?
+	ok "TC-830-24 a missing openbao-seal/rotation is refused" "$(yes_if [ "$rc" -ne 0 ])" "$out"
+	ok "TC-830-24 the failure says openbao-seal/rotation is required" \
+		"$(yes_if says "$ROT is missing and is required" "$out")" "$out"
 
 	# TC-754-06 and TC-754-07: undeclared group access and world access, one
 	# new row at a time, each restored before the next.
@@ -723,8 +752,8 @@ inv_row() {
 # MODE, UID and GID.
 d_line_is() { [ "$(tmpfiles_d "$1")" = "$2 $3 $4" ]; }
 
-# TC-754-01: the six `d` lines, exactly once each, with the values written here
-# rather than read from the inventory.
+# TC-754-01: the seven `d` lines, exactly once each, with the values written
+# here rather than read from the inventory (openbao-seal/rotation: TC-830-24).
 while read -r rel mode uid gid; do
 	p="$VAR_RASPUTIN/$rel"
 	ok "TC-754-01 tmpfiles.d declares $p once, $mode $uid:$gid" \
@@ -734,6 +763,7 @@ done <<'EOF_D'
 openbao 0700 990 990
 openbao-audit 0700 990 990
 openbao-seal 0700 0 0
+openbao-seal/rotation 0700 0 0
 tls 0700 0 0
 tls/openbao-server 0700 0 0
 tls/openbao-client 0700 0 0
