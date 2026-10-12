@@ -150,11 +150,14 @@ $EXPECTED
 EOF_EXPECTED
 check "tls is 700 0 0, not the 755 tmpfiles gives a missing parent" \
 	"$(yes_if [ "$(stat_of $V/tls)" = '700 0 0' ])" "got: $(stat_of $V/tls)"
-# Files only: openbao-seal/ holds the rotation/ directory tmpfiles makes (#830).
+# Any entry fails, except the one directory tmpfiles itself declares inside
+# openbao-seal/: rotation/ (#830). Anything under rotation/ is still counted.
 for d in openbao-seal tls/openbao-server tls/openbao-client; do
-	n=$(inside "find $V/$d -mindepth 1 -type f | wc -l")
-	check "$d holds no files: tmpfiles creates no secret" "$(yes_if [ "$n" -eq 0 ])" "$(inside "ls -la $V/$d")"
+	n=$(inside "find $V/$d -mindepth 1 ! -path $V/openbao-seal/rotation | wc -l")
+	check "$d holds nothing: tmpfiles creates no secret" "$(yes_if [ "$n" -eq 0 ])" "$(inside "ls -la $V/$d")"
 done
+n=$(inside "find $V/openbao-seal/rotation -mindepth 1 | wc -l")
+check "openbao-seal/rotation holds nothing: tmpfiles stages no key" "$(yes_if [ "$n" -eq 0 ])" "$(inside "ls -la $V/openbao-seal/rotation")"
 out=$(audit)
 check "the real audit over the shipped store rows says PASS checked=7" \
 	"$(yes_if contains 'rasputin-atrest: PASS checked=7' "$out")" "$out"
