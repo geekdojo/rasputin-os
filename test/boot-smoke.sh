@@ -43,7 +43,6 @@ mkdir -p "$WORK"
 . "$(dirname "$0")/lib/store-ready.sh"
 # shellcheck source=test/lib/api-session.sh
 . "$(dirname "$0")/lib/api-session.sh"
-# shellcheck disable=SC2034 # read by api_session
 SOFT_PASSKEY="$(dirname "$0")/lib/soft-passkey.py"
 
 # Host-side forwards into the guest. The same numbers serve both arches: the two
@@ -471,7 +470,7 @@ if [ "$sirep" = 1 ]; then
   (umask 077; : > "$SR_JAR")
   mkdir -p "$WORK/store-ready"
   SR_STAGE="signin"
-  if SR_REASON=$(api_session smoke_post "https://127.0.0.1:${HTTPS_PORT}" "https://${RPID}" "$SR_JAR" "$WORK/store-ready"); then
+  if SR_REASON=$(api_session smoke_post "https://127.0.0.1:${HTTPS_PORT}" "https://${RPID}" "$SR_JAR" "$WORK/store-ready" "$SOFT_PASSKEY"); then
     SR_STAGE="wait"
     store_ready_wait "$SR_TRIES" 2 smoke_fetch die_if_qemu_gone
     SR_RC=$?

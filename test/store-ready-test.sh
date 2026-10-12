@@ -122,7 +122,6 @@ SH=$SR_TEST_SHELL
 . "$SR_LIB"
 # shellcheck source=SCRIPTDIR/lib/api-session.sh
 . "$AS_LIB"
-SOFT_PASSKEY=$HELPER
 
 T="$TMP/t"
 mkdir -p "$T"
@@ -218,6 +217,18 @@ check "TC-834-07 [$SH] FETCH ran exactly 3 times" "$(yes_if test "$(cat "$T/fetc
 check "TC-834-07 [$SH] SR_LAST is the last verdict" "$(yes_if test "$SR_LAST" = "not-ready: secret-store:unreachable")" "$SR_LAST"
 WAIT_LAST=$SR_LAST
 
+# TC-834-07: FETCH prints a bare code with no body path (curl got no answer),
+# and the wait still runs out with SR_LAST naming it.
+echo 0 > "$T/fetch.n"
+stub_fetch_bare() {
+	_f=$(($(cat "$T/fetch.n") + 1)); echo "$_f" > "$T/fetch.n"
+	printf '000\n'
+}
+store_ready_wait 2 0 stub_fetch_bare stub_alive; RC=$?
+check "TC-834-07 [$SH] a bare 000 from FETCH: the wait returns 1" "$(yes_if test "$RC" = 1)" "rc=$RC"
+check "TC-834-07 [$SH] a bare 000 from FETCH: FETCH ran exactly 2 times" "$(yes_if test "$(cat "$T/fetch.n")" = 2)" "$(cat "$T/fetch.n")"
+check "TC-834-07 [$SH] a bare 000 from FETCH: SR_LAST is no-answer" "$(yes_if test "$SR_LAST" = "no-answer")" "$SR_LAST"
+
 # TC-834-08: the wait stops on the fact, and ALIVE runs before FETCH.
 wait_setup "$SEALED" "$SEALED" '[]' '[]' '[]'
 store_ready_wait 10 0 stub_fetch stub_alive; RC=$?
@@ -305,7 +316,7 @@ session_setup() {
 session() {
 	OUT=$(
 		[ -n "${1:-}" ] && PATH="$1:$PATH"
-		api_session stub_post "$BASE" "https://smoke1.local" "$T/jar" "$T/work" 2> "$T/session.err"
+		api_session stub_post "$BASE" "https://smoke1.local" "$T/jar" "$T/work" "$HELPER" 2> "$T/session.err"
 	); RC=$?
 	ERR=$(cat "$T/session.err")
 }
@@ -514,16 +525,25 @@ check "$l: response carries clientDataJSON and attestationObject" \
 printf '%s' '{"publicKey":{"rp":{"id":"smoke1.local"}}}' > "$T/no-challenge.json"
 printf '%s' '{"publicKey":{"challenge":"'$CHALLENGE'","rp":{}}}' > "$T/no-rpid.json"
 printf '%s' 'not json' > "$T/not-json.json"
+printf '%s' '{"rp":{"id":"smoke1.local"},"challenge":"'$CHALLENGE'"}' > "$T/no-publickey.json"
+printf '%s' '{"publicKey":"'$CHALLENGE'"}' > "$T/publickey-not-object.json"
+# fails_closed LABEL — the TC-834-22 assertions on the last passkey run.
+fails_closed() {
+	check "$1: exits 2" "$(yes_if test "$PRC" = 2)" "rc=$PRC"
+	check "$1: nothing on stdout" "$(yes_if test ! -s "$T/pk.out")" "$(cat "$T/pk.out")"
+	check "$1: one sentence on stderr" \
+		"$(yes_if test "$(wc -l < "$T/pk.err" | tr -d ' ')" = 1 -a "$(grep -c '^[A-Z].*\.$' "$T/pk.err")" = 1)" "$(cat "$T/pk.err")"
+}
 for row in "no-challenge.json p256.der" "no-rpid.json p256.der" "not-json.json p256.der" \
-	"opts.json absent.der" "opts.json short.der" "opts.json p384.der"; do
+	"opts.json absent.der" "opts.json short.der" "opts.json p384.der" \
+	"no-publickey.json p256.der" "publickey-not-object.json p256.der"; do
 	in=${row%% *}; der=${row#* }
 	passkey "$T/$in" --origin https://smoke1.local --pubkey-der "$T/$der"
-	l="TC-834-22 [$SH] $in with $der"
-	check "$l: exits 2" "$(yes_if test "$PRC" = 2)" "rc=$PRC"
-	check "$l: nothing on stdout" "$(yes_if test ! -s "$T/pk.out")" "$(cat "$T/pk.out")"
-	check "$l: one sentence on stderr" \
-		"$(yes_if test "$(wc -l < "$T/pk.err" | tr -d ' ')" = 1 -a "$(grep -c '^[A-Z].*\.$' "$T/pk.err")" = 1)" "$(cat "$T/pk.err")"
+	fails_closed "TC-834-22 [$SH] $in with $der"
 done
+# TC-834-22: a --credential-id that is not hex.
+passkey "$T/opts.json" --origin https://smoke1.local --pubkey-der "$T/p256.der" --credential-id not-hex
+fails_closed "TC-834-22 [$SH] --credential-id not-hex"
 
 if [ "$fails" -ne 0 ]; then
 	echo "store-ready-test [$SH]: $fails failed"

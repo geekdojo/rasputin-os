@@ -10,18 +10,17 @@
 # by test/lib/soft-passkey.py, a "none" attestation over a P-256 public key
 # that openssl makes; the private key only ever passes through a pipe.
 #
-#   api_session POST BASE ORIGIN JAR WORK
+#   api_session POST BASE ORIGIN JAR WORK PASSKEY
 #       POST is a function, called as POST URL BODYFILE OUTFILE JAR, that
 #       sends BODYFILE as JSON with the cookie JAR, writes the answer's body to
 #       OUTFILE and prints the HTTP status code (000 or nothing for no answer).
 #       BASE is the api's scheme, host and port; ORIGIN is the origin the
-#       passkey claims (https:// and the RP ID); WORK is a scratch directory.
+#       passkey claims (https:// and the RP ID); WORK is a scratch directory;
+#       PASSKEY is the path of soft-passkey.py.
 #       Returns 0 once the jar holds a rasputin-session cookie. Otherwise prints
 #       one sentence saying which step failed and returns 1. The sentence never
 #       holds a response body, the challenge or a cookie value. Every file it
 #       makes under WORK is removed on every path; the jar is the caller's.
-#
-# The sourcing script sets SOFT_PASSKEY to the path of soft-passkey.py.
 
 api_session() {
 	_as_post=$1
@@ -29,6 +28,7 @@ api_session() {
 	_as_origin=$3
 	_as_jar=$4
 	_as_work=$5
+	_as_passkey=$6
 	_api_session_steps
 	_as_rc=$?
 	rm -f "$_as_work/begin.req" "$_as_work/begin.out" "$_as_work/pk.der" \
@@ -59,7 +59,7 @@ _api_session_steps() {
 		echo "OpenSSL could not make a P-256 public key."; return 1
 	fi
 
-	if ! python3 -I "$SOFT_PASSKEY" --origin "$_as_origin" --pubkey-der "$_as_work/pk.der" \
+	if ! python3 -I "$_as_passkey" --origin "$_as_origin" --pubkey-der "$_as_work/pk.der" \
 		< "$_as_work/begin.out" > "$_as_work/finish.req" 2> "$_as_work/passkey.err"; then
 		echo "The soft passkey could not encode the registration: $(head -n 1 "$_as_work/passkey.err")"
 		return 1
