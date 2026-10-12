@@ -55,7 +55,8 @@ echo "client \$*" >>"$CALLS"
 cat "$SCRATCH/client.out"
 exit "\$(cat "$SCRATCH/client.rc")"
 EOF
-# mkfifo shim, installed only for the fifo-failure case.
+# mkfifo shim, installed only for the fifo-failure case (under busybox sh,
+# through a shell function: see run).
 cat >"$SCRATCH/mkfifo-fails" <<EOF
 #!/bin/sh
 echo "mkfifo \$*" >>"$CALLS"
@@ -83,9 +84,23 @@ setup() {
 }
 
 # run REASON — runs the helper under $SH; sets OUT, ERR, RC and LOG.
+#
+# busybox sh runs its own mkfifo applet ahead of PATH (Ubuntu's busybox-static,
+# which CI installs, does), so the $BIN/mkfifo shim alone never replaces it
+# there. A shell function does: when the shim is installed, busybox sh defines
+# mkfifo as a function calling it, then sources the helper with $0 and its
+# arguments as a direct run would set them (the test/boot-hook-test.sh pattern).
 run() {
 	case "$SH" in
-		busybox_sh) set -- busybox sh "$HELPER" openbao.service "$1" fake-client --arg ;;
+		busybox_sh)
+			if [ -f "$BIN/mkfifo" ]; then
+				# shellcheck disable=SC2016 # expanded by the busybox sh it runs
+				set -- env MKFIFO_SHIM="$BIN/mkfifo" busybox sh -c 'mkfifo() { "$MKFIFO_SHIM" "$@"; }; . "$0"' \
+					"$HELPER" openbao.service "$1" fake-client --arg
+			else
+				set -- busybox sh "$HELPER" openbao.service "$1" fake-client --arg
+			fi
+			;;
 		*) set -- "$SH" "$HELPER" openbao.service "$1" fake-client --arg ;;
 	esac
 	OUT=$(PATH="$BIN:$PATH" "$@" 2>"$SCRATCH/err"); RC=$?
