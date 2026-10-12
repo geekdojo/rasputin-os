@@ -271,16 +271,32 @@ phase_wait() {
 		wait_cleanup
 		fail "The wait for the secrets store's unseal could not be set up in $WORK, $NOT_ADDED"
 	fi
+	# The reader holds the fifo open for writing too, before any writer
+	# starts, so the fifo never reaches EOF: a journal source that exits, at
+	# once or later, is not a fact, and the wait goes on to the bound and its
+	# one health ask. The writers do not inherit that descriptor.
+	exec 3<> "$WDIR/f"
+	# The writers are forked with no trap set. A forked child keeps its
+	# parent's caught-signal handler until it resets its traps or execs, and
+	# a TERM that lands in that gap is lost (dash), so a writer forked under
+	# a trap could outlive the kill that cleanup sends it. A signal between
+	# here and the trap below ends this shell at once, and `stopped` removes
+	# the fifo directory, as it does for a killed wait.
+	trap - HUP INT TERM
 	# (a) This run's journal lines: the earlier ones replayed, then followed.
-	"$JOURNAL" --follow --no-tail -o cat "_SYSTEMD_INVOCATION_ID=$_id" > "$WDIR/f" 2>/dev/null &
+	"$JOURNAL" --follow --no-tail -o cat "_SYSTEMD_INVOCATION_ID=$_id" > "$WDIR/f" 2>/dev/null 3<&- &
 	JPID=$!
-	# (c) The bound, for a bao that logs no result. A TERM ends its sleep.
-	( trap 'kill $! 2>/dev/null; exit 0' TERM; sleep "$BOUND" & wait $!; echo @bound ) > "$WDIR/f" 2>/dev/null &
+	# (c) The bound, for a bao that logs no result. A TERM ends its sleep
+	# with KILL, which the sleep cannot lose in that same gap, and reaps it,
+	# so the sleep is gone once cleanup's wait for this subshell returns.
+	( trap 'kill -s KILL $! 2>/dev/null; wait $! 2>/dev/null; exit 0' TERM; sleep "$BOUND" & wait $!; echo @bound ) > "$WDIR/f" 2>/dev/null 3<&- &
 	SPID=$!
-	exec 3< "$WDIR/f"
+	trap 'wait_cleanup; exit 1' HUP INT TERM
 	_decision=""
 	while :; do
-		if ! IFS= read -r _l <&3; then _decision=bound; break; fi
+		# With the descriptor held, a failed read is never EOF: the wait has
+		# lost its own fifo, which is not the bound.
+		if ! IFS= read -r _l <&3; then _decision=lost; break; fi
 		if [ "$_l" = @bound ]; then _decision=bound; break; fi
 		_c=$(classify "$_l")
 		case "$_c" in
@@ -293,6 +309,7 @@ phase_wait() {
 	case "$_decision" in
 		ok) exit 0 ;;
 		fail\ *) fail "The secrets store did not unseal (it logged: ${_decision#fail }), $NOT_ADDED" ;;
+		lost) fail "The wait for the secrets store's unseal could not read its own fifo in $WORK, $NOT_ADDED" ;;
 	esac
 	# (b) The bound: one sys/health ask. A 200 is success.
 	"$BAO" read sys/health >/dev/null 2>&1 && exit 0

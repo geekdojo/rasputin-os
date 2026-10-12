@@ -30,7 +30,9 @@
 #
 # Durations. RASPUTIN_STOREPROV_UNSEAL_BOUND is 1 in the cases that reach the
 # bound, and 37 in the cases that must end before it, so a leftover bound
-# sleeper is `sleep 37` and nothing else. The fake health ask honours
+# sleeper is `sleep 37` and nothing else. The one case that must prove the
+# wait lasted the whole bound uses 2: in whole seconds a run of 2 s or more
+# reads 2 or more, and one that ended under a second reads 1 at most. The fake health ask honours
 # BAO_CLIENT_TIMEOUT as the real client does.
 #
 # Run:  sh test/store-provision-test.sh
@@ -357,6 +359,20 @@ EOF_TERM
 		_want=1; [ "$h" = 200 ] && _want=0
 		ok "$_l: wait ends by the bound's health ask with $_want" \
 			"$(yes_if eval '[ "$RC" = "$_want" ] && [ "$EL" -ge 1 ] && [ "$EL" -le 4 ] && [ "$(health_asks)" = 1 ]')" "rc=$RC el=$EL asks=$(health_asks)"
+		no_writers "$_l"
+	done
+	# F-805-25: a journal source that exits at once must not end the wait
+	# early through the fifo's EOF. The wait lasts the whole bound, and only
+	# then does the reason name the bound.
+	for h in 200 503; do
+		setup; BOUND=2; FAKE_JOURNAL=down; FAKE_HEALTH=$h; run wait
+		_l="TC-805-17 journal source exits at once, bound 2 s, health $h"
+		_want=1; [ "$h" = 200 ] && _want=0
+		ok "$_l: wait lasts at least the bound, then ends with $_want on one health ask" \
+			"$(yes_if eval '[ "$RC" = "$_want" ] && [ "$EL" -ge 2 ] && [ "$EL" -le 5 ] && [ "$(health_asks)" = 1 ]')" "rc=$RC el=$EL asks=$(health_asks)"
+		if [ "$h" = 503 ]; then
+			ok "$_l: the reason names the 2 s bound" "$(yes_if contains 'logged no unseal result within 2 s' "$(res reason)")" "$(res reason)"
+		fi
 		no_writers "$_l"
 	done
 	# An empty or malformed InvocationID: refused before any journal source.
