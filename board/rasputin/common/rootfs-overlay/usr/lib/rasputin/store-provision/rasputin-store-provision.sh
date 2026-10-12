@@ -31,7 +31,7 @@
 #            marker, and a result other than success).
 #
 # THE WAIT ENDS ON FACTS. bao logs each stored-key unseal attempt's result on
-# its journal stream (capability row T53). The wait follows this run's lines
+# its journal stream (capability row T57). The wait follows this run's lines
 # only, identified by the store unit's InvocationID, from the start of the run
 # (a line logged before the wait began is replayed), and ends on the first
 # decisive one:
