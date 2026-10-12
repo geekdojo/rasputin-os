@@ -138,7 +138,8 @@
 # settle (geekdojo/geekdojo-brain#830). Required, as tmpfiles makes it; the
 # files in it fall under openbao-seal's sweep.
 0700  required  /var/lib/rasputin/openbao-seal/rotation
-# tls/ and the two leaf directories are root's, written by the api. Each leaf
+# tls/ and the three leaf directories are root's, written by the api (the
+# provisioner's since #805). Each leaf
 # directory holds leaf.key and leaf.pem. leaf.pem is NOT declared, and the leaf
 # directories are not swept, for the reason trust/ and bus.crt are not: the api
 # writes a certificate at 0644, public by construction, and every entry here
@@ -149,6 +150,8 @@
 0600  optional  /var/lib/rasputin/tls/openbao-server/leaf.key
 0700  required  /var/lib/rasputin/tls/openbao-client
 0600  optional  /var/lib/rasputin/tls/openbao-client/leaf.key
+0700  required  /var/lib/rasputin/tls/openbao-provisioner
+0600  optional  /var/lib/rasputin/tls/openbao-provisioner/leaf.key
 
 # ── NOT declared, and deliberately ─────────────────────────────────────────
 # /var/lib/rasputin/clock — the last-known-good time, written by

@@ -35,6 +35,9 @@ name: ci
 on:
   pull_request:
     branches: [main]
+  # A PR stacked on another branch gets no pull_request run, so its suite is
+  # dispatched on the branch by hand (geekdojo/geekdojo-brain#805, F-805-22).
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -315,6 +318,18 @@ jobs:
       # sh, dash and bash; and the helper's line coverage.
       - name: Store readiness check tests
         run: sh test/store-ready-test.sh
+      # The secrets store's provisioner oneshot (geekdojo/geekdojo-brain#805):
+      # rasputin-store-provision.sh against a scratch tree with a fake bao, a
+      # fake journal source and a fake systemctl, each recording its calls:
+      # the parse refusals with no store call, the unseal wait ending on each
+      # of bao's result lines and on the bound's one health ask with no writer
+      # left behind, login, mounts and roles written only when absent, the
+      # four-line record, and no token in any output; under dash, bash, busybox
+      # ash and busybox's own applets.
+      - name: Store provisioner tests
+        env:
+          REQUIRE_BUSYBOX: "1"
+        run: sh test/store-provision-test.sh
       # The store's policy text (geekdojo/geekdojo-brain#804): the drift script
       # against fixtures (a match, a changed byte, a missing and an extra file,
       # an unreadable and an empty side), and the post-build guard that
@@ -434,8 +449,8 @@ jobs:
       - name: Persistent journal against real journald + tmpfiles (fallback, flush, mode, caps)
         run: sh test/persistent-journal-functional.sh
 
-  # The secrets store's persistent paths (geekdojo/geekdojo-brain#754) are six
-  # tmpfiles.d lines and six at-rest inventory rows, and what they rest on is
+  # The secrets store's persistent paths (geekdojo/geekdojo-brain#754; #805) are seven
+  # tmpfiles.d lines and seven at-rest inventory rows, and what they rest on is
   # systemd's behaviour: a numeric owner works with no such user, a declared
   # parent is created at its own mode rather than tmpfiles' 0755, and a `d`
   # line re-asserts mode and owner on every boot without touching what is
@@ -476,7 +491,11 @@ jobs:
       # limit after repeated crashes with recovery by reset-failed, and the
       # shipped config at work: its only socket 127.0.0.1:8200, the TLS
       # handshake matrix, init and a restart that unseals from the fragment,
-      # log level info and no key material in the journal. Same job as the
+      # log level info and no key material in the journal; and the store's
+      # provisioner (geekdojo/geekdojo-brain#805): a first boot, N to N+1 with
+      # no root token, the no-op re-apply, a refused write, a wrong-key store
+      # ending on bao's own line, the store stopped mid-wait, an absent
+      # provisioner leaf and the record's read point. Same job as the
       # store paths: it builds the same image. It reads the pinned api
       # tarball's policy text (geekdojo/geekdojo-brain#804), so it is red until
       # the store-arming pin moves, by design; it is the job's last step, so

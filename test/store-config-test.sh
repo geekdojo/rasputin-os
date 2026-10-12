@@ -251,15 +251,18 @@ $(words "$D" Service ReadWritePaths)
 	CA_PATH="$CREDS/${_ca_name:-<no store-ca.pem credential>}"
 	# reqs — one "PATH<TAB>OPERATION" per request, in order.
 	_reqs=$(jq -r '.initialize[] | to_entries[] | .value.request[] | to_entries[] | .value | "\(.path)\t\(.operation)"' "$J" 2>&1)
-	# #805 PINS: two policies and two roles. geekdojo-brain#805 adds the
-	# provisioner's policy and role here and updates this list (F-804-11).
-	check "TC-804-13 init.json's requests are exactly the two policies, the mount, cert auth and the two roles, in order" \
+	# TC-805-24: four policies and three roles, the provisioner's added by
+	# geekdojo-brain#805 (the #805 PINS of TC-804-13).
+	check "TC-804-13 TC-805-24 init.json's requests are exactly the four policies, the mount, cert auth and the three roles, in order" \
 		"$(yes_if [ "$(printf '%s\n' "$_reqs" | cut -f1)" = 'sys/policies/acl/rasputin-api
 sys/policies/acl/rasputin-seal-rotate
+sys/policies/acl/rasputin-provisioner
+sys/policies/acl/rasputin-bindable
 sys/mounts/rasputin-secrets
 sys/auth/cert
 auth/cert/certs/rasputin-api
-auth/cert/certs/rasputin-seal-rotate' ])" "got: $(printf '%s' "$_reqs" | cut -f1 | tr '\n' '|')"
+auth/cert/certs/rasputin-seal-rotate
+auth/cert/certs/rasputin-provisioner' ])" "got: $(printf '%s' "$_reqs" | cut -f1 | tr '\n' '|')"
 	_ops=$(printf '%s\n' "$_reqs" | cut -f2 | sort -u)
 	check "TC-804-13 every request's operation is update" "$(yes_if [ "$_ops" = update ])" "got: $(printf '%s' "$_ops" | tr '\n' '|')"
 	_audit=$(printf '%s\n' "$_reqs" | cut -f1 | grep '^sys/audit' || true)
@@ -275,17 +278,33 @@ auth/cert/certs/rasputin-seal-rotate' ])" "got: $(printf '%s' "$_reqs" | cut -f1
 	check "TC-804-13 the mount is kv version 2" \
 		"$(yes_if [ "$(req sys/mounts/rasputin-secrets)" = '{"type":"kv","options":{"version":"2"}}' ])" "got: $(req sys/mounts/rasputin-secrets)"
 	check "TC-804-13 cert auth is enabled" "$(yes_if [ "$(req sys/auth/cert)" = '{"type":"cert"}' ])" "got: $(req sys/auth/cert)"
-	for _p in rasputin-api rasputin-seal-rotate; do
+	for _p in rasputin-api rasputin-seal-rotate rasputin-provisioner rasputin-bindable; do
 		_want_pol=$(jq -cn --arg p "/usr/share/rasputin/openbao-policy/$_p.hcl" '{policy: {eval_type: "string", eval_source: "file", path: $p}}')
-		check "TC-804-13 policy $_p is read from /usr/share/rasputin/openbao-policy/$_p.hcl through a file source" \
+		check "TC-804-13 TC-805-24 policy $_p is read from /usr/share/rasputin/openbao-policy/$_p.hcl through a file source" \
 			"$(yes_if [ "$(req "sys/policies/acl/$_p")" = "$_want_pol" ])" "got: $(req "sys/policies/acl/$_p")"
+	done
+	for _p in rasputin-api rasputin-seal-rotate rasputin-provisioner; do
 		_want_role=$(jq -cn --arg n "$_p" --arg ca "$CA_PATH" '{certificate: {eval_type: "string", eval_source: "file", path: $ca}, allowed_common_names: [$n], token_policies: [$n], token_no_default_policy: true, token_ttl: "1h"}')
-		check "TC-804-13 role $_p: CN $_p only, policy $_p only, token_no_default_policy, the store CA credential ($CA_PATH) as its certificate" \
+		check "TC-804-13 TC-805-24 role $_p: CN $_p only, policy $_p only, token_no_default_policy, token_ttl 1h, the store CA credential ($CA_PATH) as its certificate" \
 			"$(yes_if [ "$(req "auth/cert/certs/$_p")" = "$_want_role" ])" "got: $(req "auth/cert/certs/$_p")"
 	done
 	_binders=$(jq -r '.initialize[] | to_entries[] | .value.request[] | to_entries[] | .value | select(((.data.token_policies // []) + (.data.policies // [])) | index("rasputin-seal-rotate")) | .path' "$J" 2>&1)
 	check "TC-804-13 rasputin-seal-rotate is bound only by its own role" \
 		"$(yes_if [ "$_binders" = auth/cert/certs/rasputin-seal-rotate ])" "bound by: $(printf '%s' "$_binders" | tr '\n' '|')"
+	_bindable=$(jq -r '.initialize[] | to_entries[] | .value.request[] | to_entries[] | .value | select(((.data.token_policies // []) + (.data.policies // [])) | index("rasputin-bindable")) | .path' "$J" 2>&1)
+	check "TC-805-24 rasputin-bindable is bound by no init.json role (only the provisioner's roles bind it)" \
+		"$(yes_if [ -z "$_bindable" ])" "bound by: $(printf '%s' "$_bindable" | tr '\n' '|')"
+	_roles=$(jq -r '[.initialize[] | to_entries[] | .value.request[] | to_entries[] | .value | select(.path | startswith("auth/cert/certs/"))] | length' "$J" 2>&1)
+	check "TC-805-24 init.json has exactly three cert roles (got $_roles)" "$(yes_if [ "$_roles" = 3 ])"
+
+	echo "  -- init.json is frozen; later items are provision.tsv's (TC-805-24)"
+	_frozen=$(grep -c 'init.json is FROZEN from the store-arming' "$U" || true)
+	check "TC-805-24 openbao.service's comment on init.json says it is frozen from the store-arming release on" "$(yes_if [ "$_frozen" = 1 ])" "found $_frozen"
+	_pt="$R/$REL_OVERLAY/etc/rasputin/openbao/provision.tsv"
+	_ptf=$(grep -c 'init.json beside this file is FROZEN from the store-arming release on' "$_pt" 2>/dev/null || true)
+	check "TC-805-24 provision.tsv's header says init.json is frozen from the store-arming release on" "$(yes_if [ "$_ptf" = 1 ])" "found ${_ptf:-0} in $_pt"
+	_items=$(grep -v -e '^#' -e '^[[:space:]]*$' "$_pt" 2>/dev/null || true)
+	check "TC-805-24 the shipped provision.tsv holds no entry" "$(yes_if eval '[ -f "$_pt" ] && [ -z "$_items" ]')" "entries: $(printf '%s' "$_items" | tr '\n' '|')"
 	_stray=$(jq -r --arg ca "$CA_PATH" '[.. | objects | select(.eval_source? == "file") | .path | select((startswith("/usr/share/rasputin/openbao-policy/") or . == $ca) | not)] | join(",")' "$J" 2>&1)
 	check "TC-804-13 every file source is under /usr/share/rasputin/openbao-policy/ or is the store CA credential" \
 		"$(yes_if [ -z "$_stray" ])" "outside: $_stray"
@@ -299,11 +318,12 @@ check "the shipped openbao.hcl, openbao.service and post-build.sh pass every che
 
 # --- negative controls (TC-756-06) --------------------------------------------------
 N=0
-# tree — a scratch copy of the six files verify reads. Sets T.
+# tree — a scratch copy of the seven files verify reads. Sets T.
 tree() {
 	N=$((N + 1))
 	T="$SCRATCH/t$N"
-	for _rel in "$REL_UNIT" "$REL_TMPFILES" "$REL_POSTBUILD" "$REL_MK" "$REL_OVERLAY$CONFIG" "$REL_OVERLAY$INIT"; do
+	for _rel in "$REL_UNIT" "$REL_TMPFILES" "$REL_POSTBUILD" "$REL_MK" "$REL_OVERLAY$CONFIG" "$REL_OVERLAY$INIT" \
+		"$REL_OVERLAY/etc/rasputin/openbao/provision.tsv"; do
 		mkdir -p "$(dirname "$T/$_rel")"
 		cp "$ROOT/$_rel" "$T/$_rel"
 	done
@@ -435,6 +455,17 @@ tree; jqedit "$T/$INIT_REL" "$(api_role '.certificate.path = "/run/credentials/o
 	&& refused 'the api role trusting the server leaf, not the store CA' 'role rasputin-api' 'server.pem'
 tree; jqedit "$T/$INIT_REL" "$(api_role '.token_policies = ["rasputin-api", "rasputin-seal-rotate"]')" \
 	&& refused 'the api role also granting the rotation policy' 'rasputin-seal-rotate is bound only by its own role' 'auth/cert/certs/rasputin-api'
+# TC-805-24: the provisioner's role widened, the bindable policy bound at init,
+# and an entry in the shipped provision.tsv.
+prov_role() { printf '(.initialize[] | .auth? // empty | .request[] | ."role-rasputin-provisioner"? // empty | .data) |= (%s)' "$1"; }
+tree; jqedit "$T/$INIT_REL" "$(prov_role '.token_policies = ["rasputin-provisioner", "rasputin-api"]')" \
+	&& refused 'the provisioner role also granting the api policy' 'role rasputin-provisioner' '"token_policies":["rasputin-provisioner","rasputin-api"]'
+tree; jqedit "$T/$INIT_REL" "$(prov_role '.token_ttl = "24h"')" \
+	&& refused 'the provisioner role with a 24h ttl' 'role rasputin-provisioner' '"token_ttl":"24h"'
+tree; jqedit "$T/$INIT_REL" "$(api_role '.token_policies = ["rasputin-api", "rasputin-bindable"]')" \
+	&& refused 'the api role binding rasputin-bindable' 'rasputin-bindable is bound by no init.json role' 'auth/cert/certs/rasputin-api'
+tree; edit "$T/$REL_OVERLAY/etc/rasputin/openbao/provision.tsv" append 'mount	rasputin-rel-x' \
+	&& refused 'an entry in the shipped provision.tsv' 'the shipped provision.tsv holds no entry' 'rasputin-rel-x'
 tree; jqedit "$T/$INIT_REL" '.initialize[0].policies.request[1]."policy-rasputin-seal-rotate".data.policy.path = "/tmp/rasputin-seal-rotate.hcl"' \
 	&& refused 'a policy file source outside openbao-policy/' 'every file source is under /usr/share/rasputin/openbao-policy/' '/tmp/rasputin-seal-rotate.hcl'
 

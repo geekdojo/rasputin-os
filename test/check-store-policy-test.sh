@@ -17,9 +17,9 @@
 # installed), plus `busybox sh` when busybox is installed. REQUIRE_BUSYBOX=1
 # (CI sets it) makes a missing busybox a failure.
 #
-# #805 PINS: the good tree carries exactly the two policy files init.json names
-# today. geekdojo-brain#805 adds rasputin-provisioner to init.json and must add
-# its file here (geekdojo-brain#804, F-804-11).
+# TC-805-25: the good tree carries exactly the four policy files init.json
+# names since geekdojo-brain#805 added rasputin-provisioner and
+# rasputin-bindable (the #805 PINS of TC-804-12).
 #
 # Run:  sh test/check-store-policy-test.sh
 set -u
@@ -60,7 +60,7 @@ ok() {
 yes_if() { if "$@"; then echo 0; else echo 1; fi; }
 
 PD=usr/share/rasputin/openbao-policy
-# good — a target holding the overlay's init.json and both policy files, and an
+# good — a target holding the overlay's init.json and all four policy files, and an
 # extracted tarball holding the same files.
 good() {
 	W=$(mktemp -d "$TMP/w.XXXXXX")
@@ -69,6 +69,8 @@ good() {
 	cp "$INIT" "$T/etc/rasputin/openbao/init.json"
 	printf 'path "rasputin-secrets/data/apps/*" {\n  capabilities = ["read"]\n}\n' > "$T/$PD/rasputin-api.hcl"
 	printf 'path "sys/rotate/root" {\n  capabilities = ["update", "sudo"]\n}\n' > "$T/$PD/rasputin-seal-rotate.hcl"
+	printf 'path "auth/cert/certs/" {\n  capabilities = ["list"]\n}\n' > "$T/$PD/rasputin-provisioner.hcl"
+	printf 'path "auth/token/lookup-self" {\n  capabilities = ["read"]\n}\n' > "$T/$PD/rasputin-bindable.hcl"
 	cp "$T/$PD"/*.hcl "$S/openbao-policy/"
 }
 guard() {
@@ -104,8 +106,14 @@ cases() {
 	ok "the image copy differing: the closing sentence names both copies" \
 		"$(yes_if grep -qF "The image's policy text in /$PD is not the rasputin-api tarball's ($S/openbao-policy)" "$W/err")" "$(cat "$W/err")"
 
-	good; printf 'x\n' > "$T/$PD/rasputin-provisioner.hcl"; guard "$T" "$S"
-	refused "an extra image file the tarball lacks" "The policy file rasputin-provisioner.hcl is in $T/$PD but missing from $S/openbao-policy."
+	good; printf 'x\n' > "$T/$PD/rasputin-extra.hcl"; guard "$T" "$S"
+	refused "an extra image file the tarball lacks" "The policy file rasputin-extra.hcl is in $T/$PD but missing from $S/openbao-policy."
+
+	# TC-805-25: each policy file #805 added to init.json is required too.
+	for _f in rasputin-provisioner rasputin-bindable; do
+		good; rm "$T/$PD/$_f.hcl" "$S/openbao-policy/$_f.hcl"; guard "$T" "$S"
+		refused "TC-805-25 $_f.hcl absent from image and tarball" "The policy file /$PD/$_f.hcl that init.json names is not in the image, so the store's first start would fail and it would never unseal."
+	done
 
 	good; rm -r "$S/openbao-policy"; guard "$T" "$S"
 	refused "a tarball with no openbao-policy/" "The policy directory $S/openbao-policy cannot be read"

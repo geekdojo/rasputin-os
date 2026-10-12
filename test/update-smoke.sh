@@ -54,8 +54,11 @@
 #      in to exactly [rasputin-seal-rotate], the api token is refused policy
 #      writes, sys/mounts, identity/entity and token creation, the api's
 #      client leaf.key is 0600 0:0, audit.log HMACs and does not hold the
-#      written value, and the outcome record says initialised; the second
-#      start changes none of it. Then the token scan of every file under
+#      written value, and the outcome record says initialised; the
+#      store's provisioner (#805, TC-805-36) recorded unchanged, its record
+#      0600 0:0 and exactly the four contract lines, with an unchanged line
+#      and no failed line this boot; the second start changes none of it.
+#      Then the token scan of every file under
 #      /var/lib/rasputin (but the container image stores) and every boot's
 #      journal (TC-804-22). The store runs as uid 990, its only socket is
 #      127.0.0.1:8200, `bao status` is refused in the TLS handshake, as the
@@ -487,6 +490,14 @@ if boot 2; then
 			expect "boot 2 $_w: (9) the outcome record says initialised" initialised "$(kv record_outcome "$_t")"
 			expect "boot 2 $_w: (9) the record is this boot's, three lines" "this 3" "$(kv record_boot "$_t") $(kv record_lines "$_t")"
 			expect "boot 2 $_w: (9) one rasputin-store-init: line this boot" 1 "$(kv store_init_lines "$_t")"
+			# TC-805-36: the store's provisioner (geekdojo/geekdojo-brain#805).
+			expect "boot 2 $_w: (12) the provisioner's record says unchanged" unchanged "$(kv prov_record_outcome "$_t")"
+			expect "boot 2 $_w: (12) the provisioner's record is 0600 root" "600 0:0" "$(kv prov_record_mode "$_t")"
+			expect "boot 2 $_w: (12) the provisioner's record holds exactly the four contract lines" "outcome,boot_id,run_id,reason," "$(kv prov_record_keys "$_t")"
+			_pu="$(kv prov_unchanged_lines "$_t")"
+			if [ "${_pu:-0}" -ge 1 ] 2>/dev/null; then pass "boot 2 $_w: (12) a rasputin-store-provision: outcome=unchanged line this boot ($_pu)"
+			else fail "boot 2 $_w: (12) no rasputin-store-provision: outcome=unchanged line this boot (got '${_pu:-<nothing>}')"; fi
+			expect "boot 2 $_w: (12) no rasputin-store-provision: outcome=failed line this boot" 0 "$(kv prov_failed_lines "$_t")"
 		}
 		S1="$(store_checks)"
 		assert_store "first start" "$S1"
