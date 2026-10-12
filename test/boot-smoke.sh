@@ -431,13 +431,15 @@ KM_AT=$(( $(date +%s) - START ))
 
 # The secrets store's self-init (geekdojo/geekdojo-brain#804, TC-804-23).
 # rasputin-store-init.sh writes one "rasputin-store-init:" line to /dev/kmsg
-# when the store's first start ends, initialised or failed. Arrival is polled
-# here, before the kill; the outcome is asserted after it.
+# when the store's first start ends, initialised or failed, and the store's
+# provisioner (#805, TC-805-35) one "rasputin-store-provision:" line when its
+# run after that start ends. Arrival of both is polled here, before the kill;
+# the outcomes are asserted after it.
 sirep=0
 if [ "$api" = 1 ]; then
   i=0
   while [ "$i" -lt "$SI_TRIES" ]; do
-    if grep -qa "rasputin-store-init: " "$CONSOLE_LOG"; then sirep=1; break; fi
+    if grep -qa "rasputin-store-init: " "$CONSOLE_LOG" && grep -qa "rasputin-store-provision: " "$CONSOLE_LOG"; then sirep=1; break; fi
     die_if_qemu_gone "the secrets store's self-init line"
     i=$((i + 1)); sleep 2
   done
@@ -672,6 +674,21 @@ esac
 # check never ran, the sign-in failed, or the store never read ready.
 rm -f "$SR_JAR"
 store_ready_report "$SR_STAGE" "$SR_REASON" "$SR_RC" "$SR_LAST" "$SR_AT" || exit 1
+# The store's provisioner (geekdojo/geekdojo-brain#805, TC-805-35). After the
+# store's first start the provisioner runs once, and this release's
+# provision.tsv lists nothing, so its one line is outcome=unchanged. A failed
+# line fails the image; so does silence: then nothing provisioned, or nothing
+# recorded that it did.
+PV_LINE="$(grep -ao 'rasputin-store-provision: outcome=.*' "$CONSOLE_LOG" | tr -d '\r' | head -1)"
+if grep -aq 'rasputin-store-provision: outcome=failed' "$CONSOLE_LOG"; then
+  echo "::error::the secrets store's provisioner FAILED on a fresh control plane: $(grep -ao 'rasputin-store-provision: outcome=failed.*' "$CONSOLE_LOG" | tr -d '\r' | head -1)"
+  exit 1
+fi
+case "$PV_LINE" in
+  "rasputin-store-provision: outcome=unchanged "*) echo "secrets store provisioner ran after the store's first start: ${PV_LINE%% reason=*}" ;;
+  "") echo "::error::no 'rasputin-store-provision: outcome=' line reached the serial console in ${SI_AT}s — the store's provisioner never ran after its first start, or openbao.service lost its Wants= on rasputin-store-provision.service."; exit 1 ;;
+  *) echo "::error::the secrets store's provisioner did not report outcome=unchanged on a fresh control plane: $PV_LINE"; exit 1 ;;
+esac
 
 [ "$api" = 1 ] \
   || { echo "::error::rasputin-api never answered /healthz on :80 on the controlplane boot — unit failed to start, RASPUTIN_HTTP_ADDR regressed, or networking broke; see console artifact"; exit 1; }

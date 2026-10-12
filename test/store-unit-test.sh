@@ -25,12 +25,14 @@ set -u
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 OVERLAY="$ROOT/board/rasputin/common/rootfs-overlay"
 UNIT="$OVERLAY/etc/systemd/system/openbao.service"
+PUNIT="$OVERLAY/etc/systemd/system/rasputin-store-provision.service"
+PSCRIPT="$OVERLAY/usr/lib/rasputin/store-provision/rasputin-store-provision.sh"
 TMPFILES="$OVERLAY/usr/lib/tmpfiles.d/rasputin.conf"
 MK="$ROOT/package/openbao/openbao.mk"
 
 # Fail closed, before anything else: a missing input or tool is a failure with
 # a sentence, never a pass over nothing (TC-755-07).
-for f in "$UNIT" "$TMPFILES" "$MK"; do
+for f in "$UNIT" "$PUNIT" "$PSCRIPT" "$TMPFILES" "$MK"; do
 	[ -f "$f" ] || { echo "FAILED: the file $f is missing, so the store unit cannot be checked."; exit 1; }
 done
 command -v make >/dev/null 2>&1 \
@@ -106,6 +108,8 @@ $(values "$D" "$1" "$2")
 	exactly Unit RequiresMountsFor /var/lib/rasputin
 	exactly Unit After rasputin-firstboot.service
 	exactly Unit Before rasputin-api.service
+	# TC-805-25: each start of the store pulls in its provisioner.
+	exactly Unit Wants rasputin-store-provision.service
 	check "[Unit] exactly four ConditionPathExists lines" \
 		"$(yes_if [ "$(count "$D" Unit ConditionPathExists)" -eq 4 ])" "got $(count "$D" Unit ConditionPathExists)"
 	includes Unit ConditionPathExists /var/lib/rasputin/role.controlplane
@@ -226,10 +230,85 @@ $_sources
 	[ "$fails" -eq 0 ]
 )
 
+# verify_prov UNIT — the store provisioner's unit (geekdojo-brain#805,
+# TC-805-25): every directive at its value, the five Exec lines in order with
+# their prefixes, and no TimeoutStartSec or Environment=.
+verify_prov() (
+	fails=0
+	U=$1
+	D=$(directives "$U")
+	exactly() {
+		_got=$(values "$D" "$1" "$2")
+		_st=1
+		[ "$(count "$D" "$1" "$2")" -eq 1 ] && [ "$_got" = "$3" ] && _st=0
+		check "[$1] $2=$3" "$_st" "got: $(printf '%s' "$_got" | tr '\n' '|')"
+	}
+	echo "  -- directives (TC-805-25)"
+	exactly Unit Description 'Secrets store provisioner'
+	exactly Unit BindsTo openbao.service
+	exactly Unit After openbao.service
+	exactly Unit Before rasputin-api.service
+	_conds=$(printf '%s\n' "$D" | grep -E '^Unit\|(Condition|Assert)[A-Za-z]*=' || true)
+	check "[Unit] exactly one condition, ConditionPathExists=/var/lib/rasputin/role.controlplane, and no leaf or CA condition" \
+		"$(yes_if [ "$_conds" = 'Unit|ConditionPathExists=/var/lib/rasputin/role.controlplane' ])" "got: $(printf '%s' "$_conds" | tr '\n' '|')"
+	exactly Service Type oneshot
+	exactly Service RemainAfterExit yes
+	exactly Service User openbao
+	exactly Service Group openbao
+	_lc=$(values "$D" Service LoadCredential)
+	check "[Service] exactly the three LoadCredential lines: the provisioner's leaf and key, and the store CA" \
+		"$(yes_if [ "$_lc" = 'provisioner.pem:/var/lib/rasputin/tls/openbao-provisioner/leaf.pem
+provisioner.key:/var/lib/rasputin/tls/openbao-provisioner/leaf.key
+store-ca.pem:/var/lib/rasputin/trust/store-ca.pem' ])" "got: $(printf '%s' "$_lc" | tr '\n' '|')"
+	exactly Service RuntimeDirectory rasputin-store-provision-work
+	exactly Service RuntimeDirectoryMode 0700
+	exactly Service RuntimeDirectoryPreserve yes
+	exactly Service ProtectSystem strict
+	exactly Service PrivateTmp yes
+	exactly Service NoNewPrivileges yes
+	exactly Service CapabilityBoundingSet ''
+	exactly Service LimitCORE 0
+	_s=/usr/lib/rasputin/store-provision/rasputin-store-provision.sh
+	_exec=$(printf '%s\n' "$D" | grep -E '^Service\|Exec[A-Za-z]*=' | cut -d'|' -f2-)
+	check "the five Exec lines, in order: ExecStartPre=-+ pre, ExecStartPre=+ wait (no -), ExecStart= apply (no +), ExecStartPost=-+ record, ExecStopPost=-+ stopped" \
+		"$(yes_if [ "$_exec" = "ExecStartPre=-+$_s pre
+ExecStartPre=+$_s wait
+ExecStart=$_s apply
+ExecStartPost=-+$_s record
+ExecStopPost=-+$_s stopped" ])" "got: $(printf '%s' "$_exec" | tr '\n' '|')"
+	check "the Exec lines run a script that ships executable in the overlay ($_s)" "$(yes_if test -x "$OVERLAY$_s")"
+	_bad=$(printf '%s\n' "$D" | grep -E '\|(Timeout[A-Za-z]*Sec|RuntimeMaxSec|Environment|EnvironmentFile)=' || true)
+	check "no TimeoutStartSec or other timeout, and no Environment= override of the script's defaults" "$(yes_if [ -z "$_bad" ])" \
+		"forbidden line present: $(printf '%s' "$_bad" | tr '\n' '|')"
+	_sections=$(printf '%s\n' "$D" | cut -d'|' -f1 | sort -u | tr '\n' ' ')
+	check "only [Unit] and [Service] sections" "$(yes_if [ "$_sections" = "Service Unit " ])" "got: $_sections"
+	# The script's defaults the unit relies on, read from the script itself.
+	_rd=$(values "$D" Service RuntimeDirectory)
+	_work=$(sed -n 's/^WORK="\${RASPUTIN_STOREPROV_WORK:-\(.*\)}"$/\1/p' "$PSCRIPT")
+	check "the script's default work directory ($_work) is the unit's RuntimeDirectory, /run/$_rd" "$(yes_if [ "$_work" = "/run/$_rd" ])"
+	_bound=$(sed -n 's/^BOUND="\${RASPUTIN_STOREPROV_UNSEAL_BOUND:-\(.*\)}"$/\1/p' "$PSCRIPT")
+	check "the script's default unseal bound is 10 s, EX-1's (got '$_bound')" "$(yes_if [ "$_bound" = 10 ])"
+	_creds=$(sed -n 's/^CREDS="\${RASPUTIN_STOREPROV_CREDS:-\(.*\)}"$/\1/p' "$PSCRIPT")
+	check "the script's default credential directory is this unit's ($_creds)" "$(yes_if [ "$_creds" = "/run/credentials/$(basename "$U")" ])"
+	for _c in $(printf '%s\n' "$_lc" | cut -d: -f1); do
+		check "the script reads the credential $_c" "$(yes_if grep -qF "\$CREDS/$_c" "$PSCRIPT")"
+	done
+	for _src in $(printf '%s\n' "$_lc" | cut -d: -f2); do
+		check "credential source $_src sits in a tmpfiles-declared 0700 root directory" \
+			"$(yes_if awk -v p="$(dirname "$_src")" \
+				'$1 == "d" && $2 == p && $3 == "0700" && $4 == "root" && $5 == "root" { found = 1 } END { exit !found }' "$TMPFILES")"
+	done
+	[ "$fails" -eq 0 ]
+)
+
 # --- the shipped unit ----------------------------------------------------------
 echo "1. the shipped unit"
 verify "$UNIT"; rc=$?
 check "the shipped openbao.service passes every check" "$rc"
+echo
+echo "1b. the shipped provisioner unit (TC-805-25)"
+verify_prov "$PUNIT"; rc=$?
+check "the shipped rasputin-store-provision.service passes every check" "$rc"
 
 echo
 echo "2. wanted by post-build.sh, not by the overlay (TC-756-05)"
@@ -322,6 +401,38 @@ refuses "the rotation d line at 0750" \
 	'tmpfiles:d /var/lib/rasputin/openbao-seal/rotation  0700 root root -' \
 	'd /var/lib/rasputin/openbao-seal/rotation  0750 root root -' \
 	'tmpfiles declares d /var/lib/rasputin/openbao-seal/rotation 0700 root root -'
+
+# TC-805-25: the provisioner unit's controls. prefuses DESCRIPTION OLD NEW
+# NEEDLE — a copy with the line OLD replaced by NEW (an empty NEW deletes it,
+# "append:LINE" adds LINE to [Service]) must fail verify_prov, naming NEEDLE.
+prefuses() {
+	mkdir -p "$SCRATCH/p"
+	_copy="$SCRATCH/p/rasputin-store-provision.service"
+	case "$2" in
+		append:*) awk -v l="${2#append:}" '{ print } $0 == "[Service]" { print l }' "$PUNIT" >"$_copy" ;;
+		*) awk -v o="$2" -v l="$3" '$0 == o { if (l != "") print l; next } { print }' "$PUNIT" >"$_copy" ;;
+	esac
+	cmp -s "$PUNIT" "$_copy" && { check "$1: the injection changed the copy" 1 "nothing was injected"; return; }
+	_out=$(verify_prov "$_copy"); _rc=$?
+	_fail_line=$(printf '%s\n' "$_out" | grep 'FAIL' | grep -F -e "$4" | head -1)
+	_st=1
+	[ "$_rc" -ne 0 ] && [ -n "$_fail_line" ] && _st=0
+	check "TC-805-25 $1: refused, naming '$4'" "$_st" "rc=$_rc; output: $(printf '%s' "$_out" | grep -A1 FAIL | tr '\n' '|')"
+	rm -f "$_copy"
+}
+_ps=/usr/lib/rasputin/store-provision/rasputin-store-provision.sh
+prefuses "the wait line with a - prefix" "ExecStartPre=+$_ps wait" "ExecStartPre=-+$_ps wait" "the five Exec lines"
+prefuses "apply as root" "ExecStart=$_ps apply" "ExecStart=+$_ps apply" "the five Exec lines"
+prefuses "record without -" "ExecStartPost=-+$_ps record" "ExecStartPost=+$_ps record" "the five Exec lines"
+prefuses "the stop hook removed" "ExecStopPost=-+$_ps stopped" "" "the five Exec lines"
+prefuses "TimeoutStartSec=30" "append:TimeoutStartSec=30" "" "no TimeoutStartSec"
+prefuses "an Environment= override" "append:Environment=RASPUTIN_STOREPROV_UNSEAL_BOUND=300" "" "no TimeoutStartSec or other timeout, and no Environment="
+prefuses "a leaf condition" "ConditionPathExists=/var/lib/rasputin/role.controlplane" "ConditionPathExists=/var/lib/rasputin/role.controlplane
+ConditionPathExists=/var/lib/rasputin/tls/openbao-provisioner/leaf.pem" "exactly one condition"
+prefuses "Requires= instead of BindsTo=" "BindsTo=openbao.service" "Requires=openbao.service" "[Unit] BindsTo=openbao.service"
+prefuses "no RuntimeDirectoryPreserve" "RuntimeDirectoryPreserve=yes" "" "RuntimeDirectoryPreserve=yes"
+prefuses "User=root" "User=openbao" "User=root" "[Service] User=openbao"
+refuses "openbao.service without Wants= on its provisioner" 'replace:Wants=rasputin-store-provision.service' '' '[Unit] Wants=rasputin-store-provision.service'
 
 # --- the test fails closed (TC-755-07) -------------------------------------------
 echo

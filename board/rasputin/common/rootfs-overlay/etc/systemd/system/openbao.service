@@ -21,6 +21,10 @@ After=rasputin-firstboot.service
 # (ADR-0010 S6). The store has no ordering on the api, so the api may restart
 # the store from inside its own start (#758) without a deadlock.
 Before=rasputin-api.service
+# Each start of the store pulls in its provisioner (#805), which adds the
+# mounts and roles a later release lists once this run has unsealed. The
+# provisioner is bound to this unit; this unit does not wait for it.
+Wants=rasputin-store-provision.service
 # Role gate: only a control plane runs the store.
 ConditionPathExists=/var/lib/rasputin/role.controlplane
 # First boot: the store CA and the server leaf do not exist until the api mints
@@ -45,8 +49,11 @@ Group=openbao
 # (#756), and the self-init stanzas beside it in init.json (#804): on a store
 # whose core is not initialised, bao creates the policies (their text from
 # /usr/share/rasputin/openbao-policy/, which the api tarball ships), the kv-v2
-# mount, cert auth and the api's and rotation job's roles, once, and keeps no
-# root token. The seal fragment arrives as a credential and is named by its
+# mount, cert auth and the api's, rotation job's and provisioner's roles,
+# once, and keeps no root token. init.json is FROZEN from the store-arming
+# release on (#805): a store runs it only on its first start, so a later
+# release adds mounts and roles through provision.tsv and the provisioner,
+# never here. The seal fragment arrives as a credential and is named by its
 # literal path, because bao expands no variable in its config (#679 Q3).
 ExecStart=/usr/bin/bao server -config=/etc/rasputin/openbao/openbao.hcl -config=/etc/rasputin/openbao/init.json -config=/run/credentials/openbao.service/seal.hcl
 # The self-init outcome (#804): one console and journal line and the record

@@ -23,7 +23,7 @@
 #   OUT          where the tokens and the written value are kept (tmpfs)
 #   PERSIST      the persistent partition the scan reads
 #
-# Needs on the guest: bao, grep, find, ls, cat, od, tr, journalctl.
+# Needs on the guest: bao, grep, find, ls, cat, od, tr, cut, stat, journalctl.
 set -u
 umask 077
 
@@ -34,6 +34,7 @@ ROTATE_LEAF="${ROTATE_LEAF:?ROTATE_LEAF must name the harness rasputin-seal-rota
 OUT="${OUT:?OUT names a tmpfs directory for the tokens}"
 PERSIST="${PERSIST:-/var/lib/rasputin}"
 RECORD="${RECORD:-/run/rasputin-store-init/outcome}"
+PRECORD="${PRECORD:-/run/rasputin-store-provision/outcome}"
 AUDIT_LOG="${AUDIT_LOG:-/var/lib/rasputin/openbao-audit/audit.log}"
 BOOTID_SRC="${BOOTID_SRC:-/proc/sys/kernel/random/boot_id}"
 mkdir -p "$OUT"
@@ -103,6 +104,15 @@ checks() {
 	echo "record_lines=$(wc -l <"$RECORD" 2>/dev/null | tr -d ' ')"
 	echo "record_sum=$(cksum <"$RECORD" 2>/dev/null | one)"
 	echo "store_init_lines=$(journalctl -b -u openbao.service --no-pager -o cat 2>/dev/null | grep -c 'rasputin-store-init: outcome=')"
+	# The store provisioner's record and lines (geekdojo/geekdojo-brain#805,
+	# TC-805-36): the record's mode and owner, its keys in order, its outcome,
+	# and this boot's outcome lines by kind.
+	echo "prov_record_mode=$(stat -c '%a %u:%g' "$PRECORD" 2>&1)"
+	echo "prov_record_keys=$(cut -d= -f1 "$PRECORD" 2>/dev/null | tr '\n' ',')"
+	echo "prov_record_outcome=$(sed -n 's/^outcome=//p' "$PRECORD" 2>&1)"
+	_pj=$(journalctl -b -u rasputin-store-provision.service --no-pager -o cat 2>/dev/null)
+	echo "prov_unchanged_lines=$(printf '%s\n' "$_pj" | grep -c 'rasputin-store-provision: outcome=unchanged')"
+	echo "prov_failed_lines=$(printf '%s\n' "$_pj" | grep -c 'rasputin-store-provision: outcome=failed')"
 }
 
 # The token shapes: Vault's hv[sbr]. form, which the test plan names, and
