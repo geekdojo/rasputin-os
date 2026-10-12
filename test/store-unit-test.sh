@@ -245,7 +245,11 @@ verify_prov() (
 	}
 	echo "  -- directives (TC-805-25)"
 	exactly Unit Description 'Secrets store provisioner'
-	exactly Unit BindsTo openbao.service
+	exactly Unit Requisite openbao.service
+	exactly Unit PartOf openbao.service
+	_req=$(printf '%s\n' "$D" | grep -E '^Unit\|(Requires|BindsTo|Upholds)=' || true)
+	check "[Unit] no Requires=, BindsTo= or Upholds= on the store: a requirement dependency cuts the store's crash loop short of StartLimitBurst" \
+		"$(yes_if [ -z "$_req" ])" "got: $(printf '%s' "$_req" | tr '\n' '|')"
 	exactly Unit After openbao.service
 	exactly Unit Before rasputin-api.service
 	_conds=$(printf '%s\n' "$D" | grep -E '^Unit\|(Condition|Assert)[A-Za-z]*=' || true)
@@ -429,7 +433,10 @@ prefuses "TimeoutStartSec=30" "append:TimeoutStartSec=30" "" "no TimeoutStartSec
 prefuses "an Environment= override" "append:Environment=RASPUTIN_STOREPROV_UNSEAL_BOUND=300" "" "no TimeoutStartSec or other timeout, and no Environment="
 prefuses "a leaf condition" "ConditionPathExists=/var/lib/rasputin/role.controlplane" "ConditionPathExists=/var/lib/rasputin/role.controlplane
 ConditionPathExists=/var/lib/rasputin/tls/openbao-provisioner/leaf.pem" "exactly one condition"
-prefuses "Requires= instead of BindsTo=" "BindsTo=openbao.service" "Requires=openbao.service" "[Unit] BindsTo=openbao.service"
+prefuses "Requires= instead of Requisite=" "Requisite=openbao.service" "Requires=openbao.service" "[Unit] Requisite=openbao.service"
+prefuses "BindsTo= instead of PartOf=" "PartOf=openbao.service" "BindsTo=openbao.service" "[Unit] PartOf=openbao.service"
+# A comment line in [Unit] becomes the added line, so no pinned line is lost.
+prefuses "BindsTo= added beside Requisite= and PartOf=" "# openbao.service's Wants= pulls this in on each start of the store, and it" "BindsTo=openbao.service" "no Requires=, BindsTo= or Upholds="
 prefuses "no RuntimeDirectoryPreserve" "RuntimeDirectoryPreserve=yes" "" "RuntimeDirectoryPreserve=yes"
 prefuses "User=root" "User=openbao" "User=root" "[Service] User=openbao"
 refuses "openbao.service without Wants= on its provisioner" 'replace:Wants=rasputin-store-provision.service' '' '[Unit] Wants=rasputin-store-provision.service'

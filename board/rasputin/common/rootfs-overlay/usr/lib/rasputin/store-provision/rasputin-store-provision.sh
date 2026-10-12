@@ -13,8 +13,9 @@
 # authors no policy and changes no fixed mount, role or policy.
 #
 # PHASES, in rasputin-store-provision.service's order. The unit is pulled in
-# by openbao.service's start and bound to it (BindsTo=), so it runs once per
-# run of the store, and holds rasputin-api.service (Before=) until it exits.
+# by openbao.service's start, needs it active (Requisite=) and is stopped with
+# it (PartOf=), so it runs once per run of the store, and holds
+# rasputin-api.service (Before=) until it exits.
 #   pre      ExecStartPre=-+   root. Makes the record directory, removes a
 #            stale result, writes the pending marker.
 #   wait     ExecStartPre=+    root, because it reads the system journal. With
@@ -41,7 +42,10 @@
 #             using stored unseal key", "error unsealing core" and "failed to
 #             automatically unseal after initialization". A static seal's
 #             check is deterministic, so one such line is final.
-# The store leaving active ends it too: BindsTo= stops this unit.
+# The store being stopped or restarted ends it too: PartOf= stops this unit.
+# A store that crashes into its start limit mid-wait does not (no requirement
+# dependency, which would cut the store's crash loop short); the bound below
+# ends that wait.
 # One case reports nothing: a bao that hangs before logging any result. It
 # sends no notify after READY, and sys/health cannot tell "not attempted" from
 # "failed". For that case alone the wait stops after RASPUTIN_STOREPROV_

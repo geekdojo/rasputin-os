@@ -10,10 +10,15 @@
 # pinned bao.
 [Unit]
 Description=Secrets store provisioner
-# openbao.service's Wants= pulls this in on each start of the store. Bound to
-# it, and after it: a store that leaves active stops this run (and the stop
-# hook records it), and a store that is condition-skipped leaves it inactive.
-BindsTo=openbao.service
+# openbao.service's Wants= pulls this in on each start of the store, and it
+# runs after it. Requisite=: a store that is condition-skipped leaves this
+# inactive. PartOf=: a store that is stopped or restarted stops this run (and
+# the stop hook records it). Neither is a requirement dependency, which would
+# cut the store's crash loop short of its StartLimitBurst; so a store that
+# crashes into its start limit mid-wait does not stop this run, and the wait's
+# bound (rasputin-os EXCEPTIONS.md EX-1) ends it.
+Requisite=openbao.service
+PartOf=openbao.service
 After=openbao.service
 Before=rasputin-api.service
 # Role gate, as on the store. No condition on the provisioner's leaf: a store

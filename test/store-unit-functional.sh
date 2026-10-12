@@ -64,6 +64,15 @@
 #      that ends on bao's own failure line, not a timer (TC-805-32); the store
 #      stopped mid-wait (TC-805-33); the provisioner's leaf absent
 #      (TC-805-34); and #833's read point (TC-805-41)
+#      The provisioner holds Requisite= and PartOf= on the store, never a
+#      requirement dependency, which cuts scenario 6's and scenario 8's crash
+#      loops short of StartLimitBurst under 258.7 (ledger F-805-17). This
+#      scenario shows what it relies on instead: a condition-skipped store
+#      leaves it inactive (scenario 3, TC-805-27), a stopped store stops it
+#      mid-wait and it records failed (TC-805-33), and a restarted store
+#      re-runs it under a new run_id (TC-805-30, TC-805-41). A store that
+#      crashes into its start limit mid-wait no longer stops it; the wait's
+#      10 s bound (rasputin-os EXCEPTIONS.md EX-1) ends that wait.
 # The provisioner runs in every scenario from 2 on, as on a node: openbao's
 # Wants= pulls it in. Scenario 3's first boot carries TC-805-27's empty
 # provision.tsv half, and scenario 7 its four policies and three roles
