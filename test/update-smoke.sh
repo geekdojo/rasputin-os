@@ -486,7 +486,7 @@ if boot 2; then
 			expect "boot 2 $_w: (9) one rasputin-store-init: line this boot" 1 "$(kv store_init_lines "$_t")"
 			# TC-805-36: the store's provisioner (geekdojo/geekdojo-brain#805).
 			expect "boot 2 $_w: (12) the provisioner's record says unchanged" unchanged "$(kv prov_record_outcome "$_t")"
-			expect "boot 2 $_w: (12) the provisioner's record is 0600 root" "600 0:0" "$(kv prov_record_mode "$_t")"
+			expect "boot 2 $_w: (12) the provisioner's record is 0600 root" "-rw------- 0 0" "$(kv prov_record_mode "$_t")"
 			expect "boot 2 $_w: (12) the provisioner's record holds exactly the four contract lines" "outcome,boot_id,run_id,reason," "$(kv prov_record_keys "$_t")"
 			_pu="$(kv prov_unchanged_lines "$_t")"
 			if [ "${_pu:-0}" -ge 1 ] 2>/dev/null; then pass "boot 2 $_w: (12) a rasputin-store-provision: outcome=unchanged line this boot ($_pu)"

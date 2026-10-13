@@ -23,7 +23,9 @@
 #   OUT          where the tokens and the written value are kept (tmpfs)
 #   PERSIST      the persistent partition the scan reads
 #
-# Needs on the guest: bao, grep, find, ls, cat, od, tr, cut, stat, journalctl.
+# Needs on the guest: bao, grep, find, ls, cat, od, tr, cut, awk, journalctl.
+# Not stat: the image's BusyBox has no stat applet ("stat: not found" on both
+# arches, release run 38337615460), so modes and owners are read with ls -ln.
 set -u
 umask 077
 
@@ -107,7 +109,7 @@ checks() {
 	# The store provisioner's record and lines (geekdojo/geekdojo-brain#805,
 	# TC-805-36): the record's mode and owner, its keys in order, its outcome,
 	# and this boot's outcome lines by kind.
-	echo "prov_record_mode=$(stat -c '%a %u:%g' "$PRECORD" 2>&1)"
+	echo "prov_record_mode=$(ls -ln "$PRECORD" 2>&1 | awk '{ print $1, $3, $4 }')"
 	echo "prov_record_keys=$(cut -d= -f1 "$PRECORD" 2>/dev/null | tr '\n' ',')"
 	echo "prov_record_outcome=$(sed -n 's/^outcome=//p' "$PRECORD" 2>&1)"
 	_pj=$(journalctl -b -u rasputin-store-provision.service --no-pager -o cat 2>/dev/null)
