@@ -770,9 +770,19 @@ if grep -aq 'rasputin-store-provision: outcome=failed' "$CONSOLE_LOG"; then
   echo "::error::the secrets store's provisioner FAILED on a fresh control plane: $(grep -ao 'rasputin-store-provision: outcome=failed.*' "$CONSOLE_LOG" | tr -d '\r' | head -1)"
   exit 1
 fi
+# Nor may systemd have failed a provisioner job with result 'dependency'
+# (ledger F-805-28). On a fresh flash the store is condition-skipped until the
+# api mints its leaves; a provisioner job queued beside that skipped start
+# fails its Requisite= and prints this on every first boot, even though a
+# later run of the store still provisions and reports outcome=unchanged.
+PV_DEP="Dependency failed for .*Secrets store provisioner|rasputin-store-provision\\.service: Job .* failed with result 'dependency'"
+if grep -aqE "$PV_DEP" "$CONSOLE_LOG"; then
+  echo "::error::systemd failed a secrets store provisioner job with result 'dependency' on a fresh control plane (F-805-28): something queued rasputin-store-provision.service beside a store start that never reached READY — openbao.service must start it only from its last ExecStartPost=: $(grep -aoE "$PV_DEP" "$CONSOLE_LOG" | tr -d '\r' | head -1)"
+  exit 1
+fi
 case "$PV_LINE" in
   "rasputin-store-provision: outcome=unchanged "*) echo "secrets store provisioner ran after the store's first start: ${PV_LINE%% reason=*}" ;;
-  "") echo "::error::no 'rasputin-store-provision: outcome=' line reached the serial console in ${SI_AT}s — the store's provisioner never ran after its first start, or openbao.service lost its Wants= on rasputin-store-provision.service."; exit 1 ;;
+  "") echo "::error::no 'rasputin-store-provision: outcome=' line reached the serial console in ${SI_AT}s — the store's provisioner never ran after its first start, or openbao.service lost the ExecStartPost= that starts rasputin-store-provision.service."; exit 1 ;;
   *) echo "::error::the secrets store's provisioner did not report outcome=unchanged on a fresh control plane: $PV_LINE"; exit 1 ;;
 esac
 

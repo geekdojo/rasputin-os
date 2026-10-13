@@ -67,9 +67,12 @@
 #      (TC-805-34); and #833's read point (TC-805-41)
 #      The provisioner holds Requisite= and PartOf= on the store, never a
 #      requirement dependency, which cuts scenario 6's and scenario 8's crash
-#      loops short of StartLimitBurst under 258.7 (ledger F-805-17). This
-#      scenario shows what it relies on instead: a condition-skipped store
-#      leaves it inactive (scenario 3, TC-805-27), a stopped store stops it
+#      loops short of StartLimitBurst under 258.7 (ledger F-805-17). The store
+#      starts it from its last ExecStartPost=, never by Wants=, whose queued
+#      job Requisite= fails with result 'dependency' when the store is
+#      condition-skipped (ledger F-805-28). This scenario shows what it relies
+#      on: a condition-skipped store leaves it inactive with no failed job
+#      (scenarios 2 and 3, TC-805-27), a stopped store stops it
 #      mid-wait and it records failed (TC-805-33), and a restarted store
 #      re-runs it under a new run_id (TC-805-30, TC-805-41). A store that
 #      crashes mid-wait stops it too, into its start limit with NRestarts
@@ -78,8 +81,8 @@
 #  11  the store's first start with the console redirect below removed: the
 #      outcome writer's line reaches the real /dev/kmsg from inside the
 #      store's unit, its device policy included (TC-804-23's console path)
-# The provisioner runs in every scenario from 2 on, as on a node: openbao's
-# Wants= pulls it in. Scenario 3's first boot carries TC-805-27's empty
+# The provisioner runs in every scenario from 2 on, as on a node: each start
+# of the store that reaches READY starts it. Scenario 3's first boot carries TC-805-27's empty
 # provision.tsv half, and scenario 7 its four policies and three roles
 # (TC-805-28).
 #
@@ -456,6 +459,14 @@ for case in "A no leaf:rm -f $V/tls/openbao-server/leaf.pem $V/tls/openbao-serve
 	pst="$(pshow ActiveState) $(pshow Result)"
 	check "TC-805-27 case $label: the provisioner is inactive, not failed (got '$pst')" "$(yes_if [ "$pst" = "inactive success" ])"
 	check "TC-805-27 case $label: there is no provisioner record" "$(yes_if [ -z "$(inside "ls -A /run/rasputin-store-provision 2>/dev/null")" ])"
+	# F-805-28: no provisioner job was queued and failed. The whole journal so
+	# far, so scenario 2's skipped store is held to it too. The console says
+	# "Dependency failed for Secrets store provisioner."; the journal names the
+	# unit before its description.
+	pdep=$(inside "journalctl --no-pager -o cat" | grep -e 'Dependency failed for .*Secrets store provisioner' \
+		-e "$PROV: Job $PROV/[a-z-]* failed with result 'dependency'" || true)
+	check "TC-805-27 case $label (F-805-28): the journal has no 'Dependency failed for Secrets store provisioner' line and no $PROV job failed with result 'dependency'" \
+		"$(yes_if [ -z "$pdep" ])" "$pdep"
 	pprev=$(pshow InvocationID)
 	$restore
 	inside "systemctl restart openbao.service" >/dev/null 2>&1
@@ -1099,7 +1110,7 @@ pfield() { printf '%s\n' "$2" | sed -n "s/^$1=//p"; }
 # where the image's sits.
 set_tsv() { inside "printf '%b' '# TEST HARNESS (store-unit-functional.sh)\n$1' >/etc/rasputin/openbao/provision.tsv"; }
 # api_restart — the store's and the api's restart as a node does it: the stub
-# api's start pulls in the store, whose start pulls in the provisioner, and the
+# api's start pulls in the store, whose start starts the provisioner, and the
 # api waits for it (Before=). systemctl start returns once the api has started.
 api_restart() { inside "systemctl stop rasputin-api.service openbao.service; systemctl reset-failed openbao.service $PROV 2>/dev/null; systemctl start rasputin-api.service" >/dev/null 2>&1; }
 audit_lines() { inside "wc -l <$V/openbao-audit/audit.log" | tr -d ' '; }

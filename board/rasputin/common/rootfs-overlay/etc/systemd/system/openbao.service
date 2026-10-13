@@ -21,10 +21,6 @@ After=rasputin-firstboot.service
 # (ADR-0010 S6). The store has no ordering on the api, so the api may restart
 # the store from inside its own start (#758) without a deadlock.
 Before=rasputin-api.service
-# Each start of the store pulls in its provisioner (#805), which adds the
-# mounts and roles a later release lists once this run has unsealed. The
-# provisioner is bound to this unit; this unit does not wait for it.
-Wants=rasputin-store-provision.service
 # Role gate: only a control plane runs the store.
 ConditionPathExists=/var/lib/rasputin/role.controlplane
 # First boot: the store CA and the server leaf do not exist until the api mints
@@ -66,6 +62,19 @@ ExecStart=/usr/bin/bao server -config=/etc/rasputin/openbao/openbao.hcl -config=
 ExecStartPre=-+/usr/lib/rasputin/store-init/rasputin-store-init.sh pre
 ExecStartPost=-+/usr/lib/rasputin/store-init/rasputin-store-init.sh started
 ExecStopPost=-+/usr/lib/rasputin/store-init/rasputin-store-init.sh stopped
+# Each start of the store that reaches READY starts its provisioner (#805),
+# which adds the mounts and roles a later release lists once this run has
+# unsealed. Started here, not pulled in by Wants=: a Wants= queues the
+# provisioner's job beside this unit's own, and on a first boot, when this unit
+# is condition-skipped, its Requisite= fails that job with result 'dependency'
+# and the console says "Dependency failed for Secrets store provisioner"
+# (systemd 258.7, ledger F-805-28). --no-block, because the provisioner is
+# ordered after this unit's start, which this line is part of. `+` runs
+# systemctl as root outside this sandbox; `-` means a refused start never fails
+# the store: the provisioner never gates it. The provisioner's job exists
+# before this start finishes, so rasputin-api.service, ordered after both,
+# still waits for it.
+ExecStartPost=-+/usr/bin/systemctl --no-block start rasputin-store-provision.service
 # Everything root writes for the store reaches it here (#754): the store's uid
 # can read none of these source directories, and only it and root can read the
 # copies systemd makes under /run/credentials/openbao.service/.

@@ -49,6 +49,9 @@ set -f
 set -- $USERS
 set +f
 BAO_USER=$1 BAO_UID=$2 BAO_GROUP=$3 BAO_GID=$4
+# The store's two ExecStartPost= values (TC-804-14, TC-805-25).
+STARTED_HOOK='-+/usr/lib/rasputin/store-init/rasputin-store-init.sh started'
+PROV_PULL='-+/usr/bin/systemctl --no-block start rasputin-store-provision.service'
 [ -n "${BAO_GID:-}" ] || { echo "FAILED: OPENBAO_USERS ('$USERS') has fewer than four fields."; exit 1; }
 
 # --- the checker -------------------------------------------------------------
@@ -108,8 +111,11 @@ $(values "$D" "$1" "$2")
 	exactly Unit RequiresMountsFor /var/lib/rasputin
 	exactly Unit After rasputin-firstboot.service
 	exactly Unit Before rasputin-api.service
-	# TC-805-25: each start of the store pulls in its provisioner.
-	exactly Unit Wants rasputin-store-provision.service
+	# TC-805-25, F-805-28: nothing pulls the provisioner in when the store's
+	# job is queued. Under its Requisite=, a pulled-in job is failed with result
+	# 'dependency' when the store is condition-skipped on a first boot.
+	forbidden "pull-in of the provisioner (no [Unit] Wants=, Requires=, Requisite=, BindsTo=, Upholds= or PartOf= naming it; F-805-28)" \
+		'^Unit\|(Wants|Requires|Requisite|BindsTo|Upholds|PartOf)=.*rasputin-store-provision'
 	check "[Unit] exactly four ConditionPathExists lines" \
 		"$(yes_if [ "$(count "$D" Unit ConditionPathExists)" -eq 4 ])" "got $(count "$D" Unit ConditionPathExists)"
 	includes Unit ConditionPathExists /var/lib/rasputin/role.controlplane
@@ -126,12 +132,23 @@ $(values "$D" "$1" "$2")
 	exactly Service ExecStart \
 		'/usr/bin/bao server -config=/etc/rasputin/openbao/openbao.hcl -config=/etc/rasputin/openbao/init.json -config=/run/credentials/openbao.service/seal.hcl'
 	exactly Service ExecStartPre '-+/usr/lib/rasputin/store-init/rasputin-store-init.sh pre'
-	exactly Service ExecStartPost '-+/usr/lib/rasputin/store-init/rasputin-store-init.sh started'
+	# TC-804-14 and TC-805-25 (F-805-28): the outcome hook, then the start of
+	# the provisioner, -+ (never fails the store; root, outside the sandbox)
+	# and --no-block (the provisioner is ordered after this start).
+	_post=$(values "$D" Service ExecStartPost)
+	check "[Service] exactly two ExecStartPost lines, in order: -+ rasputin-store-init.sh started, then -+ systemctl --no-block start rasputin-store-provision.service" \
+		"$(yes_if [ "$_post" = "$STARTED_HOOK
+$PROV_PULL" ])" "got: $(printf '%s' "$_post" | tr '\n' '|')"
 	exactly Service ExecStopPost '-+/usr/lib/rasputin/store-init/rasputin-store-init.sh stopped'
 	for _hook in ExecStartPre ExecStartPost ExecStopPost; do
-		_exe=$(values "$D" Service "$_hook" | sed 's/^[-+@:!]*//; s/ .*$//')
-		check "TC-804-14 $_hook runs a script that ships executable in the overlay ($_exe)" \
-			"$(yes_if test -n "$_exe" -a -x "$OVERLAY$_exe")" "no executable at $OVERLAY$_exe"
+		while IFS= read -r _line; do
+			[ "$_line" = "$PROV_PULL" ] && continue
+			_exe=$(printf '%s\n' "$_line" | sed 's/^[-+@:!]*//; s/ .*$//')
+			check "TC-804-14 $_hook runs a script that ships executable in the overlay ($_exe)" \
+				"$(yes_if test -n "$_exe" -a -x "$OVERLAY$_exe")" "no executable at $OVERLAY$_exe"
+		done <<-EOF_HOOK
+		$(values "$D" Service "$_hook")
+		EOF_HOOK
 	done
 	while IFS= read -r _cfg; do
 		check "TC-804-14 ExecStart's -config=$_cfg ships in the overlay" "$(yes_if [ -f "$OVERLAY$_cfg" ])" "no file at $OVERLAY$_cfg"
@@ -437,10 +454,20 @@ ConditionPathExists=/var/lib/rasputin/tls/openbao-provisioner/leaf.pem" "exactly
 prefuses "Requires= instead of Requisite=" "Requisite=openbao.service" "Requires=openbao.service" "[Unit] Requisite=openbao.service"
 prefuses "BindsTo= instead of PartOf=" "PartOf=openbao.service" "BindsTo=openbao.service" "[Unit] PartOf=openbao.service"
 # A comment line in [Unit] becomes the added line, so no pinned line is lost.
-prefuses "BindsTo= added beside Requisite= and PartOf=" "# openbao.service's Wants= pulls this in on each start of the store, and it" "BindsTo=openbao.service" "no Requires=, BindsTo= or Upholds="
+prefuses "BindsTo= added beside Requisite= and PartOf=" "# openbao.service's last ExecStartPost= starts this, with --no-block, on each" "BindsTo=openbao.service" "no Requires=, BindsTo= or Upholds="
 prefuses "no RuntimeDirectoryPreserve" "RuntimeDirectoryPreserve=yes" "" "RuntimeDirectoryPreserve=yes"
 prefuses "User=root" "User=openbao" "User=root" "[Service] User=openbao"
-refuses "openbao.service without Wants= on its provisioner" 'replace:Wants=rasputin-store-provision.service' '' '[Unit] Wants=rasputin-store-provision.service'
+# F-805-28: the store's start of its provisioner removed, made blocking (the
+# provisioner is ordered after the store's start, so it would deadlock) or
+# able to fail the store; and the Wants= pull-in it replaced, put back.
+refuses "openbao.service without the start of its provisioner" "replace:ExecStartPost=$PROV_PULL" '' \
+	'exactly two ExecStartPost lines'
+refuses "the start of the provisioner without --no-block" "replace:ExecStartPost=$PROV_PULL" \
+	'ExecStartPost=-+/usr/bin/systemctl start rasputin-store-provision.service' 'exactly two ExecStartPost lines'
+refuses "the start of the provisioner without -" "replace:ExecStartPost=$PROV_PULL" \
+	'ExecStartPost=+/usr/bin/systemctl --no-block start rasputin-store-provision.service' 'exactly two ExecStartPost lines'
+refuses "Wants= on the provisioner, which fails its job on a first boot" Unit 'Wants=rasputin-store-provision.service' \
+	'pull-in of the provisioner'
 
 # --- the test fails closed (TC-755-07) -------------------------------------------
 echo

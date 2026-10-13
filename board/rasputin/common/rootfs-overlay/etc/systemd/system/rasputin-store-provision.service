@@ -10,10 +10,16 @@
 # pinned bao.
 [Unit]
 Description=Secrets store provisioner
-# openbao.service's Wants= pulls this in on each start of the store, and it
-# runs after it. Requisite=: a store that is condition-skipped leaves this
-# inactive. PartOf=: a store that is stopped or restarted stops this run (and
-# the stop hook records it), and so does one that crashes, into its start limit
+# openbao.service's last ExecStartPost= starts this, with --no-block, on each
+# start of the store that reaches READY, and it runs after it. Nothing pulls it
+# in when the store's job is queued: on a first boot the store is
+# condition-skipped, and a start job queued beside it would be failed with
+# result 'dependency' by Requisite=, before this unit's own condition is
+# checked (systemd 258.7, ledger F-805-28). Requisite=: a start of this while
+# the store is not active fails at once, and so does the restart PartOf=
+# carries here when the store's restart is refused at its start limit.
+# PartOf=: a store that is stopped or restarted stops this run (and the stop
+# hook records it), and so does one that crashes, into its start limit
 # included: Restart=always queues a restart job on each exit of the store,
 # which PartOf= carries here. Neither is a requirement dependency, which would
 # cut the store's crash loop short of its StartLimitBurst.
