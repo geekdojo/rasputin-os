@@ -1,0 +1,5 @@
+# Fixture for test/persistent-journal-test.sh (TC-853-02): the persistent
+# partition's line as both SKUs ship it, minus x-systemd.growfs. With no growfs
+# option the generator makes no systemd-growfs@var-lib-rasputin.service, so the
+# journal store's After= on it would order on nothing; the test must say so.
+PARTLABEL=persistent	/var/lib/rasputin	ext4	defaults,nofail,x-systemd.makefs	0	0

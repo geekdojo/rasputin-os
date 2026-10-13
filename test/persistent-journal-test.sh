@@ -134,6 +134,64 @@ ok "unit has DefaultDependencies=no" \
 ok "unit does not order itself after sysinit.target" \
 	"$(yes_if not has '^After=.*sysinit\.target' "$UNIT")" "$(grep -n '^After=' "$UNIT")"
 
+# AFTER THE GROW (geekdojo/geekdojo-brain#853, TC-853-01). The bind mount, and
+# so the flush, waits for systemd-growfs@ of the partition the unit requires, so
+# the first vacuum of a freshly grown node measures the grown filesystem instead
+# of the 512 MiB one, where SystemKeepFree deletes the provisioning boot's
+# archived journal. The instance name is DERIVED from the unit's own
+# RequiresMountsFor=, so a path change that leaves the After= behind fails here.
+#
+# unit_path_escape PATH — systemd's path escape (systemd.unit(5), "String
+# Escaping for Inclusion in Unit Names"): strip the outer slashes, then "-" is
+# \x2d and "/" is "-". Any other character outside [A-Za-z0-9:_.] fails rather
+# than being escaped wrong: none appears in a path this image mounts.
+unit_path_escape() {
+	_p=$(printf '%s' "$1" | sed 's#^/*##; s#/*$##')
+	case "$_p" in *[!A-Za-z0-9:_./-]*|.*) return 1 ;; esac
+	printf '%s' "$_p" | sed 's/-/\\x2d/g; s#/#-#g'
+}
+# growfs_edge UNITFILE — 0 when UNITFILE has an After= naming the growfs
+# instance of its own RequiresMountsFor= path.
+growfs_edge() {
+	_rmf=$(sed -n 's/^RequiresMountsFor=//p' "$1" | head -1)
+	[ -n "$_rmf" ] || return 1
+	_inst=$(unit_path_escape "$_rmf") || return 1
+	sed -n 's/^After=//p' "$1" | tr ' ' '\n' | grep -qxF "systemd-growfs@$_inst.service"
+}
+ok "TC-853-01: unit is ordered after systemd-growfs@ of its RequiresMountsFor= path" \
+	"$(yes_if growfs_edge "$UNIT")" "$(grep -nE '^(After|RequiresMountsFor)=' "$UNIT")"
+grep -v '^After=systemd-growfs@' "$UNIT" >"$TMP/unit-no-after"
+ok "TC-853-01: a copy with the growfs After= removed fails the check" \
+	"$(yes_if not growfs_edge "$TMP/unit-no-after")" "$(grep -nE '^(After|RequiresMountsFor)=' "$TMP/unit-no-after")"
+sed 's#^RequiresMountsFor=.*#RequiresMountsFor=/var/lib/rasputin-other#' "$UNIT" >"$TMP/unit-moved"
+ok "TC-853-01: a copy whose RequiresMountsFor= moved, After= unchanged, fails the check" \
+	"$(yes_if not growfs_edge "$TMP/unit-moved")" "$(grep -nE '^(After|RequiresMountsFor)=' "$TMP/unit-moved")"
+
+# TC-853-02: the instance ordered on exists on both SKUs. systemd-fstab-generator
+# makes systemd-growfs@<path>.service only for an fstab line carrying
+# x-systemd.growfs, so each SKU's fstab must mount the unit's path exactly once,
+# with that option. fstab_growfs FSTAB PATH prints nothing and returns 0 when it
+# holds, else prints one sentence naming the file and returns 1.
+fstab_growfs() {
+	_n=$(awk -v p="$2" '$1 !~ /^#/ && $2 == p' "$1" | wc -l | tr -d ' ')
+	if [ "$_n" != 1 ]; then
+		echo "$1 has $_n lines mounting $2, expected exactly 1"; return 1
+	fi
+	awk -v p="$2" '$1 !~ /^#/ && $2 == p { n = split($4, o, ","); for (i = 1; i <= n; i++) if (o[i] == "x-systemd.growfs") f = 1 } END { exit !f }' "$1" \
+		|| { echo "$1 mounts $2 without x-systemd.growfs, so no systemd-growfs@ instance exists to order on"; return 1; }
+}
+RMF=$(sed -n 's/^RequiresMountsFor=//p' "$UNIT" | head -1)
+for sku in rpi n100; do
+	FST="$ROOT/board/rasputin/$sku/fstab"
+	why=$(fstab_growfs "$FST" "$RMF"); rc=$?
+	ok "TC-853-02: $sku fstab mounts $RMF once, with x-systemd.growfs" "$rc" "$why"
+done
+FIXFST="$ROOT/test/fixtures/fstab-without-growfs"
+why=$(fstab_growfs "$FIXFST" "$RMF"); rc=$?
+ok "TC-853-02: the fixture fstab without x-systemd.growfs fails the check" "$(yes_if test "$rc" != 0)" "$why"
+ok "TC-853-02: and the failure names the fstab file" \
+	"$(yes_if test "${why#"$FIXFST" mounts}" != "$why")" "$why"
+
 # THE INSTALL TARGET is the difference between this working and looking like it
 # works. systemd-journal-flush.service is WantedBy=sysinit.target; a unit wanted
 # by multi-user.target starts long after the flush has already decided there is

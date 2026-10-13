@@ -56,6 +56,31 @@
 # unit's job fails with it; Before= is ordering only, so the flush still
 # proceeds and journald stays on /run exactly as it does today.
 #
+# AFTER THE GROW (geekdojo/geekdojo-brain#853). On a fresh flash the persistent
+# partition is 512 MiB until rasputin-growpart extends it and reboots; the
+# filesystem is grown in the NEXT boot, by systemd-growfs@var-lib-rasputin.service
+# (fstab's x-systemd.growfs). That boot's flush finds the provisioning boot's
+# system.journal still active, and when the clock floor has dated this boot's
+# first entry earlier than that file's last one, journald rotates it into an
+# archive. Its vacuum then measures the filesystem, and on the ungrown 512 MiB
+# partition SystemKeepFree=4G binds: the allowance is about 10 MiB, so the
+# archive is deleted, and with it the provisioning boot's seal-key `created`
+# line and firstboot's outcome. Measured on the bench: growfs finished 0.3 s
+# after the flush.
+#
+#   After=systemd-growfs@var-lib-rasputin.service
+#                                the bind mount, and so the flush ordered after
+#                                it, waits for the grow to finish, so the first
+#                                vacuum measures the grown filesystem and keeps
+#                                the archive. It costs the 0.3 s once, on the
+#                                grow boot; on every other boot growfs has
+#                                nothing to do. The instance name is the
+#                                systemd escape of RequiresMountsFor= below,
+#                                and both SKUs' fstabs mount that path with
+#                                x-systemd.growfs. After= is ordering only: if
+#                                growfs is absent or fails, the flush proceeds
+#                                exactly as it did before.
+#
 # NO ExecStop=umount, deliberately, and unlike the coredump unit.
 # systemd-journal-flush.service is Conflicts=soft-reboot.target only (measured),
 # so on an ordinary reboot its ExecStop=journalctl --smart-relinquish-var never
@@ -77,6 +102,7 @@ DefaultDependencies=no
 RequiresMountsFor=/var/lib/rasputin
 ConditionPathIsMountPoint=/var/lib/rasputin
 Before=systemd-journal-flush.service
+After=systemd-growfs@var-lib-rasputin.service
 
 [Service]
 Type=oneshot
