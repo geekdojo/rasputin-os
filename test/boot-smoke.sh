@@ -92,7 +92,18 @@ SSH_PORT=12222
 # GET /api/alerts once the store-init line is in. Like the polls above, it
 # ends the moment the fact is true, and a stuck one is reported by its own
 # assertion.
-BOOT_BUDGET=900 ; MU_TRIES=120 ; FB_TRIES=60 ; API_TRIES=48 ; ATREST_TRIES=60 ; TS_TRIES=30 ; KM_TRIES=30 ; SI_TRIES=30 ; SR_TRIES=30
+# HS_TRIES is the api's HTTPS listener answering /healthz (2s apart, 120s
+# ceiling). /healthz on :80 answering does not mean :443 is up: the api binds
+# :80 and sends READY first, and starts HTTPS in the background once its clock
+# gate opens (rasputin-control-plane api/cmd/rasputin-api/main.go, bounded at
+# 90s there), so the ceiling sits above that bound. The api's journal on the
+# store-arming smoke (release run 38334384432, arm64) has ":80" listening at
+# 67.565s, READY at 67.574s and ":443" listening at 67.653s. Run 38323824127
+# asked for the RP ID over :443 within about 2s of READY, got no answer, and
+# failed. The poll ends the moment HTTPS answers, normally on its first read;
+# its worst case adds 120s to the ceilings above, still inside the qemu
+# timeout for the reason given there.
+BOOT_BUDGET=900 ; MU_TRIES=120 ; FB_TRIES=60 ; API_TRIES=48 ; HS_TRIES=60 ; ATREST_TRIES=60 ; TS_TRIES=30 ; KM_TRIES=30 ; SI_TRIES=30 ; SR_TRIES=30
 case "$ARCH" in
   amd64|arm64) ;;
   *) echo "::error::unknown arch '$ARCH' (expected amd64 or arm64)"; exit 1 ;;
@@ -308,7 +319,7 @@ FB_AT=$(( $(date +%s) - START ))
 # HTTP-only) or a redirect to the HTTPS origin (api with native TLS treats :80
 # as a bootstrap/redirect surface) — accept both so the smoke doesn't break
 # across the api's HTTPS rollout.
-api=0 ui=0 NSUDP="" NSTCP="" RPID=""
+api=0 ui=0 https=0 NSUDP="" NSTCP="" RPID="" HS_FIRST=""
 if [ "$fb" = 1 ]; then
   i=0
   while [ "$i" -lt "$API_TRIES" ]; do
@@ -321,6 +332,17 @@ if [ "$fb" = 1 ]; then
     root=$(cat "$WORK/root.body" 2>/dev/null || true)
     case "$root" in *"<html"*|*"<!DOCTYPE"*) ui=1;; esac
     case "$rcode" in 301|302|307|308) ui=1;; esac
+    # The HTTPS listener, waited for as its own fact before anything is asked
+    # over it (HS_TRIES above). The first read's answer is kept, so the
+    # timings line shows whether :443 lagged :80 on this run.
+    i=0
+    while [ "$i" -lt "$HS_TRIES" ]; do
+      hs=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 2 "https://127.0.0.1:${HTTPS_PORT}/healthz" || true)
+      [ -n "$HS_FIRST" ] || HS_FIRST="${hs:-000}"
+      if [ "$hs" = "200" ]; then https=1; break; fi
+      die_if_qemu_gone "the api's HTTPS listener to answer /healthz"
+      i=$((i + 1)); sleep 2
+    done
     # Capture the api's WebAuthn RP ID while the VM is STILL RUNNING. It is
     # asserted further down with the console checks, but it can only be
     # COLLECTED here: everything below runs after the qemu kill, so an HTTP call
@@ -330,7 +352,7 @@ if [ "$fb" = 1 ]; then
     # leaf is signed by the per-installation Mesh CA. Unauthenticated on
     # purpose: first-user registration is open until a user exists, which is
     # this freshly-provisioned box.
-    RPID=$(curl -sk --max-time 10 -X POST "https://127.0.0.1:${HTTPS_PORT}/api/auth/register/begin" \
+    [ "$https" = 1 ] && RPID=$(curl -sk --max-time 10 -X POST "https://127.0.0.1:${HTTPS_PORT}/api/auth/register/begin" \
       -H 'Content-Type: application/json' \
       -d '{"name":"smoke","displayName":"Smoke Test"}' | jq -r '.publicKey.rp.id // empty')
     # CP nameserver (ADR-0004 §3/§8): ask the guest's own :53 for the cluster
@@ -510,6 +532,7 @@ TOTAL=$(( $(date +%s) - START ))
 # says so and changes nothing.
 guest_diag_needed() {
   [ "$api" = 1 ] || return 0
+  [ "$https" = 1 ] || return 0
   [ "$RPID" = "${CLUSTER_ID}.local" ] || return 0
   [ "$sirep" = 1 ] || return 0
   grep -aq 'rasputin-store-init: outcome=initialised' "$CONSOLE_LOG" || return 0
@@ -540,6 +563,7 @@ if guest_diag_needed; then guest_diag; fi
 kill "$QPID" 2>/dev/null || true
 echo "----- last 60 lines of console -----"; tail -60 "$CONSOLE_LOG" || true
 echo "----- $ARCH smoke timings (seconds from qemu start) -----"
+echo "https /healthz on its first read after :80 answered: HTTP ${HS_FIRST:-not asked}"
 echo "multi-user=${MU_AT}s firstboot=${FB_AT}s api+ui+dns=${API_AT}s atrest-verdict=${ATREST_AT}s tailscale-report=${TS_AT}s kernel-match=${KM_AT}s store-init=${SI_AT}s store-ready=${SR_AT}s total(incl. 70s soak)=${TOTAL}s"
 
 # ------------------------------------------------------------ assertions ------
@@ -568,6 +592,13 @@ echo "seed read + provisioning completion confirmed in boot output"
 grep -q "rasputin-hostname: transient hostname set to ${CLUSTER_ID} (role=controlplane)" "$CONSOLE_LOG" \
   || { echo "::error::the controlplane hostname did not follow RASPUTIN_CLUSTER_ID — the seeded cluster name never reached the hostname (check firstboot node.env pass-through and rasputin-hostname.sh); the cluster would be unreachable at ${CLUSTER_ID}.local; see console artifact"; exit 1; }
 echo "per-cluster hostname (${CLUSTER_ID}) confirmed in boot output"
+
+# The HTTPS listener answered before anything was asked over it (HS_TRIES).
+if [ "$api" = 1 ] && [ "$https" != 1 ]; then
+  echo "::error::the api answered /healthz on :80 but its HTTPS listener on :443 never answered /healthz in $((HS_TRIES * 2))s (first read: HTTP ${HS_FIRST:-000}) — the browser surface is down: the api's clock gate never opened, its leaf did not load, or the listener failed to bind; see the api journal above"
+  exit 1
+fi
+[ "$api" = 1 ] && echo "api HTTPS listener answered /healthz on :443"
 
 # The api must DERIVE its WebAuthn identity from the same cluster id. This is
 # the assertion the naming work most needs: credentials bind to the RP ID, so a
