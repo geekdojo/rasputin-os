@@ -202,14 +202,8 @@ autoboot_part() { # autoboot_part SECTION
 		cur == sec && /^boot_partition=/ { v = $0; sub(/.*boot_partition=/, "", v); sub(/[^0-9].*/, "", v); print v; exit }'
 }
 
-# ssh_guest CMD... — one command in the guest, bounded by SSH_CALL_TIMEOUT
-# seconds (default 120): a timeout bounds a single call, it never decides state.
-ssh_guest() {
-	timeout "${SSH_CALL_TIMEOUT:-120}" ssh -i "$KEY" -p "$SSH_PORT" \
-		-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-		-o LogLevel=ERROR -o BatchMode=yes -o ConnectTimeout=5 -o ServerAliveInterval=10 \
-		root@127.0.0.1 "$@"
-}
+# ssh_guest (one command in the guest) is in lib/qemu-common.sh, shared with
+# boot-smoke.sh's failure diagnostic.
 
 qemu_gone() { [ -z "$QPID" ] || ! kill -0 "$QPID" 2>/dev/null; }
 

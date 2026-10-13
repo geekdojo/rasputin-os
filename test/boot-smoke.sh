@@ -50,6 +50,9 @@ SOFT_PASSKEY="$(dirname "$0")/lib/soft-passkey.py"
 HTTP_PORT=18080
 HTTPS_PORT=18443
 DNS_PORT=15353
+# The guest's :22, used only by guest_diag below, after a store or api check
+# has already failed.
+SSH_PORT=12222
 
 # Budgets, shared by both arches. These are CEILINGS, not sleeps — every wait
 # below polls a checkable fact and exits the moment it is true, so a fast run is
@@ -113,8 +116,22 @@ part_offsets() {
 # every assertion below would pass even if the whole naming chain were broken,
 # because the fallback lands on exactly the values the old hardcodes carried.
 CLUSTER_ID=smoke1
-printf 'RASPUTIN_NODE_ROLE=controlplane\nRASPUTIN_NODE_ID=smoke-cp\nRASPUTIN_CLUSTER_ID=%s\nRASPUTIN_NATS_URL=\nRASPUTIN_CP_JOIN_TOKEN=\n' \
-  "$CLUSTER_ID" > "$WORK/seed-cp.env"
+#
+# RASPUTIN_SSH_AUTHORIZED_KEY is the way into the guest that test/update-smoke.sh
+# already uses: firstboot merges it into dropbear's keys, and the seed is the
+# only source of one. This script reads its assertions off the console and over
+# the api, never over SSH; the key serves guest_diag alone, which dumps the
+# store's and the api's journal when one of their checks has failed, so a red
+# smoke says why. It is a throwaway key and does not outlive the run.
+KEY="$WORK/id_ed25519"
+rm -f "$KEY" "$KEY.pub"
+trap 'rm -f "$KEY" "$KEY.pub"' EXIT
+ssh-keygen -q -t ed25519 -N '' -C boot-smoke -f "$KEY" \
+  || { echo "::error::ssh-keygen failed; the failure diagnostic would have no way into the guest"; exit 1; }
+{
+  printf 'RASPUTIN_NODE_ROLE=controlplane\nRASPUTIN_NODE_ID=smoke-cp\nRASPUTIN_CLUSTER_ID=%s\nRASPUTIN_NATS_URL=\nRASPUTIN_CP_JOIN_TOKEN=\n' "$CLUSTER_ID"
+  printf 'RASPUTIN_SSH_AUTHORIZED_KEY="%s"\n' "$(cat "$KEY.pub")"
+} > "$WORK/seed-cp.env"
 
 # The seed ships on its own auto-mounting FAT partition on BOTH SKUs (the
 # running image finds it by FS label RASPUTIN-OS, not by number). We find its
@@ -229,7 +246,7 @@ qemu_boot() {
   # and never PXE, so the ROM is dead weight; dropping it beats adding a
   # package dependency to get a ROM we would not use.
   qemu_exec "$ARCH" "$IMG" "$BOOT_BUDGET" "$CONSOLE_LOG" \
-    "hostfwd=tcp:127.0.0.1:${HTTP_PORT}-:80,hostfwd=tcp:127.0.0.1:${HTTPS_PORT}-:443,hostfwd=udp:127.0.0.1:${DNS_PORT}-:53,hostfwd=tcp:127.0.0.1:${DNS_PORT}-:53"
+    "hostfwd=tcp:127.0.0.1:${HTTP_PORT}-:80,hostfwd=tcp:127.0.0.1:${HTTPS_PORT}-:443,hostfwd=udp:127.0.0.1:${DNS_PORT}-:53,hostfwd=tcp:127.0.0.1:${DNS_PORT}-:53,hostfwd=tcp:127.0.0.1:${SSH_PORT}-:22"
 }
 
 "prepare_$ARCH"
@@ -481,6 +498,44 @@ fi
 SR_AT=$(( $(date +%s) - START ))
 
 TOTAL=$(( $(date +%s) - START ))
+
+# The failure diagnostic. The store's and the api's own logs go to the guest's
+# journal, which does not reach the console, so a store or api check that
+# fails below would otherwise say only which fact never came true, never why.
+# When one of those facts is already false here, before the kill, the guest is
+# asked over SSH for those units' journal, the store's data directory and
+# outcome record, and the kernel's console loglevel and cmdline, and the answer
+# is printed in the job log. It is printed, never asserted on: the assertions
+# below still decide the verdict, and a diagnostic that cannot reach the guest
+# says so and changes nothing.
+guest_diag_needed() {
+  [ "$api" = 1 ] || return 0
+  [ "$RPID" = "${CLUSTER_ID}.local" ] || return 0
+  [ "$sirep" = 1 ] || return 0
+  grep -aq 'rasputin-store-init: outcome=initialised' "$CONSOLE_LOG" || return 0
+  grep -aqE 'rasputin-store-(init|provision): outcome=failed' "$CONSOLE_LOG" && return 0
+  [ "$SR_STAGE" = wait ] && [ "$SR_RC" = 0 ] || return 0
+  return 1
+}
+guest_diag() {
+  echo "::group::guest diagnostic: the store's and the api's journal (a store or api check is about to fail)"
+  SSH_CALL_TIMEOUT=120 ssh_guest '
+    echo "== /proc/sys/kernel/printk (console loglevel first): $(cat /proc/sys/kernel/printk)"
+    echo "== /proc/cmdline: $(cat /proc/cmdline)"
+    echo "== ls -lan /var/lib/rasputin/openbao"; ls -lan /var/lib/rasputin/openbao
+    echo "== ls -lan /run/rasputin-store-init"; ls -lan /run/rasputin-store-init
+    echo "== /run/rasputin-store-init/outcome"; cat /run/rasputin-store-init/outcome
+    echo "== the kernel ring buffer: rasputin-store lines"; dmesg | grep rasputin-store
+    echo "== systemctl show openbao.service"
+    systemctl show openbao.service -p ActiveState -p SubState -p Result -p NRestarts -p ExecMainStatus
+    echo "== journalctl -b -u openbao.service -u rasputin-store-provision.service"
+    journalctl -b -o short-monotonic --no-pager -u openbao.service -u rasputin-store-provision.service
+    echo "== journalctl -b -u rasputin-api.service"
+    journalctl -b -o short-monotonic --no-pager -u rasputin-api.service
+  ' 2>&1 || echo "guest_diag: the guest did not answer over SSH (status $?), so there is no journal to show"
+  echo "::endgroup::"
+}
+if guest_diag_needed; then guest_diag; fi
 
 kill "$QPID" 2>/dev/null || true
 echo "----- last 60 lines of console -----"; tail -60 "$CONSOLE_LOG" || true

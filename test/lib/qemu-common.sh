@@ -10,7 +10,7 @@
 # smoke. See boot-smoke.sh for the reasoning behind each QEMU option; it is
 # kept there, next to the assertions it serves.
 #
-# Needs: sfdisk, jq, timeout, and qemu-system-x86_64 / qemu-system-aarch64.
+# Needs: sfdisk, jq, timeout, ssh, and qemu-system-x86_64 / qemu-system-aarch64.
 
 # part_offset IMG N — byte offset of partition number N (MBR or GPT; logical
 # MBR partitions count from 5, as the kernel numbers them). Empty if absent.
@@ -93,4 +93,15 @@ qemu_exec() {
 		return 1
 		;;
 	esac
+}
+
+# ssh_guest CMD... — one command in the guest as root, over the hostfwd to the
+# guest's :22 on SSH_PORT, with the private key KEY whose public half the seed
+# carried as RASPUTIN_SSH_AUTHORIZED_KEY. Bounded by SSH_CALL_TIMEOUT seconds
+# (default 120): a timeout bounds a single call, it never decides state.
+ssh_guest() {
+	timeout "${SSH_CALL_TIMEOUT:-120}" ssh -i "$KEY" -p "$SSH_PORT" \
+		-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+		-o LogLevel=ERROR -o BatchMode=yes -o ConnectTimeout=5 -o ServerAliveInterval=10 \
+		root@127.0.0.1 "$@"
 }
