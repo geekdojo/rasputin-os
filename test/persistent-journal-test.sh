@@ -284,6 +284,11 @@ printf '#!/bin/sh\nexit 0\n' >"$T/usr/lib/systemd/systemd"; chmod +x "$T/usr/lib
 cp "$OVERLAY/usr/lib/rasputin/machine-id/rasputin-init" "$T/usr/lib/rasputin/machine-id/rasputin-init"
 chmod +x "$T/usr/lib/rasputin/machine-id/rasputin-init"
 ln -s ../lib/systemd/systemd "$T/sbin/init"
+# The secrets store's policy text, which post-build.sh's guard reads
+# (geekdojo/geekdojo-brain#804); BUILD_DIR is Buildroot's, exported to it.
+. "$ROOT/test/lib/store-policy-fixture.sh"
+BUILD_DIR="$TMP/build"; export BUILD_DIR
+store_policy_fixture "$ROOT" "$T" "$BUILD_DIR" || exit 2
 OUT=$(sh "$POSTBUILD" "$T" n100 2>&1); RC=$?
 ok "post-build succeeds on a normal target dir" "$(yes_if test "$RC" = 0)" "$OUT"
 ok "post-build leaves the unit enabled at sysinit" \

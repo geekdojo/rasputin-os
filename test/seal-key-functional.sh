@@ -57,6 +57,8 @@ ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 OVERLAY="$ROOT/board/rasputin/common/rootfs-overlay"
 UNITS="$OVERLAY/etc/systemd/system"
 SCRIPT="$OVERLAY/usr/lib/rasputin/seal-key/rasputin-seal-key.sh"
+# The log and record helpers the script sources (geekdojo/geekdojo-brain#804).
+OUTCOME_LIB="$OVERLAY/usr/lib/rasputin/outcome/outcome.sh"
 TMPFILES="$OVERLAY/usr/lib/tmpfiles.d/rasputin.conf"
 BASE=rasputin-seal-key-functional:f43-systemd-258.7
 IMAGE=rasputin-seal-key-functional:boot
@@ -67,7 +69,7 @@ CREDS=/run/credentials/openbao.service
 REFUSAL="The secrets store has data but no seal key, so this control plane will not start. A new key cannot open the existing data. Recover by restoring a backup onto a fresh install."
 
 command -v docker >/dev/null 2>&1 || { echo "FAILED: this test needs docker, and docker is not on PATH."; exit 1; }
-for f in "$SCRIPT" "$TMPFILES" "$UNITS/rasputin-seal-key.service" "$UNITS/openbao.service" "$UNITS/rasputin-api.service"; do
+for f in "$SCRIPT" "$OUTCOME_LIB" "$TMPFILES" "$UNITS/rasputin-seal-key.service" "$UNITS/openbao.service" "$UNITS/rasputin-api.service"; do
 	[ -f "$f" ] || { echo "FAILED: the file $f is missing."; exit 1; }
 done
 
@@ -90,6 +92,7 @@ f43_systemd_image "$BASE" || exit 1
 CTX="$SCRATCH/ctx"
 mkdir -p "$CTX"
 cp "$SCRIPT" "$CTX/rasputin-seal-key.sh"
+cp "$OUTCOME_LIB" "$CTX/outcome.sh"
 for u in rasputin-seal-key.service openbao.service rasputin-api.service; do
 	cp "$UNITS/$u" "$CTX/$u"
 done
@@ -98,6 +101,7 @@ docker build -q -t "$IMAGE" -f - "$CTX" >/dev/null <<DOCKERFILE || { echo "FAILE
 FROM $BASE
 # The shipped files, verbatim.
 COPY rasputin-seal-key.sh /usr/lib/rasputin/seal-key/rasputin-seal-key.sh
+COPY outcome.sh /usr/lib/rasputin/outcome/outcome.sh
 COPY rasputin-seal-key.service openbao.service rasputin-api.service /etc/systemd/system/
 COPY rasputin.conf /usr/lib/tmpfiles.d/rasputin.conf
 RUN chmod 0755 /usr/lib/rasputin/seal-key/rasputin-seal-key.sh \\
@@ -105,10 +109,13 @@ RUN chmod 0755 /usr/lib/rasputin/seal-key/rasputin-seal-key.sh \\
  && ln -s /etc/systemd/system/rasputin-seal-key.service /etc/systemd/system/multi-user.target.wants/ \\
  && ln -s /etc/systemd/system/rasputin-api.service /etc/systemd/system/multi-user.target.wants/
 # TEST HARNESS: openbao is wanted here (#756 enables it on the image), and both
-# it and the api run a stand-in.
+# it and the api run a stand-in. The store's stand-in also clears the
+# self-init outcome hooks (#804): with no bao there is nothing to record, and a
+# Type=simple stand-in would run ExecStartPost alongside its own start, which
+# the shipped Type=notify unit never does.
 RUN ln -s /etc/systemd/system/openbao.service /etc/systemd/system/multi-user.target.wants/ \\
  && mkdir -p /etc/systemd/system/openbao.service.d /etc/systemd/system/rasputin-api.service.d \\
- && printf '[Service]\nType=simple\nExecStart=\nExecStart=/usr/bin/sleep infinity\n' \\
+ && printf '[Service]\nType=simple\nExecStartPre=\nExecStartPost=\nExecStopPost=\nExecStart=\nExecStart=/usr/bin/sleep infinity\n' \\
       > /etc/systemd/system/openbao.service.d/harness.conf \\
  && printf '[Service]\nType=simple\nWatchdogSec=0\nExecStart=\nExecStart=/usr/bin/sleep infinity\n' \\
       > /etc/systemd/system/rasputin-api.service.d/harness.conf

@@ -99,9 +99,13 @@ COPY $API $STORE /etc/systemd/system/
 COPY rasputin.conf /usr/lib/tmpfiles.d/rasputin.conf
 RUN mkdir -p /etc/systemd/system/multi-user.target.wants \\
  && ln -s /etc/systemd/system/$API /etc/systemd/system/multi-user.target.wants/
-# TEST HARNESS: both the store and the api run a stand-in.
+# TEST HARNESS: both the store and the api run a stand-in. The store's
+# stand-in also clears the self-init outcome hooks (#804): they record what
+# bao's first start did, and with no bao there is nothing to record. A
+# Type=simple stand-in would also run ExecStartPost alongside its own start,
+# which the shipped Type=notify unit never does (it waits for READY).
 RUN mkdir -p /etc/systemd/system/$STORE.d /etc/systemd/system/$API.d \\
- && printf '[Service]\nType=simple\nExecStart=\nExecStart=/usr/bin/sleep infinity\n' \\
+ && printf '[Service]\nType=simple\nExecStartPre=\nExecStartPost=\nExecStopPost=\nExecStart=\nExecStart=/usr/bin/sleep infinity\n' \\
       > /etc/systemd/system/$STORE.d/harness.conf \\
  && printf '[Service]\nType=simple\nWatchdogSec=0\nExecStart=\nExecStart=/usr/bin/sleep infinity\n' \\
       > /etc/systemd/system/$API.d/harness.conf

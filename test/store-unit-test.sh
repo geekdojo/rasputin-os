@@ -25,12 +25,14 @@ set -u
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 OVERLAY="$ROOT/board/rasputin/common/rootfs-overlay"
 UNIT="$OVERLAY/etc/systemd/system/openbao.service"
+PUNIT="$OVERLAY/etc/systemd/system/rasputin-store-provision.service"
+PSCRIPT="$OVERLAY/usr/lib/rasputin/store-provision/rasputin-store-provision.sh"
 TMPFILES="$OVERLAY/usr/lib/tmpfiles.d/rasputin.conf"
 MK="$ROOT/package/openbao/openbao.mk"
 
 # Fail closed, before anything else: a missing input or tool is a failure with
 # a sentence, never a pass over nothing (TC-755-07).
-for f in "$UNIT" "$TMPFILES" "$MK"; do
+for f in "$UNIT" "$PUNIT" "$PSCRIPT" "$TMPFILES" "$MK"; do
 	[ -f "$f" ] || { echo "FAILED: the file $f is missing, so the store unit cannot be checked."; exit 1; }
 done
 command -v make >/dev/null 2>&1 \
@@ -47,6 +49,9 @@ set -f
 set -- $USERS
 set +f
 BAO_USER=$1 BAO_UID=$2 BAO_GROUP=$3 BAO_GID=$4
+# The store's two ExecStartPost= values (TC-804-14, TC-805-25).
+STARTED_HOOK='-+/usr/lib/rasputin/store-init/rasputin-store-init.sh started'
+PROV_PULL='-+/usr/bin/systemctl --no-block start rasputin-store-provision.service'
 [ -n "${BAO_GID:-}" ] || { echo "FAILED: OPENBAO_USERS ('$USERS') has fewer than four fields."; exit 1; }
 
 # --- the checker -------------------------------------------------------------
@@ -69,12 +74,14 @@ bytes() {
 	esac
 }
 
-# verify UNIT — prints an ok or FAIL line per assertion and returns the number
-# of failures (capped at 1 for the exit status). Run in a subshell so its
-# $fails is its own.
+# verify UNIT [TMPFILES] — prints an ok or FAIL line per assertion and returns
+# the number of failures (capped at 1 for the exit status). TMPFILES is the
+# shipped one unless a negative control passes a copy. Run in a subshell so
+# its $fails is its own.
 verify() (
 	fails=0
 	U=$1
+	TMPFILES=${2:-$TMPFILES}
 	NAME=$(basename "$U")
 	D=$(directives "$U")
 
@@ -104,6 +111,11 @@ $(values "$D" "$1" "$2")
 	exactly Unit RequiresMountsFor /var/lib/rasputin
 	exactly Unit After rasputin-firstboot.service
 	exactly Unit Before rasputin-api.service
+	# TC-805-25, F-805-28: nothing pulls the provisioner in when the store's
+	# job is queued. Under its Requisite=, a pulled-in job is failed with result
+	# 'dependency' when the store is condition-skipped on a first boot.
+	forbidden "pull-in of the provisioner (no [Unit] Wants=, Requires=, Requisite=, BindsTo=, Upholds= or PartOf= naming it; F-805-28)" \
+		'^Unit\|(Wants|Requires|Requisite|BindsTo|Upholds|PartOf)=.*rasputin-store-provision'
 	check "[Unit] exactly four ConditionPathExists lines" \
 		"$(yes_if [ "$(count "$D" Unit ConditionPathExists)" -eq 4 ])" "got $(count "$D" Unit ConditionPathExists)"
 	includes Unit ConditionPathExists /var/lib/rasputin/role.controlplane
@@ -114,20 +126,59 @@ $(values "$D" "$1" "$2")
 	exactly Service NotifyAccess main
 	exactly Service User openbao
 	exactly Service Group openbao
+	# TC-804-14: the main config, then the self-init config, then the seal
+	# fragment; and the three outcome hooks, each `-+` (ignored on failure, run
+	# as root outside the sandbox) with its phase (geekdojo-brain#804).
 	exactly Service ExecStart \
-		'/usr/bin/bao server -config=/etc/rasputin/openbao/openbao.hcl -config=/run/credentials/openbao.service/seal.hcl'
-	check "[Service] exactly five LoadCredential lines" \
-		"$(yes_if [ "$(count "$D" Service LoadCredential)" -eq 5 ])" "got $(count "$D" Service LoadCredential)"
+		'/usr/bin/bao server -config=/etc/rasputin/openbao/openbao.hcl -config=/etc/rasputin/openbao/init.json -config=/run/credentials/openbao.service/seal.hcl'
+	exactly Service ExecStartPre '-+/usr/lib/rasputin/store-init/rasputin-store-init.sh pre'
+	# TC-804-14 and TC-805-25 (F-805-28): the outcome hook, then the start of
+	# the provisioner, -+ (never fails the store; root, outside the sandbox)
+	# and --no-block (the provisioner is ordered after this start).
+	_post=$(values "$D" Service ExecStartPost)
+	check "[Service] exactly two ExecStartPost lines, in order: -+ rasputin-store-init.sh started, then -+ systemctl --no-block start rasputin-store-provision.service" \
+		"$(yes_if [ "$_post" = "$STARTED_HOOK
+$PROV_PULL" ])" "got: $(printf '%s' "$_post" | tr '\n' '|')"
+	exactly Service ExecStopPost '-+/usr/lib/rasputin/store-init/rasputin-store-init.sh stopped'
+	for _hook in ExecStartPre ExecStartPost ExecStopPost; do
+		while IFS= read -r _line; do
+			[ "$_line" = "$PROV_PULL" ] && continue
+			_exe=$(printf '%s\n' "$_line" | sed 's/^[-+@:!]*//; s/ .*$//')
+			check "TC-804-14 $_hook runs a script that ships executable in the overlay ($_exe)" \
+				"$(yes_if test -n "$_exe" -a -x "$OVERLAY$_exe")" "no executable at $OVERLAY$_exe"
+		done <<-EOF_HOOK
+		$(values "$D" Service "$_hook")
+		EOF_HOOK
+	done
+	while IFS= read -r _cfg; do
+		check "TC-804-14 ExecStart's -config=$_cfg ships in the overlay" "$(yes_if [ -f "$OVERLAY$_cfg" ])" "no file at $OVERLAY$_cfg"
+	done <<-EOF_CFG
+	$(words "$D" Service ExecStart | sed -n 's|^-config=\(/etc/.*\)$|\1|p')
+	EOF_CFG
+	check "[Service] exactly six LoadCredential lines" \
+		"$(yes_if [ "$(count "$D" Service LoadCredential)" -eq 6 ])" "got $(count "$D" Service LoadCredential)"
 	includes Service LoadCredential seal-key:/var/lib/rasputin/openbao-seal/seal-key
 	includes Service LoadCredential seal.hcl:/var/lib/rasputin/openbao-seal/seal.hcl
 	includes Service LoadCredential store-ca.pem:/var/lib/rasputin/trust/store-ca.pem
 	includes Service LoadCredential server.pem:/var/lib/rasputin/tls/openbao-server/leaf.pem
 	includes Service LoadCredential server.key:/var/lib/rasputin/tls/openbao-server/leaf.key
+	# TC-830-23: the seal rotation's staged key arrives through a directory
+	# source, so an empty directory starts the store and an absent file never
+	# fails it; a file source for the optional key is refused below
+	# (geekdojo/geekdojo-brain#830).
+	includes Service LoadCredential seal-rotation:/var/lib/rasputin/openbao-seal/rotation
+	_rot_files=$(values "$D" Service LoadCredential | sed 's/^[^:]*://' | grep '^/var/lib/rasputin/openbao-seal/rotation/' || true)
+	check "TC-830-23 no LoadCredential file source under openbao-seal/rotation/ (an absent file fails the unit)" \
+		"$(yes_if [ -z "$_rot_files" ])" "file source: $_rot_files"
+	check "TC-830-23 tmpfiles declares d /var/lib/rasputin/openbao-seal/rotation 0700 root root -" \
+		"$(yes_if awk '$1 == "d" && $2 == "/var/lib/rasputin/openbao-seal/rotation" && $3 == "0700" && $4 == "root" && $5 == "root" && $6 == "-" { found = 1 } END { exit !found }' "$TMPFILES")" \
+		"d lines: $(awk '$1 == "d" && $2 == "/var/lib/rasputin/openbao-seal/rotation"' "$TMPFILES" | tr '\n' '|')"
 	exactly Service Restart always
 	exactly Service ProtectSystem strict
 	exactly Service ReadWritePaths '/var/lib/rasputin/openbao /var/lib/rasputin/openbao-audit'
 	exactly Service PrivateTmp yes
 	exactly Service PrivateDevices yes
+	exactly Service DeviceAllow '/dev/kmsg w'
 	exactly Service NoNewPrivileges yes
 	exactly Service CapabilityBoundingSet ''
 	exactly Service LimitCORE 0
@@ -197,10 +248,89 @@ $_sources
 	[ "$fails" -eq 0 ]
 )
 
+# verify_prov UNIT — the store provisioner's unit (geekdojo-brain#805,
+# TC-805-25): every directive at its value, the five Exec lines in order with
+# their prefixes, and no TimeoutStartSec or Environment=.
+verify_prov() (
+	fails=0
+	U=$1
+	D=$(directives "$U")
+	exactly() {
+		_got=$(values "$D" "$1" "$2")
+		_st=1
+		[ "$(count "$D" "$1" "$2")" -eq 1 ] && [ "$_got" = "$3" ] && _st=0
+		check "[$1] $2=$3" "$_st" "got: $(printf '%s' "$_got" | tr '\n' '|')"
+	}
+	echo "  -- directives (TC-805-25)"
+	exactly Unit Description 'Secrets store provisioner'
+	exactly Unit Requisite openbao.service
+	exactly Unit PartOf openbao.service
+	_req=$(printf '%s\n' "$D" | grep -E '^Unit\|(Requires|BindsTo|Upholds)=' || true)
+	check "[Unit] no Requires=, BindsTo= or Upholds= on the store: a requirement dependency cuts the store's crash loop short of StartLimitBurst" \
+		"$(yes_if [ -z "$_req" ])" "got: $(printf '%s' "$_req" | tr '\n' '|')"
+	exactly Unit After openbao.service
+	exactly Unit Before rasputin-api.service
+	_conds=$(printf '%s\n' "$D" | grep -E '^Unit\|(Condition|Assert)[A-Za-z]*=' || true)
+	check "[Unit] exactly one condition, ConditionPathExists=/var/lib/rasputin/role.controlplane, and no leaf or CA condition" \
+		"$(yes_if [ "$_conds" = 'Unit|ConditionPathExists=/var/lib/rasputin/role.controlplane' ])" "got: $(printf '%s' "$_conds" | tr '\n' '|')"
+	exactly Service Type oneshot
+	exactly Service RemainAfterExit yes
+	exactly Service User openbao
+	exactly Service Group openbao
+	_lc=$(values "$D" Service LoadCredential)
+	check "[Service] exactly the three LoadCredential lines: the provisioner's leaf and key, and the store CA" \
+		"$(yes_if [ "$_lc" = 'provisioner.pem:/var/lib/rasputin/tls/openbao-provisioner/leaf.pem
+provisioner.key:/var/lib/rasputin/tls/openbao-provisioner/leaf.key
+store-ca.pem:/var/lib/rasputin/trust/store-ca.pem' ])" "got: $(printf '%s' "$_lc" | tr '\n' '|')"
+	exactly Service RuntimeDirectory rasputin-store-provision-work
+	exactly Service RuntimeDirectoryMode 0700
+	exactly Service RuntimeDirectoryPreserve yes
+	exactly Service ProtectSystem strict
+	exactly Service PrivateTmp yes
+	exactly Service NoNewPrivileges yes
+	exactly Service CapabilityBoundingSet ''
+	exactly Service LimitCORE 0
+	_s=/usr/lib/rasputin/store-provision/rasputin-store-provision.sh
+	_exec=$(printf '%s\n' "$D" | grep -E '^Service\|Exec[A-Za-z]*=' | cut -d'|' -f2-)
+	check "the five Exec lines, in order: ExecStartPre=-+ pre, ExecStartPre=+ wait (no -), ExecStart= apply (no +), ExecStartPost=-+ record, ExecStopPost=-+ stopped" \
+		"$(yes_if [ "$_exec" = "ExecStartPre=-+$_s pre
+ExecStartPre=+$_s wait
+ExecStart=$_s apply
+ExecStartPost=-+$_s record
+ExecStopPost=-+$_s stopped" ])" "got: $(printf '%s' "$_exec" | tr '\n' '|')"
+	check "the Exec lines run a script that ships executable in the overlay ($_s)" "$(yes_if test -x "$OVERLAY$_s")"
+	_bad=$(printf '%s\n' "$D" | grep -E '\|(Timeout[A-Za-z]*Sec|RuntimeMaxSec|Environment|EnvironmentFile)=' || true)
+	check "no TimeoutStartSec or other timeout, and no Environment= override of the script's defaults" "$(yes_if [ -z "$_bad" ])" \
+		"forbidden line present: $(printf '%s' "$_bad" | tr '\n' '|')"
+	_sections=$(printf '%s\n' "$D" | cut -d'|' -f1 | sort -u | tr '\n' ' ')
+	check "only [Unit] and [Service] sections" "$(yes_if [ "$_sections" = "Service Unit " ])" "got: $_sections"
+	# The script's defaults the unit relies on, read from the script itself.
+	_rd=$(values "$D" Service RuntimeDirectory)
+	_work=$(sed -n 's/^WORK="\${RASPUTIN_STOREPROV_WORK:-\(.*\)}"$/\1/p' "$PSCRIPT")
+	check "the script's default work directory ($_work) is the unit's RuntimeDirectory, /run/$_rd" "$(yes_if [ "$_work" = "/run/$_rd" ])"
+	_bound=$(sed -n 's/^BOUND="\${RASPUTIN_STOREPROV_UNSEAL_BOUND:-\(.*\)}"$/\1/p' "$PSCRIPT")
+	check "the script's default unseal bound is 10 s, EX-1's (got '$_bound')" "$(yes_if [ "$_bound" = 10 ])"
+	_creds=$(sed -n 's/^CREDS="\${RASPUTIN_STOREPROV_CREDS:-\(.*\)}"$/\1/p' "$PSCRIPT")
+	check "the script's default credential directory is this unit's ($_creds)" "$(yes_if [ "$_creds" = "/run/credentials/$(basename "$U")" ])"
+	for _c in $(printf '%s\n' "$_lc" | cut -d: -f1); do
+		check "the script reads the credential $_c" "$(yes_if grep -qF "\$CREDS/$_c" "$PSCRIPT")"
+	done
+	for _src in $(printf '%s\n' "$_lc" | cut -d: -f2); do
+		check "credential source $_src sits in a tmpfiles-declared 0700 root directory" \
+			"$(yes_if awk -v p="$(dirname "$_src")" \
+				'$1 == "d" && $2 == p && $3 == "0700" && $4 == "root" && $5 == "root" { found = 1 } END { exit !found }' "$TMPFILES")"
+	done
+	[ "$fails" -eq 0 ]
+)
+
 # --- the shipped unit ----------------------------------------------------------
 echo "1. the shipped unit"
 verify "$UNIT"; rc=$?
 check "the shipped openbao.service passes every check" "$rc"
+echo
+echo "1b. the shipped provisioner unit (TC-805-25)"
+verify_prov "$PUNIT"; rc=$?
+check "the shipped rasputin-store-provision.service passes every check" "$rc"
 
 echo
 echo "2. wanted by post-build.sh, not by the overlay (TC-756-05)"
@@ -217,18 +347,30 @@ SCRATCH=$(mktemp -d)
 trap 'rm -rf "$SCRATCH"' EXIT INT TERM
 # refuses DESCRIPTION SECTION LINE [NEEDLE] — a copy of the unit, named as the
 # shipped one, with LINE added to SECTION (for SECTION "new", appended as its
-# own section; for SECTION "replace:OLD", put in place of the line OLD), must
-# fail verify, and the output must name NEEDLE (the line itself by default).
+# own section; for SECTION "replace:OLD", put in place of the line OLD; for
+# SECTION "tmpfiles:OLD", the unit as shipped and the tmpfiles copy with LINE
+# in place of OLD), must fail verify, and the output must name NEEDLE (the
+# line itself by default).
 refuses() {
 	mkdir -p "$SCRATCH/c"
 	_copy="$SCRATCH/c/openbao.service"
+	_tmpf="$TMPFILES"
 	case "$2" in
 		new) { cat "$UNIT"; printf '%s\n' "$3"; } >"$_copy" ;;
 		replace:*) awk -v o="${2#replace:}" -v l="$3" '$0 == o { print l; next } { print }' "$UNIT" >"$_copy" ;;
+		tmpfiles:*)
+			cp "$UNIT" "$_copy"
+			_tmpf="$SCRATCH/c/rasputin.conf"
+			awk -v o="${2#tmpfiles:}" -v l="$3" '$0 == o { print l; next } { print }' "$TMPFILES" >"$_tmpf"
+			cmp -s "$TMPFILES" "$_tmpf" && { check "$1: the injection changed the tmpfiles copy" 1 "nothing was injected"; return; }
+			;;
 		*) awk -v s="[$2]" -v l="$3" '{ print } $0 == s { print l }' "$UNIT" >"$_copy" ;;
 	esac
-	cmp -s "$UNIT" "$_copy" && { check "$1: the injection changed the copy" 1 "nothing was injected"; return; }
-	_out=$(verify "$_copy"); _rc=$?
+	case "$2" in
+		tmpfiles:*) ;;
+		*) cmp -s "$UNIT" "$_copy" && { check "$1: the injection changed the copy" 1 "nothing was injected"; return; } ;;
+	esac
+	_out=$(verify "$_copy" "$_tmpf"); _rc=$?
 	_needle=${4:-$3}
 	_fail_line=$(printf '%s\n' "$_out" | grep -A1 'FAIL' | grep -F -e "$_needle" | head -1)
 	_st=1
@@ -255,6 +397,77 @@ refuses "ReadWritePaths widened to /var/lib/rasputin" \
 	"ReadWritePaths /var/lib/rasputin has"
 refuses "GOMEMLIMIT=200MiB, above MemoryMax" 'replace:Environment=GOMEMLIMIT=60MiB' \
 	'Environment=GOMEMLIMIT=200MiB' 'GOMEMLIMIT (209715200 bytes) is below MemoryMax'
+# TC-804-14: a hook that could fail the store, one in the store's sandbox, and
+# an ExecStart without the self-init config.
+refuses "ExecStartPre without the - prefix" 'replace:ExecStartPre=-+/usr/lib/rasputin/store-init/rasputin-store-init.sh pre' \
+	'ExecStartPre=+/usr/lib/rasputin/store-init/rasputin-store-init.sh pre' '[Service] ExecStartPre=-+'
+refuses "ExecStopPost without the + prefix" 'replace:ExecStopPost=-+/usr/lib/rasputin/store-init/rasputin-store-init.sh stopped' \
+	'ExecStopPost=-/usr/lib/rasputin/store-init/rasputin-store-init.sh stopped' '[Service] ExecStopPost=-+'
+refuses "ExecStart without init.json" \
+	'replace:ExecStart=/usr/bin/bao server -config=/etc/rasputin/openbao/openbao.hcl -config=/etc/rasputin/openbao/init.json -config=/run/credentials/openbao.service/seal.hcl' \
+	'ExecStart=/usr/bin/bao server -config=/etc/rasputin/openbao/openbao.hcl -config=/run/credentials/openbao.service/seal.hcl' \
+	'[Service] ExecStart=/usr/bin/bao server -config=/etc/rasputin/openbao/openbao.hcl -config=/etc/rasputin/openbao/init.json'
+
+# TC-830-23: the seal rotation's directory credential, removed, re-pointed, or
+# joined by a file source for the optional key; and its d line widened.
+ROT_LINE='LoadCredential=seal-rotation:/var/lib/rasputin/openbao-seal/rotation'
+refuses "the seal-rotation directory credential removed" "replace:$ROT_LINE" '# removed' \
+	'[Service] LoadCredential=seal-rotation:/var/lib/rasputin/openbao-seal/rotation'
+refuses "the seal-rotation credential's source changed" "replace:$ROT_LINE" \
+	'LoadCredential=seal-rotation:/var/lib/rasputin/openbao-seal/staged' \
+	'[Service] LoadCredential=seal-rotation:/var/lib/rasputin/openbao-seal/rotation'
+refuses "a second LoadCredential= file line for the optional key" Service \
+	'LoadCredential=seal-rotation-key:/var/lib/rasputin/openbao-seal/rotation/key' \
+	'no LoadCredential file source under openbao-seal/rotation/'
+refuses "the rotation d line at 0750" \
+	'tmpfiles:d /var/lib/rasputin/openbao-seal/rotation  0700 root root -' \
+	'd /var/lib/rasputin/openbao-seal/rotation  0750 root root -' \
+	'tmpfiles declares d /var/lib/rasputin/openbao-seal/rotation 0700 root root -'
+
+# TC-805-25: the provisioner unit's controls. prefuses DESCRIPTION OLD NEW
+# NEEDLE — a copy with the line OLD replaced by NEW (an empty NEW deletes it,
+# "append:LINE" adds LINE to [Service]) must fail verify_prov, naming NEEDLE.
+prefuses() {
+	mkdir -p "$SCRATCH/p"
+	_copy="$SCRATCH/p/rasputin-store-provision.service"
+	case "$2" in
+		append:*) awk -v l="${2#append:}" '{ print } $0 == "[Service]" { print l }' "$PUNIT" >"$_copy" ;;
+		*) awk -v o="$2" -v l="$3" '$0 == o { if (l != "") print l; next } { print }' "$PUNIT" >"$_copy" ;;
+	esac
+	cmp -s "$PUNIT" "$_copy" && { check "$1: the injection changed the copy" 1 "nothing was injected"; return; }
+	_out=$(verify_prov "$_copy"); _rc=$?
+	_fail_line=$(printf '%s\n' "$_out" | grep 'FAIL' | grep -F -e "$4" | head -1)
+	_st=1
+	[ "$_rc" -ne 0 ] && [ -n "$_fail_line" ] && _st=0
+	check "TC-805-25 $1: refused, naming '$4'" "$_st" "rc=$_rc; output: $(printf '%s' "$_out" | grep -A1 FAIL | tr '\n' '|')"
+	rm -f "$_copy"
+}
+_ps=/usr/lib/rasputin/store-provision/rasputin-store-provision.sh
+prefuses "the wait line with a - prefix" "ExecStartPre=+$_ps wait" "ExecStartPre=-+$_ps wait" "the five Exec lines"
+prefuses "apply as root" "ExecStart=$_ps apply" "ExecStart=+$_ps apply" "the five Exec lines"
+prefuses "record without -" "ExecStartPost=-+$_ps record" "ExecStartPost=+$_ps record" "the five Exec lines"
+prefuses "the stop hook removed" "ExecStopPost=-+$_ps stopped" "" "the five Exec lines"
+prefuses "TimeoutStartSec=30" "append:TimeoutStartSec=30" "" "no TimeoutStartSec"
+prefuses "an Environment= override" "append:Environment=RASPUTIN_STOREPROV_UNSEAL_BOUND=300" "" "no TimeoutStartSec or other timeout, and no Environment="
+prefuses "a leaf condition" "ConditionPathExists=/var/lib/rasputin/role.controlplane" "ConditionPathExists=/var/lib/rasputin/role.controlplane
+ConditionPathExists=/var/lib/rasputin/tls/openbao-provisioner/leaf.pem" "exactly one condition"
+prefuses "Requires= instead of Requisite=" "Requisite=openbao.service" "Requires=openbao.service" "[Unit] Requisite=openbao.service"
+prefuses "BindsTo= instead of PartOf=" "PartOf=openbao.service" "BindsTo=openbao.service" "[Unit] PartOf=openbao.service"
+# A comment line in [Unit] becomes the added line, so no pinned line is lost.
+prefuses "BindsTo= added beside Requisite= and PartOf=" "# openbao.service's last ExecStartPost= starts this, with --no-block, on each" "BindsTo=openbao.service" "no Requires=, BindsTo= or Upholds="
+prefuses "no RuntimeDirectoryPreserve" "RuntimeDirectoryPreserve=yes" "" "RuntimeDirectoryPreserve=yes"
+prefuses "User=root" "User=openbao" "User=root" "[Service] User=openbao"
+# F-805-28: the store's start of its provisioner removed, made blocking (the
+# provisioner is ordered after the store's start, so it would deadlock) or
+# able to fail the store; and the Wants= pull-in it replaced, put back.
+refuses "openbao.service without the start of its provisioner" "replace:ExecStartPost=$PROV_PULL" '' \
+	'exactly two ExecStartPost lines'
+refuses "the start of the provisioner without --no-block" "replace:ExecStartPost=$PROV_PULL" \
+	'ExecStartPost=-+/usr/bin/systemctl start rasputin-store-provision.service' 'exactly two ExecStartPost lines'
+refuses "the start of the provisioner without -" "replace:ExecStartPost=$PROV_PULL" \
+	'ExecStartPost=+/usr/bin/systemctl --no-block start rasputin-store-provision.service' 'exactly two ExecStartPost lines'
+refuses "Wants= on the provisioner, which fails its job on a first boot" Unit 'Wants=rasputin-store-provision.service' \
+	'pull-in of the provisioner'
 
 # --- the test fails closed (TC-755-07) -------------------------------------------
 echo

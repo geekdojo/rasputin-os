@@ -1,0 +1,21 @@
+# provision.tsv — the kv-v2 mounts and cert roles this release adds to a
+# secrets store an earlier release initialised (geekdojo/geekdojo-brain#805;
+# ADR-0010 S9). rasputin-store-provision.service reads it on every start of
+# the store and adds, logged in as the store's provisioner, only what is
+# missing. Nothing it finds present is changed, and nothing is ever removed.
+#
+# init.json beside this file is FROZEN from the store-arming release on: a
+# store runs it once, on its first start, so an item added there would reach
+# fresh stores only. A later release adds mounts and roles HERE, and a fresh
+# store gets them here too, from the same provisioner, within its limits.
+#
+# One item per line, its fields separated by one TAB:
+#   mount<TAB><name>               a kv-v2 mount at <name>
+#   role<TAB><name><TAB><policy>   a cert role <name> trusting the store CA,
+#                                  admitting only the CommonName <name>
+# <name> matches ^rasputin-rel-[a-z0-9-]+$, and <policy> is rasputin-bindable,
+# the one policy a provisioned role may bind. Anything else refuses the whole
+# file, and the run is recorded failed. Lines starting with # and blank lines
+# are skipped.
+#
+# This release adds nothing.

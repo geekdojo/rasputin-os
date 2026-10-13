@@ -463,6 +463,31 @@ FW_TMP=""
 echo "post-build: baked the firewall image descriptor for $FW_VERSION into /usr/share/rasputin/firewall (signature verified against /etc/rasputin/trust/root-ca.pem) — an offline controlplane can still answer GET /api/cluster/firewall-image"
 fi
 
+# ── the secrets store's policy text ─────────────────────────────────────────
+#
+# The store's self-init (init.json) reads its policies from
+# /usr/share/rasputin/openbao-policy/, which package/rasputin-api installs from
+# the api tarball. A policy file the store cannot read fails its first start
+# after the self-init marker, and that store never unseals. So the build stops
+# unless every file init.json names is in the image, non-empty, and byte-equal
+# to the tarball's copy (geekdojo/geekdojo-brain#804). BUILD_DIR is
+# Buildroot's, exported to this script; the api's extracted tarball is the one
+# rasputin-api-<version> directory in it.
+STORE_API_SRC=""
+for d in "${BUILD_DIR:?post-build needs Buildroot BUILD_DIR to find the rasputin-api tarball}"/rasputin-api-*; do
+	[ -d "$d" ] || continue
+	if [ -n "$STORE_API_SRC" ]; then
+		echo "post-build: ERROR — $BUILD_DIR holds two extracted rasputin-api tarballs ($STORE_API_SRC and $d), so which policy text the image carries cannot be told." >&2
+		exit 1
+	fi
+	STORE_API_SRC=$d
+done
+if [ -z "$STORE_API_SRC" ]; then
+	echo "post-build: ERROR — $BUILD_DIR holds no extracted rasputin-api tarball, so the store's policy text cannot be checked." >&2
+	exit 1
+fi
+"$SCRIPT_DIR/check-store-policy.sh" "$TARGET_DIR" "$STORE_API_SRC"
+
 # rasputin-api.service is intentionally NOT symlinked here — preset-all
 # enables it; the role.controlplane marker condition gates the actual start
 # (provisioning.md §2).

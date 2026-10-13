@@ -117,18 +117,29 @@
 # is not wrong.
 #
 # openbao/ and openbao-audit/ belong to the store's uid and hold only what the
-# store writes. They are NOT swept, for the reason the journal is not: the
-# store sets the modes of their contents, not this image, and the directory
-# mode is what keeps them unreachable.
+# store writes. openbao/ is NOT swept, for the reason the journal is not: the
+# store sets the modes of its contents, not this image, and the directory mode
+# is what keeps them unreachable.
 0700  required  /var/lib/rasputin/openbao                         990  990
 0700  required  /var/lib/rasputin/openbao-audit                   990  990
+# openbao-audit/ IS swept (geekdojo/geekdojo-brain#804): openbao.hcl's audit
+# stanza sets the log's mode itself (mode = "0600"), so the mode is this
+# image's to assert, and an audit log is request metadata nobody but the store
+# reads. The sweep also holds #799's rotated copies to owner-only. audit.log is
+# optional: it appears once the store's first start has run.
+0600  optional  /var/lib/rasputin/openbao-audit/audit.log         990  990
 # openbao-seal/ is root's. The seal key and the per-cluster seal fragment reach
 # the store through LoadCredential=, so nothing but root ever opens them here,
 # and every file in it is a secret: swept, below.
 0700  required  /var/lib/rasputin/openbao-seal
 0600  optional  /var/lib/rasputin/openbao-seal/seal-key
 0600  optional  /var/lib/rasputin/openbao-seal/seal.hcl
-# tls/ and the two leaf directories are root's, written by the api. Each leaf
+# rotation/ holds the seal-key rotation's staged key between its stage and its
+# settle (geekdojo/geekdojo-brain#830). Required, as tmpfiles makes it; the
+# files in it fall under openbao-seal's sweep.
+0700  required  /var/lib/rasputin/openbao-seal/rotation
+# tls/ and the three leaf directories are root's, written by the api (the
+# provisioner's since #805). Each leaf
 # directory holds leaf.key and leaf.pem. leaf.pem is NOT declared, and the leaf
 # directories are not swept, for the reason trust/ and bus.crt are not: the api
 # writes a certificate at 0644, public by construction, and every entry here
@@ -139,6 +150,8 @@
 0600  optional  /var/lib/rasputin/tls/openbao-server/leaf.key
 0700  required  /var/lib/rasputin/tls/openbao-client
 0600  optional  /var/lib/rasputin/tls/openbao-client/leaf.key
+0700  required  /var/lib/rasputin/tls/openbao-provisioner
+0600  optional  /var/lib/rasputin/tls/openbao-provisioner/leaf.key
 
 # ── NOT declared, and deliberately ─────────────────────────────────────────
 # /var/lib/rasputin/clock — the last-known-good time, written by
@@ -157,9 +170,11 @@
 # belong to those daemons and carry their own modes. bus/ is not swept either
 # — see the exemption above it: it is a certificate and a pin next to the keys,
 # and the keys are declared by name. openbao-seal/ holds nothing but the seal's
-# secrets, so it is swept; the store's own directories and the leaf
-# directories are not (see the store section).
+# secrets, and openbao-audit/ nothing but the audit log, so both are swept; the
+# store's data directory and the leaf directories are not (see the store
+# section).
 sweep  /var/lib/rasputin/console
 sweep  /var/lib/rasputin/agent-state
 sweep  /var/lib/rasputin/coredump
 sweep  /var/lib/rasputin/openbao-seal
+sweep  /var/lib/rasputin/openbao-audit

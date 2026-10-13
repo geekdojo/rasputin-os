@@ -1,0 +1,66 @@
+# The secrets store's provisioner (ADR-0010 S9; geekdojo/geekdojo-brain#805):
+# on every run of the store, it adds the kv-v2 mounts and cert roles this
+# release's /etc/rasputin/openbao/provision.tsv lists and the store lacks,
+# logged in as the store's one fixed provisioner identity, with no root token.
+# It never gates the store; it holds rasputin-api.service until it exits, and
+# with nothing to add it exits at once.
+# rasputin-store-provision.sh says what each phase does and the record's
+# contract. test/store-unit-test.sh asserts every line here;
+# test/store-unit-functional.sh runs it under real systemd 258.7 with the real
+# pinned bao.
+[Unit]
+Description=Secrets store provisioner
+# openbao.service's last ExecStartPost= starts this, with --no-block, on each
+# start of the store that reaches READY, and it runs after it. Nothing pulls it
+# in when the store's job is queued: on a first boot the store is
+# condition-skipped, and a start job queued beside it would be failed with
+# result 'dependency' by Requisite=, before this unit's own condition is
+# checked (systemd 258.7, ledger F-805-28). Requisite=: a start of this while
+# the store is not active fails at once, and so does the restart PartOf=
+# carries here when the store's restart is refused at its start limit.
+# PartOf=: a store that is stopped or restarted stops this run (and the stop
+# hook records it), and so does one that crashes, into its start limit
+# included: Restart=always queues a restart job on each exit of the store,
+# which PartOf= carries here. Neither is a requirement dependency, which would
+# cut the store's crash loop short of its StartLimitBurst.
+Requisite=openbao.service
+PartOf=openbao.service
+After=openbao.service
+Before=rasputin-api.service
+# Role gate, as on the store. No condition on the provisioner's leaf: a store
+# running without it is recorded failed (243, CREDENTIALS), never skipped.
+ConditionPathExists=/var/lib/rasputin/role.controlplane
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# apply runs as the store's user, the only user besides root that reads the
+# credential copies below. The `+` phases run as root outside this sandbox:
+# pre, record and stopped write root's record, and wait reads the journal.
+User=openbao
+Group=openbao
+# The provisioner's leaf, which the api mints and renews (#805), and the store
+# CA its client trusts.
+LoadCredential=provisioner.pem:/var/lib/rasputin/tls/openbao-provisioner/leaf.pem
+LoadCredential=provisioner.key:/var/lib/rasputin/tls/openbao-provisioner/leaf.key
+LoadCredential=store-ca.pem:/var/lib/rasputin/trust/store-ca.pem
+# The work directory apply (uid 990) writes its result in. Preserved, so a
+# stop hook still reads it after the run.
+RuntimeDirectory=rasputin-store-provision-work
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+# `-` on pre, record and stopped: they report, they never fail the run. No `-`
+# on wait: a store that reports it did not unseal fails the start, so apply
+# never runs. There is no TimeoutStartSec: the wait ends on the store's own
+# facts, bounded only by the one exception rasputin-os EXCEPTIONS.md EX-1
+# records.
+ExecStartPre=-+/usr/lib/rasputin/store-provision/rasputin-store-provision.sh pre
+ExecStartPre=+/usr/lib/rasputin/store-provision/rasputin-store-provision.sh wait
+ExecStart=/usr/lib/rasputin/store-provision/rasputin-store-provision.sh apply
+ExecStartPost=-+/usr/lib/rasputin/store-provision/rasputin-store-provision.sh record
+ExecStopPost=-+/usr/lib/rasputin/store-provision/rasputin-store-provision.sh stopped
+ProtectSystem=strict
+PrivateTmp=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+LimitCORE=0

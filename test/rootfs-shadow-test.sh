@@ -50,6 +50,7 @@ COMMON="$ROOT/board/rasputin/common"
 POST_BUILD="$COMMON/post-build.sh"
 POST_FAKEROOT="$COMMON/post-fakeroot.sh"
 MKUSERS="$ROOT/buildroot/support/scripts/mkusers"
+. "$ROOT/test/lib/store-policy-fixture.sh"
 
 [ -f "$POST_BUILD" ]    || { echo "missing: $POST_BUILD" >&2; exit 2; }
 [ -f "$POST_FAKEROOT" ] || { echo "missing: $POST_FAKEROOT" >&2; exit 2; }
@@ -115,6 +116,12 @@ make_target() {
 		"$_d/usr/lib/rasputin/machine-id/rasputin-init"
 	chmod +x "$_d/usr/lib/rasputin/machine-id/rasputin-init"
 	ln -s ../lib/systemd/systemd "$_d/sbin/init"
+	# post-build.sh also refuses a tree whose secrets store would fail its
+	# first start for want of its policy text (geekdojo/geekdojo-brain#804),
+	# so the target carries init.json and its policy files and BUILD_DIR the
+	# extracted api tarball (test/lib/store-policy-fixture.sh).
+	rm -rf "$BUILD_DIR"
+	store_policy_fixture "$ROOT" "$_d" "$BUILD_DIR" || exit 2
 	printf 'root:x:0:0:root:/root:/bin/sh\nnobody:x:65534:65534:nobody:/:/bin/false\n' \
 		> "$_d/etc/passwd"
 	printf 'root:%s:20000:0:99999:7:::\nnobody:!:20000:0:99999:7:::\n' "$_rootfield" \
@@ -138,6 +145,10 @@ BR2_TARGET_GENERIC_PASSWD_METHOD="sha-256"
 EOF
 BR2_CONFIG="$TMP/br.config"
 export BR2_CONFIG
+# Buildroot exports BUILD_DIR to post-build scripts; make_target fills it
+# with the extracted api tarball the store-policy guard compares against.
+BUILD_DIR="$TMP/build"
+export BUILD_DIR
 
 # One package user, the shape Buildroot's own packages declare:
 #   username uid group gid passwd home shell groups comment

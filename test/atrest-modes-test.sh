@@ -96,11 +96,14 @@ awk -v u="$ME" -v g="$MYGID" '
 # never read from the inventory, so a row dropped from it or declared with the
 # wrong owner fails a case below instead of quietly shrinking the table.
 VAR_RASPUTIN=/var/lib/rasputin
-STORE_DIRS="$VAR_RASPUTIN/openbao $VAR_RASPUTIN/openbao-audit $VAR_RASPUTIN/openbao-seal $VAR_RASPUTIN/tls $VAR_RASPUTIN/tls/openbao-server $VAR_RASPUTIN/tls/openbao-client"
-STORE_FILES="$VAR_RASPUTIN/openbao-seal/seal-key $VAR_RASPUTIN/openbao-seal/seal.hcl $VAR_RASPUTIN/tls/openbao-server/leaf.key $VAR_RASPUTIN/tls/openbao-client/leaf.key"
+# openbao-seal/rotation is the seal-key rotation's staging directory
+# (geekdojo/geekdojo-brain#830, TC-830-24). The provisioner's leaf directory
+# and key are geekdojo-brain#805's (TC-805-26).
+STORE_DIRS="$VAR_RASPUTIN/openbao $VAR_RASPUTIN/openbao-audit $VAR_RASPUTIN/openbao-seal $VAR_RASPUTIN/openbao-seal/rotation $VAR_RASPUTIN/tls $VAR_RASPUTIN/tls/openbao-server $VAR_RASPUTIN/tls/openbao-client $VAR_RASPUTIN/tls/openbao-provisioner"
+STORE_FILES="$VAR_RASPUTIN/openbao-seal/seal-key $VAR_RASPUTIN/openbao-seal/seal.hcl $VAR_RASPUTIN/tls/openbao-server/leaf.key $VAR_RASPUTIN/tls/openbao-client/leaf.key $VAR_RASPUTIN/tls/openbao-provisioner/leaf.key"
 # The store's own uid owns these two; root owns every other store path.
 STORE_OWNED="$VAR_RASPUTIN/openbao $VAR_RASPUTIN/openbao-audit"
-STORE_ROOT_OWNED="$VAR_RASPUTIN/openbao-seal $VAR_RASPUTIN/openbao-seal/seal-key $VAR_RASPUTIN/openbao-seal/seal.hcl $VAR_RASPUTIN/tls $VAR_RASPUTIN/tls/openbao-server $VAR_RASPUTIN/tls/openbao-server/leaf.key $VAR_RASPUTIN/tls/openbao-client $VAR_RASPUTIN/tls/openbao-client/leaf.key"
+STORE_ROOT_OWNED="$VAR_RASPUTIN/openbao-seal $VAR_RASPUTIN/openbao-seal/rotation $VAR_RASPUTIN/openbao-seal/seal-key $VAR_RASPUTIN/openbao-seal/seal.hcl $VAR_RASPUTIN/tls $VAR_RASPUTIN/tls/openbao-server $VAR_RASPUTIN/tls/openbao-server/leaf.key $VAR_RASPUTIN/tls/openbao-client $VAR_RASPUTIN/tls/openbao-client/leaf.key $VAR_RASPUTIN/tls/openbao-provisioner $VAR_RASPUTIN/tls/openbao-provisioner/leaf.key"
 OPENBAO_ID=990
 
 run_audit() {
@@ -171,8 +174,9 @@ world() {
 	: >"$V/bus/bus.key"; chmod 0600 "$V/bus/bus.key"
 	: >"$V/bus/agent.token"; chmod 0600 "$V/bus/agent.token"
 	: >"$V/bus/join.token"; chmod 0600 "$V/bus/join.token"
-	# The secrets store's six directories and its four secret files
-	# (geekdojo/geekdojo-brain#754), each at its declared mode.
+	# The secrets store's eight directories and its five secret files
+	# (geekdojo/geekdojo-brain#754, #830; the provisioner's, #805), each at
+	# its declared mode.
 	for d in $STORE_DIRS; do
 		mkdir -p "$R$d"; chmod 0700 "$R$d"
 	done
@@ -482,10 +486,38 @@ store_cases() {
 	# correct tree checked 16: fifteen declared paths, plus console/shadow
 	# visited again by its sweep. #754 adds ten declared paths and the
 	# sweep of openbao-seal/, which visits seal-key and seal.hcl again, so 28.
+	# TC-830-24: #830 adds openbao-seal/rotation, one declared path, so 29.
+	# #805 adds the provisioner's directory and key (TC-805-26), so 31.
 	out=$(run_audit "$R"); rc=$?
-	ok "TC-754-05 a correct tree with the store's paths passes" "$(yes_if [ "$rc" -eq 0 ])" "$out"
-	ok "TC-754-05 the verdict is exactly 'PASS checked=28'" \
-		"$(yes_if last_line_matches '^rasputin-atrest: PASS checked=28$' "$out")" "$out"
+	ok "TC-754-05 TC-805-26 a correct tree with the store's paths passes" "$(yes_if [ "$rc" -eq 0 ])" "$out"
+	ok "TC-830-24 TC-805-26 the verdict is exactly 'PASS checked=31'" \
+		"$(yes_if last_line_matches '^rasputin-atrest: PASS checked=31$' "$out")" "$out"
+
+	# TC-830-24: the rotation directory at 0755 fails naming it; a 0644 file
+	# inside it fails openbao-seal's sweep; a 0600 staged key passes; the
+	# directory absent fails as required.
+	ROT="$VAR_RASPUTIN/openbao-seal/rotation"
+	chmod 0755 "$R$ROT"
+	out=$(run_audit "$R"); rc=$?
+	chmod 0700 "$R$ROT"
+	ok "TC-830-24 openbao-seal/rotation at 0755 is refused" "$(yes_if [ "$rc" -ne 0 ])" "$out"
+	ok "TC-830-24 the failure names openbao-seal/rotation and its mode" \
+		"$(yes_if says "$ROT is 0755, declared 0700" "$out")" "$out"
+	K="$ROT/rasputin-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+	: >"$R$K"; chmod 0644 "$R$K"
+	out=$(run_audit "$R"); rc=$?
+	ok "TC-830-24 a 0644 file in openbao-seal/rotation is refused" "$(yes_if [ "$rc" -ne 0 ])" "$out"
+	ok "TC-830-24 openbao-seal's sweep names it" \
+		"$(yes_if says "$K is 0644 in a swept tree" "$out")" "$out"
+	chmod 0600 "$R$K"
+	out=$(run_audit "$R"); rc=$?
+	ok "TC-830-24 a 0600 staged key in openbao-seal/rotation passes" "$(yes_if passed "$rc" "$out")" "$out"
+	rm -f "$R$K"
+	R2=$(world); rm -rf "$R2$ROT"
+	out=$(run_audit "$R2"); rc=$?
+	ok "TC-830-24 a missing openbao-seal/rotation is refused" "$(yes_if [ "$rc" -ne 0 ])" "$out"
+	ok "TC-830-24 the failure says openbao-seal/rotation is required" \
+		"$(yes_if says "$ROT is missing and is required" "$out")" "$out"
 
 	# TC-754-06 and TC-754-07: undeclared group access and world access, one
 	# new row at a time, each restored before the next.
@@ -546,18 +578,46 @@ store_cases() {
 	# swept. A leaf certificate is public by construction (the api writes it
 	# 0644), and the store sets the modes of its own files.
 	R2=$(world); V2="$R2/var/lib/rasputin"
-	for d in openbao-server openbao-client; do
+	for d in openbao-server openbao-client openbao-provisioner; do
 		: >"$V2/tls/$d/leaf.pem"; chmod 0644 "$V2/tls/$d/leaf.pem"
 	done
 	out=$(run_audit "$R2"); rc=$?
 	ok "TC-754-11 a public leaf certificate in an unswept store directory passes" \
 		"$(yes_if passed "$rc" "$out")" "$out"
+	# Since geekdojo-brain#804 openbao-audit/ is swept (TC-804-17 below), so
+	# only the data directory's contents are left to the store.
 	R2=$(world); V2="$R2/var/lib/rasputin"
 	: >"$V2/openbao/data.db"; chmod 0644 "$V2/openbao/data.db"
-	: >"$V2/openbao-audit/audit.log"; chmod 0644 "$V2/openbao-audit/audit.log"
 	out=$(run_audit "$R2"); rc=$?
-	ok "TC-754-11 store-owned contents are not swept" \
+	ok "TC-754-11 the store's data contents are not swept" \
 		"$(yes_if passed "$rc" "$out")" "$out"
+
+	# TC-804-17: the audit log (geekdojo-brain#804). The stanza writes it
+	# 0600 as the store's uid; the row holds it there (the harness copy
+	# rewrites 990 to this user), and the sweep holds every other file in
+	# openbao-audit/, #799's rotated copies included, to owner-only.
+	A="$VAR_RASPUTIN/openbao-audit/audit.log"
+	R2=$(world); V2="$R2/var/lib/rasputin"
+	: >"$R2$A"; chmod 0600 "$R2$A"
+	out=$(run_audit "$R2"); rc=$?
+	ok "TC-804-17 audit.log at 0600, owned as declared, passes" "$(yes_if passed "$rc" "$out")" "$out"
+	chmod 0644 "$R2$A"
+	out=$(run_audit "$R2"); rc=$?
+	ok "TC-804-17 audit.log at 0644 is refused" "$(yes_if [ "$rc" -ne 0 ])" "$out"
+	ok "TC-804-17 the failure names audit.log and its mode" \
+		"$(yes_if says "$A is 0644, declared 0600" "$out")" "$out"
+	chmod 0600 "$R2$A"
+	: >"$V2/openbao-audit/audit.log.1"; chmod 0644 "$V2/openbao-audit/audit.log.1"
+	out=$(run_audit "$R2"); rc=$?
+	ok "TC-804-17 a 0644 rotated copy is refused" "$(yes_if [ "$rc" -ne 0 ])" "$out"
+	ok "TC-804-17 the sweep names the rotated copy" \
+		"$(yes_if says 'openbao-audit/audit.log.1 is 0644 in a swept tree' "$out")" "$out"
+	chmod 0600 "$V2/openbao-audit/audit.log.1"
+	out=$(run_audit "$R2"); rc=$?
+	ok "TC-804-17 a 0600 rotated copy passes the sweep" "$(yes_if passed "$rc" "$out")" "$out"
+	out=$(audit_with "$INVENTORY" "$R2" -u "$ME" -g "$MYGID")
+	ok "TC-804-17 the shipped inventory holds audit.log to uid $OPENBAO_ID" \
+		"$(yes_if says "$A is owned by uid $ME, not $OPENBAO_ID" "$out")" "$out"
 
 	# TC-754-12: the directories are required, the files optional.
 	for p in $STORE_DIRS; do
@@ -695,8 +755,9 @@ inv_row() {
 # MODE, UID and GID.
 d_line_is() { [ "$(tmpfiles_d "$1")" = "$2 $3 $4" ]; }
 
-# TC-754-01: the six `d` lines, exactly once each, with the values written here
-# rather than read from the inventory.
+# TC-754-01, TC-805-26: the eight `d` lines, exactly once each, with the values
+# written here rather than read from the inventory (openbao-seal/rotation:
+# TC-830-24).
 while read -r rel mode uid gid; do
 	p="$VAR_RASPUTIN/$rel"
 	ok "TC-754-01 tmpfiles.d declares $p once, $mode $uid:$gid" \
@@ -706,9 +767,11 @@ done <<'EOF_D'
 openbao 0700 990 990
 openbao-audit 0700 990 990
 openbao-seal 0700 0 0
+openbao-seal/rotation 0700 0 0
 tls 0700 0 0
 tls/openbao-server 0700 0 0
 tls/openbao-client 0700 0 0
+tls/openbao-provisioner 0700 0 0
 EOF_D
 
 # TC-754-02: each directory's inventory row matches its `d` line and is
@@ -734,7 +797,13 @@ sweeps=$(awk '$1 == "sweep" { print $2 }' "$INVENTORY")
 listed() { printf '%s\n' "$2" | grep -qxF -- "$1"; }
 ok "TC-754-02 openbao-seal is swept" \
 	"$(yes_if listed "$VAR_RASPUTIN/openbao-seal" "$sweeps")" "$sweeps"
-for p in "$VAR_RASPUTIN/openbao" "$VAR_RASPUTIN/openbao-audit" "$VAR_RASPUTIN/tls" \
+# Since geekdojo-brain#804 openbao-audit is swept as well (TC-804-17).
+ok "TC-804-17 openbao-audit is swept" \
+	"$(yes_if listed "$VAR_RASPUTIN/openbao-audit" "$sweeps")" "$sweeps"
+ok "TC-804-17 the inventory declares openbao-audit/audit.log optional 0600, 990:990" \
+	"$(yes_if [ "$(inv_row "$VAR_RASPUTIN/openbao-audit/audit.log")" = "0600 optional 990 990 5" ])" \
+	"inventory: $(inv_row "$VAR_RASPUTIN/openbao-audit/audit.log")"
+for p in "$VAR_RASPUTIN/openbao" "$VAR_RASPUTIN/tls" \
 	"$VAR_RASPUTIN/tls/openbao-server" "$VAR_RASPUTIN/tls/openbao-client"; do
 	ok "TC-754-02 $p is not swept" \
 		"$(yes_if not listed "$p" "$sweeps")" "$sweeps"
@@ -773,8 +842,9 @@ ok "TC-754-13 the harness inventory keeps every non-comment line" \
 	"$(yes_if [ "$(grep -Ecv '^[[:space:]]*(#|$)' "$INVENTORY")" = "$(grep -Ecv '^[[:space:]]*(#|$)' "$HARNESS_INV")" ])"
 ok "TC-754-13 the harness inventory keeps every sweep line" \
 	"$(yes_if [ "$(grep '^sweep' "$INVENTORY")" = "$(grep '^sweep' "$HARNESS_INV")" ])"
-ok "TC-754-13 the harness inventory rewrote both store-owned rows" \
-	"$(yes_if [ "$(awk -v u="$ME" -v g="$MYGID" '$4 == u && $5 == g' "$HARNESS_INV" | grep -c 'rasputin/openbao')" -eq 2 ])" \
+# Three since geekdojo-brain#804: the two directories and audit.log.
+ok "TC-754-13 the harness inventory rewrote all three store-owned rows" \
+	"$(yes_if [ "$(awk -v u="$ME" -v g="$MYGID" '$4 == u && $5 == g' "$HARNESS_INV" | grep -c 'rasputin/openbao')" -eq 3 ])" \
 	"$(grep openbao "$HARNESS_INV")"
 ok "TC-754-13 the shipped inventory is untouched" \
 	"$(yes_if [ "$(cksum <"$INVENTORY")" = "$SHIPPED_SUM_BEFORE" ])"

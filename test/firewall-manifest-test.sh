@@ -31,6 +31,7 @@ set -u
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 POSTBUILD="$ROOT/board/rasputin/common/post-build.sh"
+. "$ROOT/test/lib/store-policy-fixture.sh"
 REAL_PIN="$ROOT/board/rasputin/common/firewall-pin.txt"
 CI="$ROOT/.github/workflows/ci.yml"
 for f in "$POSTBUILD" "$REAL_PIN" "$CI"; do
@@ -127,6 +128,11 @@ prep() { # prep <case> <pin text | NOPIN> [NOCA]
 		"$C/target/usr/lib/rasputin/machine-id/rasputin-init"
 	chmod +x "$C/target/usr/lib/rasputin/machine-id/rasputin-init"
 	ln -s ../lib/systemd/systemd "$C/target/sbin/init"
+	# The same for the secrets store's policy guard (geekdojo/geekdojo-brain#804):
+	# init.json, its policy files and the extracted api tarball, and the guard
+	# and drift script beside the scratch post-build.sh, where it looks.
+	BUILD_DIR="$C/build"; export BUILD_DIR
+	store_policy_fixture "$ROOT" "$C/target" "$BUILD_DIR" "$C" || exit 2
 	[ "$2" = NOPIN ] || printf '%s' "$2" > "$C/board/rasputin/common/firewall-pin.txt"
 	[ "${3:-}" = NOCA ] || cp "$W/root.pem" "$C/target/etc/rasputin/trust/root-ca.pem"
 	TGT="$C/target"

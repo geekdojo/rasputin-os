@@ -36,12 +36,23 @@ test -f "$IMG" || { echo "::error::no image at $IMG"; exit 1; }
 mkdir -p "$WORK"
 # Seed lookup, OVMF and the per-arch QEMU line, shared with test/update-smoke.sh.
 . "$(dirname "$0")/lib/qemu-common.sh"
+# The store readiness check (geekdojo/geekdojo-brain#834): the verdict on the
+# api's report, the wait and the post-kill report; and the first-run sign-in
+# that reading the report needs, with the soft passkey it runs.
+# shellcheck source=test/lib/store-ready.sh
+. "$(dirname "$0")/lib/store-ready.sh"
+# shellcheck source=test/lib/api-session.sh
+. "$(dirname "$0")/lib/api-session.sh"
+SOFT_PASSKEY="$(dirname "$0")/lib/soft-passkey.py"
 
 # Host-side forwards into the guest. The same numbers serve both arches: the two
 # smoke jobs run on separate runners, so they never collide.
 HTTP_PORT=18080
 HTTPS_PORT=18443
 DNS_PORT=15353
+# The guest's :22, used only by guest_diag below, after a store or api check
+# has already failed.
+SSH_PORT=12222
 
 # Budgets, shared by both arches. These are CEILINGS, not sleeps — every wait
 # below polls a checkable fact and exits the moment it is true, so a fast run is
@@ -68,7 +79,31 @@ DNS_PORT=15353
 # report (ordered only After=tailscaled) has normally already arrived.
 # KM_TRIES is the kernel-match verdict poll (2s apart, 60s ceiling); like the
 # tailscale report it normally arrived long before the polls above finish.
-BOOT_BUDGET=900 ; MU_TRIES=120 ; FB_TRIES=60 ; API_TRIES=48 ; ATREST_TRIES=60 ; TS_TRIES=30 ; KM_TRIES=30
+# SI_TRIES is the secrets store's self-init line (geekdojo/geekdojo-brain#804;
+# 2s apart, 60s ceiling). The api mints the store's leaf in the background
+# after it starts and then restarts the store, so the line can come after
+# /healthz answers; by the end of the polls above it normally has. With it the
+# worst case is 790 + 60 + 60 = 910s of polling ceilings, but the tailscale,
+# kernel-match and store-init lines are written by then, so those three polls
+# end on their first read and the real worst case stays inside the qemu
+# timeout; a stuck one is still reported by its own assertion.
+# SR_TRIES is the api's report that the secrets store is ready
+# (geekdojo/geekdojo-brain#834; 2s apart, 60s ceiling), read from
+# GET /api/alerts once the store-init line is in. Like the polls above, it
+# ends the moment the fact is true, and a stuck one is reported by its own
+# assertion.
+# HS_TRIES is the api's HTTPS listener answering /healthz (2s apart, 120s
+# ceiling). /healthz on :80 answering does not mean :443 is up: the api binds
+# :80 and sends READY first, and starts HTTPS in the background once its clock
+# gate opens (rasputin-control-plane api/cmd/rasputin-api/main.go, bounded at
+# 90s there), so the ceiling sits above that bound. The api's journal on the
+# store-arming smoke (release run 38334384432, arm64) has ":80" listening at
+# 67.565s, READY at 67.574s and ":443" listening at 67.653s. Run 38323824127
+# asked for the RP ID over :443 within about 2s of READY, got no answer, and
+# failed. The poll ends the moment HTTPS answers, normally on its first read;
+# its worst case adds 120s to the ceilings above, still inside the qemu
+# timeout for the reason given there.
+BOOT_BUDGET=900 ; MU_TRIES=120 ; FB_TRIES=60 ; API_TRIES=48 ; HS_TRIES=60 ; ATREST_TRIES=60 ; TS_TRIES=30 ; KM_TRIES=30 ; SI_TRIES=30 ; SR_TRIES=30
 case "$ARCH" in
   amd64|arm64) ;;
   *) echo "::error::unknown arch '$ARCH' (expected amd64 or arm64)"; exit 1 ;;
@@ -92,8 +127,22 @@ part_offsets() {
 # every assertion below would pass even if the whole naming chain were broken,
 # because the fallback lands on exactly the values the old hardcodes carried.
 CLUSTER_ID=smoke1
-printf 'RASPUTIN_NODE_ROLE=controlplane\nRASPUTIN_NODE_ID=smoke-cp\nRASPUTIN_CLUSTER_ID=%s\nRASPUTIN_NATS_URL=\nRASPUTIN_CP_JOIN_TOKEN=\n' \
-  "$CLUSTER_ID" > "$WORK/seed-cp.env"
+#
+# RASPUTIN_SSH_AUTHORIZED_KEY is the way into the guest that test/update-smoke.sh
+# already uses: firstboot merges it into dropbear's keys, and the seed is the
+# only source of one. This script reads its assertions off the console and over
+# the api, never over SSH; the key serves guest_diag alone, which dumps the
+# store's and the api's journal when one of their checks has failed, so a red
+# smoke says why. It is a throwaway key and does not outlive the run.
+KEY="$WORK/id_ed25519"
+rm -f "$KEY" "$KEY.pub"
+trap 'rm -f "$KEY" "$KEY.pub"' EXIT
+ssh-keygen -q -t ed25519 -N '' -C boot-smoke -f "$KEY" \
+  || { echo "::error::ssh-keygen failed; the failure diagnostic would have no way into the guest"; exit 1; }
+{
+  printf 'RASPUTIN_NODE_ROLE=controlplane\nRASPUTIN_NODE_ID=smoke-cp\nRASPUTIN_CLUSTER_ID=%s\nRASPUTIN_NATS_URL=\nRASPUTIN_CP_JOIN_TOKEN=\n' "$CLUSTER_ID"
+  printf 'RASPUTIN_SSH_AUTHORIZED_KEY="%s"\n' "$(cat "$KEY.pub")"
+} > "$WORK/seed-cp.env"
 
 # The seed ships on its own auto-mounting FAT partition on BOTH SKUs (the
 # running image finds it by FS label RASPUTIN-OS, not by number). We find its
@@ -208,7 +257,7 @@ qemu_boot() {
   # and never PXE, so the ROM is dead weight; dropping it beats adding a
   # package dependency to get a ROM we would not use.
   qemu_exec "$ARCH" "$IMG" "$BOOT_BUDGET" "$CONSOLE_LOG" \
-    "hostfwd=tcp:127.0.0.1:${HTTP_PORT}-:80,hostfwd=tcp:127.0.0.1:${HTTPS_PORT}-:443,hostfwd=udp:127.0.0.1:${DNS_PORT}-:53,hostfwd=tcp:127.0.0.1:${DNS_PORT}-:53"
+    "hostfwd=tcp:127.0.0.1:${HTTP_PORT}-:80,hostfwd=tcp:127.0.0.1:${HTTPS_PORT}-:443,hostfwd=udp:127.0.0.1:${DNS_PORT}-:53,hostfwd=tcp:127.0.0.1:${DNS_PORT}-:53,hostfwd=tcp:127.0.0.1:${SSH_PORT}-:22"
 }
 
 "prepare_$ARCH"
@@ -270,7 +319,7 @@ FB_AT=$(( $(date +%s) - START ))
 # HTTP-only) or a redirect to the HTTPS origin (api with native TLS treats :80
 # as a bootstrap/redirect surface) — accept both so the smoke doesn't break
 # across the api's HTTPS rollout.
-api=0 ui=0 NSUDP="" NSTCP="" RPID=""
+api=0 ui=0 https=0 NSUDP="" NSTCP="" RPID="" HS_FIRST=""
 if [ "$fb" = 1 ]; then
   i=0
   while [ "$i" -lt "$API_TRIES" ]; do
@@ -283,6 +332,17 @@ if [ "$fb" = 1 ]; then
     root=$(cat "$WORK/root.body" 2>/dev/null || true)
     case "$root" in *"<html"*|*"<!DOCTYPE"*) ui=1;; esac
     case "$rcode" in 301|302|307|308) ui=1;; esac
+    # The HTTPS listener, waited for as its own fact before anything is asked
+    # over it (HS_TRIES above). The first read's answer is kept, so the
+    # timings line shows whether :443 lagged :80 on this run.
+    i=0
+    while [ "$i" -lt "$HS_TRIES" ]; do
+      hs=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 2 "https://127.0.0.1:${HTTPS_PORT}/healthz" || true)
+      [ -n "$HS_FIRST" ] || HS_FIRST="${hs:-000}"
+      if [ "$hs" = "200" ]; then https=1; break; fi
+      die_if_qemu_gone "the api's HTTPS listener to answer /healthz"
+      i=$((i + 1)); sleep 2
+    done
     # Capture the api's WebAuthn RP ID while the VM is STILL RUNNING. It is
     # asserted further down with the console checks, but it can only be
     # COLLECTED here: everything below runs after the qemu kill, so an HTTP call
@@ -292,7 +352,7 @@ if [ "$fb" = 1 ]; then
     # leaf is signed by the per-installation Mesh CA. Unauthenticated on
     # purpose: first-user registration is open until a user exists, which is
     # this freshly-provisioned box.
-    RPID=$(curl -sk --max-time 10 -X POST "https://127.0.0.1:${HTTPS_PORT}/api/auth/register/begin" \
+    [ "$https" = 1 ] && RPID=$(curl -sk --max-time 10 -X POST "https://127.0.0.1:${HTTPS_PORT}/api/auth/register/begin" \
       -H 'Content-Type: application/json' \
       -d '{"name":"smoke","displayName":"Smoke Test"}' | jq -r '.publicKey.rp.id // empty')
     # CP nameserver (ADR-0004 §3/§8): ask the guest's own :53 for the cluster
@@ -408,12 +468,103 @@ if [ "$ok" = 1 ]; then
 fi
 KM_AT=$(( $(date +%s) - START ))
 
+# The secrets store's self-init (geekdojo/geekdojo-brain#804, TC-804-23).
+# rasputin-store-init.sh writes one "rasputin-store-init:" line to /dev/kmsg
+# when the store's first start ends, initialised or failed, and the store's
+# provisioner (#805, TC-805-35) one "rasputin-store-provision:" line when its
+# run after that start ends. Arrival of both is polled here, before the kill;
+# the outcomes are asserted after it.
+sirep=0
+if [ "$api" = 1 ]; then
+  i=0
+  while [ "$i" -lt "$SI_TRIES" ]; do
+    if grep -qa "rasputin-store-init: " "$CONSOLE_LOG" && grep -qa "rasputin-store-provision: " "$CONSOLE_LOG"; then sirep=1; break; fi
+    die_if_qemu_gone "the secrets store's self-init line"
+    i=$((i + 1)); sleep 2
+  done
+fi
+SI_AT=$(( $(date +%s) - START ))
+
+# The api reports the secrets store ready (geekdojo/geekdojo-brain#834). Its
+# only report is GET /api/alerts, which needs a session: a store in any state
+# but ready raises a "secret-store:" alert there. The smoke signs in through
+# first-run registration, open on this fresh control plane, then polls the
+# list here, before the kill, and the outcome is asserted after it. Only once
+# the store-init line is in: until then there is nothing to ask about.
+#
+# The SR_ variables are set before the gate because this script runs under
+# set -u, and the report reads all of them on every path.
+SR_STAGE="" SR_REASON="" SR_RC="" SR_LAST="" SR_AT=""
+SR_JAR="$WORK/store-ready.jar"
+# smoke_post URL BODYFILE OUTFILE JAR — api_session's POST.
+smoke_post() {
+  curl -sk -c "$4" -b "$4" --max-time 10 -H 'Content-Type: application/json' \
+    --data-binary "@$2" -o "$3" -w '%{http_code}' "$1" || true
+}
+# smoke_fetch — store_ready_wait's FETCH: prints the code and the body's path.
+smoke_fetch() {
+  rm -f "$WORK/alerts.body"
+  printf '%s %s\n' "$(curl -sk -b "$SR_JAR" --max-time 5 -o "$WORK/alerts.body" -w '%{http_code}' \
+    "https://127.0.0.1:${HTTPS_PORT}/api/alerts" || true)" "$WORK/alerts.body"
+}
+if [ "$sirep" = 1 ]; then
+  (umask 077; : > "$SR_JAR")
+  mkdir -p "$WORK/store-ready"
+  SR_STAGE="signin"
+  if SR_REASON=$(api_session smoke_post "https://127.0.0.1:${HTTPS_PORT}" "https://${RPID}" "$SR_JAR" "$WORK/store-ready" "$SOFT_PASSKEY"); then
+    SR_STAGE="wait"
+    store_ready_wait "$SR_TRIES" 2 smoke_fetch die_if_qemu_gone
+    SR_RC=$?
+  fi
+fi
+SR_AT=$(( $(date +%s) - START ))
+
 TOTAL=$(( $(date +%s) - START ))
+
+# The failure diagnostic. The store's and the api's own logs go to the guest's
+# journal, which does not reach the console, so a store or api check that
+# fails below would otherwise say only which fact never came true, never why.
+# When one of those facts is already false here, before the kill, the guest is
+# asked over SSH for those units' journal, the store's data directory and
+# outcome record, and the kernel's console loglevel and cmdline, and the answer
+# is printed in the job log. It is printed, never asserted on: the assertions
+# below still decide the verdict, and a diagnostic that cannot reach the guest
+# says so and changes nothing.
+guest_diag_needed() {
+  [ "$api" = 1 ] || return 0
+  [ "$https" = 1 ] || return 0
+  [ "$RPID" = "${CLUSTER_ID}.local" ] || return 0
+  [ "$sirep" = 1 ] || return 0
+  grep -aq 'rasputin-store-init: outcome=initialised' "$CONSOLE_LOG" || return 0
+  grep -aqE 'rasputin-store-(init|provision): outcome=failed' "$CONSOLE_LOG" && return 0
+  [ "$SR_STAGE" = wait ] && [ "$SR_RC" = 0 ] || return 0
+  return 1
+}
+guest_diag() {
+  echo "::group::guest diagnostic: the store's and the api's journal (a store or api check is about to fail)"
+  SSH_CALL_TIMEOUT=120 ssh_guest '
+    echo "== /proc/sys/kernel/printk (console loglevel first): $(cat /proc/sys/kernel/printk)"
+    echo "== /proc/cmdline: $(cat /proc/cmdline)"
+    echo "== ls -lan /var/lib/rasputin/openbao"; ls -lan /var/lib/rasputin/openbao
+    echo "== ls -lan /run/rasputin-store-init"; ls -lan /run/rasputin-store-init
+    echo "== /run/rasputin-store-init/outcome"; cat /run/rasputin-store-init/outcome
+    echo "== the kernel ring buffer: rasputin-store lines"; dmesg | grep rasputin-store
+    echo "== systemctl show openbao.service"
+    systemctl show openbao.service -p ActiveState -p SubState -p Result -p NRestarts -p ExecMainStatus
+    echo "== journalctl -b -u openbao.service -u rasputin-store-provision.service"
+    journalctl -b -o short-monotonic --no-pager -u openbao.service -u rasputin-store-provision.service
+    echo "== journalctl -b -u rasputin-api.service"
+    journalctl -b -o short-monotonic --no-pager -u rasputin-api.service
+  ' 2>&1 || echo "guest_diag: the guest did not answer over SSH (status $?), so there is no journal to show"
+  echo "::endgroup::"
+}
+if guest_diag_needed; then guest_diag; fi
 
 kill "$QPID" 2>/dev/null || true
 echo "----- last 60 lines of console -----"; tail -60 "$CONSOLE_LOG" || true
 echo "----- $ARCH smoke timings (seconds from qemu start) -----"
-echo "multi-user=${MU_AT}s firstboot=${FB_AT}s api+ui+dns=${API_AT}s atrest-verdict=${ATREST_AT}s tailscale-report=${TS_AT}s kernel-match=${KM_AT}s total(incl. 70s soak)=${TOTAL}s"
+echo "https /healthz on its first read after :80 answered: HTTP ${HS_FIRST:-not asked}"
+echo "multi-user=${MU_AT}s firstboot=${FB_AT}s api+ui+dns=${API_AT}s atrest-verdict=${ATREST_AT}s tailscale-report=${TS_AT}s kernel-match=${KM_AT}s store-init=${SI_AT}s store-ready=${SR_AT}s total(incl. 70s soak)=${TOTAL}s"
 
 # ------------------------------------------------------------ assertions ------
 [ "$ok" = 1 ] || { echo "::error::$ARCH image did not reach multi-user in QEMU"; exit 1; }
@@ -441,6 +592,13 @@ echo "seed read + provisioning completion confirmed in boot output"
 grep -q "rasputin-hostname: transient hostname set to ${CLUSTER_ID} (role=controlplane)" "$CONSOLE_LOG" \
   || { echo "::error::the controlplane hostname did not follow RASPUTIN_CLUSTER_ID — the seeded cluster name never reached the hostname (check firstboot node.env pass-through and rasputin-hostname.sh); the cluster would be unreachable at ${CLUSTER_ID}.local; see console artifact"; exit 1; }
 echo "per-cluster hostname (${CLUSTER_ID}) confirmed in boot output"
+
+# The HTTPS listener answered before anything was asked over it (HS_TRIES).
+if [ "$api" = 1 ] && [ "$https" != 1 ]; then
+  echo "::error::the api answered /healthz on :80 but its HTTPS listener on :443 never answered /healthz in $((HS_TRIES * 2))s (first read: HTTP ${HS_FIRST:-000}) — the browser surface is down: the api's clock gate never opened, its leaf did not load, or the listener failed to bind; see the api journal above"
+  exit 1
+fi
+[ "$api" = 1 ] && echo "api HTTPS listener answered /healthz on :443"
 
 # The api must DERIVE its WebAuthn identity from the same cluster id. This is
 # the assertion the naming work most needs: credentials bind to the RP ID, so a
@@ -579,6 +737,53 @@ case "$SK_LINE" in
   "rasputin-seal-key: outcome=created "*) echo "seal key created at boot: ${SK_LINE%% reason=*}" ;;
   "") echo "::error::no 'rasputin-seal-key:' line reached the serial console — nothing created the secrets store's seal key on a fresh control plane. Check rasputin-seal-key.service is in the overlay and enabled."; exit 1 ;;
   *) echo "::error::the seal-key oneshot did not create a key on a FRESH control plane: $SK_LINE"; exit 1 ;;
+esac
+
+# The store initialised itself (geekdojo/geekdojo-brain#804, TC-804-23). A
+# freshly flashed control plane's store starts on an empty data directory, so
+# its first start must end in exactly one "outcome=initialised" line and no
+# "outcome=failed" line. A missing line fails like a wrong one: silence means
+# the store never started, or nothing recorded what its first start did.
+SI_LINE="$(grep -ao 'rasputin-store-init: .*' "$CONSOLE_LOG" | tr -d '\r' | head -1)"
+if grep -aq 'rasputin-store-init: outcome=failed' "$CONSOLE_LOG"; then
+  echo "::error::the secrets store's self-init FAILED on a fresh control plane, and that store will refuse to unseal on every later start: $(grep -ao 'rasputin-store-init: outcome=failed.*' "$CONSOLE_LOG" | tr -d '\r' | head -1)"
+  exit 1
+fi
+case "$SI_LINE" in
+  "rasputin-store-init: outcome=initialised "*) echo "secrets store initialised itself at first start: ${SI_LINE%% reason=*}" ;;
+  "") echo "::error::no 'rasputin-store-init:' line reached the serial console in ${SI_AT}s — the secrets store's first start was never recorded on a fresh control plane: the api did not mint its leaf and restart the store, the store never started, or openbao.service lost its outcome hooks."; exit 1 ;;
+  *) echo "::error::the secrets store's first start on a fresh control plane did not report outcome=initialised: $SI_LINE"; exit 1 ;;
+esac
+
+# The api reports the store ready (geekdojo/geekdojo-brain#834), polled above,
+# before the kill. store_ready_report names the fact that never came true: the
+# check never ran, the sign-in failed, or the store never read ready.
+rm -f "$SR_JAR"
+store_ready_report "$SR_STAGE" "$SR_REASON" "$SR_RC" "$SR_LAST" "$SR_AT" || exit 1
+# The store's provisioner (geekdojo/geekdojo-brain#805, TC-805-35). After the
+# store's first start the provisioner runs once, and this release's
+# provision.tsv lists nothing, so its one line is outcome=unchanged. A failed
+# line fails the image; so does silence: then nothing provisioned, or nothing
+# recorded that it did.
+PV_LINE="$(grep -ao 'rasputin-store-provision: outcome=.*' "$CONSOLE_LOG" | tr -d '\r' | head -1)"
+if grep -aq 'rasputin-store-provision: outcome=failed' "$CONSOLE_LOG"; then
+  echo "::error::the secrets store's provisioner FAILED on a fresh control plane: $(grep -ao 'rasputin-store-provision: outcome=failed.*' "$CONSOLE_LOG" | tr -d '\r' | head -1)"
+  exit 1
+fi
+# Nor may systemd have failed a provisioner job with result 'dependency'
+# (ledger F-805-28). On a fresh flash the store is condition-skipped until the
+# api mints its leaves; a provisioner job queued beside that skipped start
+# fails its Requisite= and prints this on every first boot, even though a
+# later run of the store still provisions and reports outcome=unchanged.
+PV_DEP="Dependency failed for .*Secrets store provisioner|rasputin-store-provision\\.service: Job .* failed with result 'dependency'"
+if grep -aqE "$PV_DEP" "$CONSOLE_LOG"; then
+  echo "::error::systemd failed a secrets store provisioner job with result 'dependency' on a fresh control plane (F-805-28): something queued rasputin-store-provision.service beside a store start that never reached READY — openbao.service must start it only from its last ExecStartPost=: $(grep -aoE "$PV_DEP" "$CONSOLE_LOG" | tr -d '\r' | head -1)"
+  exit 1
+fi
+case "$PV_LINE" in
+  "rasputin-store-provision: outcome=unchanged "*) echo "secrets store provisioner ran after the store's first start: ${PV_LINE%% reason=*}" ;;
+  "") echo "::error::no 'rasputin-store-provision: outcome=' line reached the serial console in ${SI_AT}s — the store's provisioner never ran after its first start, or openbao.service lost the ExecStartPost= that starts rasputin-store-provision.service."; exit 1 ;;
+  *) echo "::error::the secrets store's provisioner did not report outcome=unchanged on a fresh control plane: $PV_LINE"; exit 1 ;;
 esac
 
 [ "$api" = 1 ] \

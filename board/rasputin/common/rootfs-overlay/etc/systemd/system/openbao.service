@@ -42,9 +42,39 @@ NotifyAccess=main
 User=openbao
 Group=openbao
 # The main config is baked into the image at /etc/rasputin/openbao/openbao.hcl
-# (#756). The seal fragment arrives as a credential and is named by its literal
-# path, because bao expands no variable in its config (#679 Q3).
-ExecStart=/usr/bin/bao server -config=/etc/rasputin/openbao/openbao.hcl -config=/run/credentials/openbao.service/seal.hcl
+# (#756), and the self-init stanzas beside it in init.json (#804): on a store
+# whose core is not initialised, bao creates the policies (their text from
+# /usr/share/rasputin/openbao-policy/, which the api tarball ships), the kv-v2
+# mount, cert auth and the api's, rotation job's and provisioner's roles,
+# once, and keeps no root token. init.json is FROZEN from the store-arming
+# release on (#805): a store runs it only on its first start, so a later
+# release adds mounts and roles through provision.tsv and the provisioner,
+# never here. The seal fragment arrives as a credential and is named by its
+# literal path, because bao expands no variable in its config (#679 Q3).
+ExecStart=/usr/bin/bao server -config=/etc/rasputin/openbao/openbao.hcl -config=/etc/rasputin/openbao/init.json -config=/run/credentials/openbao.service/seal.hcl
+# The self-init outcome (#804): one console and journal line and the record
+# /run/rasputin-store-init/outcome, which #833's reader turns into a job and an
+# alert. pre notes a start that begins on an empty data directory; started
+# (after READY, which on an empty store comes only after self-init) records
+# initialised; stopped records failed if that start ended first. `+` runs the
+# script as root outside this sandbox, because the record is root's; `-`
+# means nothing it does fails the store: it reports, it does not gate.
+ExecStartPre=-+/usr/lib/rasputin/store-init/rasputin-store-init.sh pre
+ExecStartPost=-+/usr/lib/rasputin/store-init/rasputin-store-init.sh started
+ExecStopPost=-+/usr/lib/rasputin/store-init/rasputin-store-init.sh stopped
+# Each start of the store that reaches READY starts its provisioner (#805),
+# which adds the mounts and roles a later release lists once this run has
+# unsealed. Started here, not pulled in by Wants=: a Wants= queues the
+# provisioner's job beside this unit's own, and on a first boot, when this unit
+# is condition-skipped, its Requisite= fails that job with result 'dependency'
+# and the console says "Dependency failed for Secrets store provisioner"
+# (systemd 258.7, ledger F-805-28). --no-block, because the provisioner is
+# ordered after this unit's start, which this line is part of. `+` runs
+# systemctl as root outside this sandbox; `-` means a refused start never fails
+# the store: the provisioner never gates it. The provisioner's job exists
+# before this start finishes, so rasputin-api.service, ordered after both,
+# still waits for it.
+ExecStartPost=-+/usr/bin/systemctl --no-block start rasputin-store-provision.service
 # Everything root writes for the store reaches it here (#754): the store's uid
 # can read none of these source directories, and only it and root can read the
 # copies systemd makes under /run/credentials/openbao.service/.
@@ -53,6 +83,14 @@ LoadCredential=seal.hcl:/var/lib/rasputin/openbao-seal/seal.hcl
 LoadCredential=store-ca.pem:/var/lib/rasputin/trust/store-ca.pem
 LoadCredential=server.pem:/var/lib/rasputin/tls/openbao-server/leaf.pem
 LoadCredential=server.key:/var/lib/rasputin/tls/openbao-server/leaf.key
+# The seal-key rotation's staged key (geekdojo/geekdojo-brain#830). A DIRECTORY
+# source: systemd loads every file in it as seal-rotation_<file name>, and an
+# empty directory loads nothing, so the key is optional without a second file
+# source, which fails the unit at the CREDENTIALS step when the file is absent.
+# The api writes rotation/<key id> and a seal fragment naming
+# /run/credentials/openbao.service/seal-rotation_<key id>; tmpfiles makes the
+# directory on every boot, and a missing directory fails the unit (fail closed).
+LoadCredential=seal-rotation:/var/lib/rasputin/openbao-seal/rotation
 # A process exit is a fact, so the store restarts on it. systemd's own restart
 # delay and start limit apply (100 ms; 5 starts in 10 s): this unit chooses no
 # duration (ARCH-FACTS). After a crash loop the unit sits in `failed`, nothing
@@ -67,6 +105,13 @@ ProtectSystem=strict
 ReadWritePaths=/var/lib/rasputin/openbao /var/lib/rasputin/openbao-audit
 PrivateTmp=yes
 PrivateDevices=yes
+# PrivateDevices= also closes the unit's device policy, a cgroup property that
+# no `+` prefix lifts, so without this line the outcome hooks above cannot
+# open /dev/kmsg and their line never reaches the console (measured on the
+# store-arming boot smoke, geekdojo/geekdojo-brain#804). It grants the store
+# nothing it can use: bao's private /dev has no kmsg node, bao has no
+# capability to make one, and the host's /dev/kmsg is writable by root alone.
+DeviceAllow=/dev/kmsg w
 NoNewPrivileges=yes
 # No capabilities at all: OpenBao removed mlock, and upstream's CAP_SYSLOG is
 # unused.
