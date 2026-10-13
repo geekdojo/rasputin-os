@@ -96,6 +96,13 @@ ProtectSystem=strict
 ReadWritePaths=/var/lib/rasputin/openbao /var/lib/rasputin/openbao-audit
 PrivateTmp=yes
 PrivateDevices=yes
+# PrivateDevices= also closes the unit's device policy, a cgroup property that
+# no `+` prefix lifts, so without this line the outcome hooks above cannot
+# open /dev/kmsg and their line never reaches the console (measured on the
+# store-arming boot smoke, geekdojo/geekdojo-brain#804). It grants the store
+# nothing it can use: bao's private /dev has no kmsg node, bao has no
+# capability to make one, and the host's /dev/kmsg is writable by root alone.
+DeviceAllow=/dev/kmsg w
 NoNewPrivileges=yes
 # No capabilities at all: OpenBao removed mlock, and upstream's CAP_SYSLOG is
 # unused.

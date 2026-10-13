@@ -161,6 +161,7 @@ $(values "$D" "$1" "$2")
 	exactly Service ReadWritePaths '/var/lib/rasputin/openbao /var/lib/rasputin/openbao-audit'
 	exactly Service PrivateTmp yes
 	exactly Service PrivateDevices yes
+	exactly Service DeviceAllow '/dev/kmsg w'
 	exactly Service NoNewPrivileges yes
 	exactly Service CapabilityBoundingSet ''
 	exactly Service LimitCORE 0

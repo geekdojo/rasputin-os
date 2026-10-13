@@ -75,6 +75,9 @@
 #      crashes mid-wait stops it too, into its start limit with NRestarts
 #      still StartLimitBurst: Restart=always queues a restart job on every
 #      exit, the refused last one included, and PartOf= carries it (F-805-19).
+#  11  the store's first start with the console redirect below removed: the
+#      outcome writer's line reaches the real /dev/kmsg from inside the
+#      store's unit, its device policy included (TC-804-23's console path)
 # The provisioner runs in every scenario from 2 on, as on a node: openbao's
 # Wants= pulls it in. Scenario 3's first boot carries TC-805-27's empty
 # provision.tsv half, and scenario 7 its four policies and three roles
@@ -1378,6 +1381,34 @@ echo "  -- no token in any unit's journal (TC-805-28)"
 tokens=$(inside "journalctl --no-pager -o cat | grep -c -E 'hv[sbr]\.[A-Za-z0-9]{24}|(^|[^A-Za-z0-9])[sbr]\.[A-Za-z0-9]{24}([^A-Za-z0-9]|\$)'")
 check "TC-805-28 no token shape in the journal after every provisioner run (got ${tokens:-?} lines)" "$(yes_if [ "${tokens:-}" = 0 ])"
 inside "systemctl stop rasputin-api.service openbao.service" >/dev/null 2>&1
+
+echo
+echo "11. the self-init line reaches the real /dev/kmsg from inside the store's unit (TC-804-23's console path)"
+# Every scenario above sends the outcome writer's console line to a file
+# (harness-console.conf), because in a privileged container /dev/kmsg is the
+# host's. A file is not a device, so those scenarios cannot see the store
+# unit's device policy, and the store-arming boot smoke found the line missing
+# on both arches with the journal saying the hook "could not be written to
+# /dev/kmsg" (geekdojo/geekdojo-brain#804, release run 38334384432). This start
+# drops the redirect and writes where a node writes. The line lands in the
+# runner's kernel log, which the job's VM discards.
+inside "systemctl stop openbao.service; systemctl reset-failed openbao.service $PROV 2>/dev/null
+rm -f /etc/systemd/system/openbao.service.d/harness-console.conf /etc/systemd/system/openbao.service.d/harness-inspector.conf
+install -m 0644 /overlay/etc/rasputin/openbao/provision.tsv /etc/rasputin/openbao/provision.tsv
+rm -rf /var/lib/rasputin/openbao/* /var/lib/rasputin/openbao/.[!.]* /var/lib/rasputin/openbao-audit/* /run/rasputin-store-init
+systemctl daemon-reload" >/dev/null 2>&1
+check "the data directory is empty and the console redirect is gone before the start" \
+	"$(yes_if eval '[ -z "$(inside "ls -A /var/lib/rasputin/openbao")" ] && [ -z "$(inside "systemctl show openbao.service -p Environment --value" | grep RASPUTIN_STOREINIT_KMSG)" ]')"
+C11=$(cursor)
+inside "systemctl start openbao.service" >/dev/null 2>&1
+j11=$(journal_after "$C11")
+check "TC-804-23 the store's first start recorded initialised (got '$(inside "sed -n 's/^outcome=//p' /run/rasputin-store-init/outcome")')" \
+	"$(yes_if [ "$(inside "sed -n 's/^outcome=//p' /run/rasputin-store-init/outcome")" = initialised ])"
+check "TC-804-23 the outcome writer did not report that /dev/kmsg refused its line" \
+	"$(yes_if not_contains 'could not be written to /dev/kmsg' "$j11")" "$(printf '%s\n' "$j11" | grep 'rasputin-store-init:')"
+km=$(inside "dmesg" | grep -c 'rasputin-store-init: outcome=initialised' || true)
+check "TC-804-23 the kernel log holds the rasputin-store-init: outcome=initialised line (got ${km:-0})" "$(yes_if [ "${km:-0}" -ge 1 ])"
+inside "systemctl stop openbao.service" >/dev/null 2>&1
 
 echo
 if [ "$fails" -eq 0 ]; then
