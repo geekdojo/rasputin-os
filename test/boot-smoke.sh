@@ -772,7 +772,7 @@ if grep -aq 'rasputin-store-provision: outcome=failed' "$CONSOLE_LOG"; then
 fi
 case "$PV_LINE" in
   "rasputin-store-provision: outcome=unchanged "*) echo "secrets store provisioner ran after the store's first start: ${PV_LINE%% reason=*}" ;;
-  "") echo "::error::no 'rasputin-store-provision: outcome=' line reached the serial console in ${SI_AT}s — the store's provisioner never ran after its first start, or openbao.service lost its Wants= on rasputin-store-provision.service."; exit 1 ;;
+  "") echo "::error::no 'rasputin-store-provision: outcome=' line reached the serial console in ${SI_AT}s — the store's provisioner never ran after its first start, or openbao.service lost the ExecStartPost= that starts rasputin-store-provision.service."; exit 1 ;;
   *) echo "::error::the secrets store's provisioner did not report outcome=unchanged on a fresh control plane: $PV_LINE"; exit 1 ;;
 esac
 

@@ -12,9 +12,11 @@
 # bind those roles only to the pre-shipped rasputin-bindable policy. It
 # authors no policy and changes no fixed mount, role or policy.
 #
-# PHASES, in rasputin-store-provision.service's order. The unit is pulled in
-# by openbao.service's start, needs it active (Requisite=) and is stopped with
-# it (PartOf=), so it runs once per run of the store, and holds
+# PHASES, in rasputin-store-provision.service's order. The unit is started by
+# openbao.service's last ExecStartPost=, once the store's run has reached
+# READY, never pulled in by its Wants= (a condition-skipped store would fail
+# that job, ledger F-805-28). It needs the store active (Requisite=) and is
+# stopped with it (PartOf=), so it runs once per run of the store, and holds
 # rasputin-api.service (Before=) until it exits.
 #   pre      ExecStartPre=-+   root. Makes the record directory, removes a
 #            stale result, writes the pending marker.
