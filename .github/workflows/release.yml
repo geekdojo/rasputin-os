@@ -495,8 +495,9 @@ jobs:
           sudo apt-get update
           # bind9-dnsutils: dig, for the CP-nameserver assertion (the api's DNS
           # listener is queried through a hostfwd, not grepped). sfdisk + jq are
-          # preinstalled on the runner image.
-          sudo apt-get install -y --no-install-recommends qemu-system-x86 ovmf mtools bind9-dnsutils
+          # preinstalled on the runner image. e2fsprogs: debugfs, which the
+          # growpart leg uses to set the clock floor between its two boots.
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 ovmf mtools bind9-dnsutils e2fsprogs
       - uses: actions/download-artifact@v4
         with:
           pattern: n100-*
@@ -541,8 +542,9 @@ jobs:
         run: |
           sudo apt-get update
           # qemu-system-arm ships qemu-system-aarch64. No OVMF: the `virt` guest
-          # is booted with -kernel, not through UEFI.
-          sudo apt-get install -y --no-install-recommends qemu-system-arm mtools bind9-dnsutils
+          # is booted with -kernel, not through UEFI. e2fsprogs: debugfs, which
+          # the growpart leg uses to set the clock floor between its two boots.
+          sudo apt-get install -y --no-install-recommends qemu-system-arm mtools bind9-dnsutils e2fsprogs
           qemu-system-aarch64 --version | head -1
       - uses: actions/download-artifact@v4
         with:

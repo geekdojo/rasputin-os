@@ -894,10 +894,33 @@ echo "at-rest modes audited clean on the booted machine (PASS checked=$ATREST_CH
 #   restrict=on           the guest cannot reach NTP, so timesyncd never syncs
 #                         and the kernel never writes the RTC back. The SSH
 #                         forward still works: restrict does not affect hostfwd.
-# QEMU reboots itself on the guest's reboot. The leg waits on facts: the main
-# QEMU having exited (it holds SSH_PORT), then `already-full` in growpart.log,
-# which only the post-grow boot writes, then that boot's seal-key outcome line,
-# which is not ordered against growpart. QEMU's BOOT_BUDGET bounds the process.
+#
+# THE ROTATION PRECONDITION, AND WHERE IT COMES FROM. Assertion (f) needs
+# journald to rotate on the clock-floor jump, so boot 2's first entry has to be
+# dated before boot 1's last. Until now the leg got that from shutdown timing.
+# Boot 2 restores the floor that clock-save's ExecStop writes in boot 1's
+# shutdown, and boot 1's journal ran on past that save only because the reboot
+# stalled about 90s on rasputin-atrest-audit.service: its INT/TERM trap removed
+# the work directory and then let the audit carry on, so systemd waited out the
+# stop timeout and SIGKILLed it. A reboot that missed the audit left a margin
+# of about -0.6s, no rotation, and (f) failed. That stall was a product defect,
+# not a test fixture, and the audit now exits on TERM.
+#
+# So the leg forges the floor instead, and the precondition no longer depends
+# on shutdown timing. Boot 1 runs with -no-reboot, so growpart's reboot ends
+# QEMU and boot 2 does not start. On the host, debugfs then sets
+# /var/lib/rasputin/clock on the image's persistent filesystem to the value
+# clock-save's ExecStart wrote early in boot 1, read from boot 1's console. Boot
+# 1 logged entries after that save, so boot 2's floor is behind boot 1's last
+# entry by construction. Boot 2 then runs as an ordinary QEMU boot of the same
+# image, and (a)-(i) read it as before. The leg prints the forged value and the
+# console line it came from.
+#
+# The leg waits on facts: the main QEMU having exited (it holds SSH_PORT), then
+# boot 1's QEMU exiting on growpart's reboot, with a grown: line in
+# growpart.log, then `already-full` in growpart.log, which only the post-grow
+# boot writes, then that boot's seal-key outcome line, which is not ordered
+# against growpart. QEMU's BOOT_BUDGET bounds each of the two processes.
 
 # The main QEMU was killed above; its exit frees SSH_PORT for the leg's forward.
 wait "$QPID" 2>/dev/null
@@ -919,12 +942,77 @@ else
 fi
 # die_if_qemu_gone reads QPID and CONSOLE_LOG: from here on they are the leg's.
 # The main boot's console stays where the workflow uploads it from.
-CONSOLE_LOG="$WORK/grow-console.log"
+GROW_FWD="restrict=on,hostfwd=tcp:127.0.0.1:${SSH_PORT}-:22"
+CONSOLE_LOG="$WORK/grow1-console.log"
 : > "$CONSOLE_LOG"
-qemu_exec "$ARCH" "$GROW_IMG" "$BOOT_BUDGET" "$CONSOLE_LOG" \
-  "restrict=on,hostfwd=tcp:127.0.0.1:${SSH_PORT}-:22" -rtc base=2000-01-01T00:00:00 &
+qemu_exec "$ARCH" "$GROW_IMG" "$BOOT_BUDGET" "$CONSOLE_LOG" "$GROW_FWD" \
+  -rtc base=2000-01-01T00:00:00 -no-reboot &
 QPID=$!
-echo "growpart leg: booting $GROW_IMG (+8G) with the RTC at 2000-01-01 and no route out"
+echo "growpart leg: boot 1 of $GROW_IMG (+8G) with the RTC at 2000-01-01, no route out, and -no-reboot"
+# Boot 1 ends when its QEMU exits: with -no-reboot, growpart's reboot does that
+# with status 0. 124 is `timeout` reaching BOOT_BUDGET.
+wait "$QPID"; GROW_B1_ST=$?
+QPID=""
+case "$GROW_B1_ST" in
+  0) ;;
+  124) echo "::error::growpart leg ($ARCH): boot 1 did not reboot before qemu's budget expired"
+       echo "----- boot 1's console (whole file) -----"; cat "$CONSOLE_LOG" || true
+       exit 1 ;;
+  *) echo "::error::growpart leg ($ARCH): boot 1's qemu exited with status $GROW_B1_ST, not on a guest reboot"
+     echo "----- boot 1's console (whole file) -----"; cat "$CONSOLE_LOG" || true
+     exit 1 ;;
+esac
+
+# The persistent filesystem, found by the label rasputin-init mounts it by.
+PERSIST_OFF=""
+for _off in $(sfdisk -J "$GROW_IMG" | jq -r '.partitiontable.partitions[] | .start * 512'); do
+  if [ "$(blkid -p -O "$_off" -s LABEL -o value "$GROW_IMG" 2>/dev/null)" = persistent ]; then
+    PERSIST_OFF=$_off; break
+  fi
+done
+if [ -z "$PERSIST_OFF" ]; then
+  echo "::error::growpart leg ($ARCH): no partition of $GROW_IMG holds a filesystem labelled persistent after boot 1"
+  sfdisk -J "$GROW_IMG"
+  exit 1
+fi
+PERSIST_FS="$GROW_IMG?offset=$PERSIST_OFF"
+# debugfs prints its banner on stderr and `cat` writes the file to stdout.
+pfs_cat() { debugfs -R "cat $1" "$PERSIST_FS" 2>/dev/null; }
+GROW_B1_LOG=$(pfs_cat /growpart.log)
+if ! printf '%s\n' "$GROW_B1_LOG" | awk '$2 == "grown:" { g = 1 } END { exit !g }'; then
+  echo "::error::growpart leg ($ARCH): boot 1 ended without a grown: line in growpart.log, so its exit was not growpart's reboot"
+  echo "----- growpart.log after boot 1 -----"; printf '%s\n' "${GROW_B1_LOG:-(empty or unreadable)}"
+  echo "----- boot 1's console (whole file) -----"; cat "$CONSOLE_LOG" || true
+  exit 1
+fi
+
+# The forged floor: clock-save's first save in boot 1, its ExecStart.
+FLOOR_SAVE=$(tr -d '\r' < "$CONSOLE_LOG" | grep -m 1 -E 'rasputin-clock-save: saved clock [0-9]{10} ')
+FLOOR_FORGED=$(printf '%s\n' "$FLOOR_SAVE" | sed -n 's/.*rasputin-clock-save: saved clock \([0-9]\{10\}\) .*/\1/p')
+if [ -z "$FLOOR_FORGED" ]; then
+  echo "::error::growpart leg ($ARCH): boot 1's console holds no 'rasputin-clock-save: saved clock' line, so there is no floor from boot 1 to forge"
+  echo "----- boot 1's console (whole file) -----"; cat "$CONSOLE_LOG" || true
+  exit 1
+fi
+FLOOR_LEFT=$(pfs_cat /clock)
+if ! { printf '%s\n' "$FLOOR_FORGED" > "$WORK/forged-clock" && chmod 0644 "$WORK/forged-clock"; }; then
+  echo "::error::could not write $WORK/forged-clock"; exit 1
+fi
+# debugfs exits 0 when a command fails, so the write is judged by reading back.
+printf 'rm /clock\nwrite %s /clock\n' "$WORK/forged-clock" | debugfs -w -f - "$PERSIST_FS" >/dev/null 2>&1
+FLOOR_READ=$(pfs_cat /clock)
+if [ "$FLOOR_READ" != "$FLOOR_FORGED" ]; then
+  echo "::error::growpart leg ($ARCH): debugfs did not set /var/lib/rasputin/clock to $FLOOR_FORGED: it reads '${FLOOR_READ}'"
+  exit 1
+fi
+echo "growpart leg ($ARCH) clock: forged floor $FLOOR_FORGED into /var/lib/rasputin/clock (boot 1 left ${FLOOR_LEFT:-nothing}), from boot 1's first save: $FLOOR_SAVE"
+
+CONSOLE_LOG="$WORK/grow2-console.log"
+: > "$CONSOLE_LOG"
+qemu_exec "$ARCH" "$GROW_IMG" "$BOOT_BUDGET" "$CONSOLE_LOG" "$GROW_FWD" \
+  -rtc base=2000-01-01T00:00:00 &
+QPID=$!
+echo "growpart leg: boot 2 of $GROW_IMG on the forged floor"
 
 GROW_LAST=""   # growpart.log as of its last successful read
 # leg_poll WHAT CMD — run CMD in the guest until it succeeds. If QEMU exits
@@ -973,9 +1061,9 @@ esac
 [ -n "$B1_LAST" ] && [ -n "$B2_FIRST" ] || MARGIN="unknown"
 echo "growpart leg ($ARCH) clock: boot 1 last __REALTIME_TIMESTAMP=${B1_LAST:-none} boot 2 first __REALTIME_TIMESTAMP=${B2_FIRST:-none} margin (boot 1 last - boot 2 first)=${MARGIN}us"
 # Where the margin comes from, always recorded. Boot 2's clock starts at the
-# floor that clock-save's ExecStop wrote in boot 1's shutdown, so the margin is
-# boot 1's tail after that save less boot 2's lead to its first entry. The
-# lines below name the save, the floor boot 2 restored, and every gap of a
+# floor the leg forged from clock-save's ExecStart in boot 1, so the margin is
+# boot 1's run after that save less boot 2's lead to its first entry. The
+# lines below name the saves, the floor boot 2 restored, and every gap of a
 # second or more in boot 1's shutdown, with the entry that ended it.
 B1_JOURNAL="$WORK/grow-boot1.journal"
 ssh_guest 'journalctl -b -1 -o short-unix --no-pager' > "$B1_JOURNAL" 2>/dev/null || : > "$B1_JOURNAL"
@@ -1013,7 +1101,7 @@ ssh_guest "journalctl -b 0 -o cat --no-pager | grep -qF 'rasputin-seal-key: outc
 echo "growpart leg (e): journalctl -b 0 holds rasputin-seal-key: outcome=untouched"
 # (f) the floor rotation happened, so this run exercised the deletion path.
 ssh_guest "journalctl -b 0 --no-pager | grep -qF 'Realtime clock jumped backwards'" \
-  || leg_fail "journalctl -b 0 has no 'Realtime clock jumped backwards' line: the clock-floor rotation was not reproduced (boot 1 last __REALTIME_TIMESTAMP=${B1_LAST:-none}, boot 2 first __REALTIME_TIMESTAMP=${B2_FIRST:-none}, margin ${MARGIN}us), so this run did not exercise the deletion path"
+  || leg_fail "journalctl -b 0 has no 'Realtime clock jumped backwards' line: the clock-floor rotation was not reproduced (boot 1 last __REALTIME_TIMESTAMP=${B1_LAST:-none}, boot 2 first __REALTIME_TIMESTAMP=${B2_FIRST:-none}, margin ${MARGIN}us, forged floor ${FLOOR_FORGED}), so this run did not exercise the deletion path"
 echo "growpart leg (f): journalctl -b 0 holds Realtime clock jumped backwards"
 # (g) the new ordering put the grow before the bind mount.
 GROWFS_EXIT=$(ssh_guest 'systemctl show -P ExecMainExitTimestampMonotonic systemd-growfs@var-lib-rasputin.service' 2>/dev/null | tr -d '\r')
