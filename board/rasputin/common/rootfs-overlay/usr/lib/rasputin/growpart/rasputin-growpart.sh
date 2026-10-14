@@ -33,9 +33,13 @@ log() { echo "rasputin-growpart: $*"; }
 GROWPART=/usr/lib/rasputin/growpart/growpart
 
 # Every run's outcome is also appended to a breadcrumb log on the persistent
-# partition itself — the journal is volatile, so the one boot where the grow
-# actually happens is unreadable after the post-grow reboot (#2). The first
-# token after the timestamp is a machine-readable outcome keyword:
+# partition itself (#2). The journal is persistent, and since
+# geekdojo/geekdojo-brain#853 the boot where the grow happens is kept too: the
+# next boot's journal flush waits for growfs (rasputin-journal-store.service),
+# so the vacuum no longer runs on the ungrown partition and deletes it. The
+# breadcrumb stays as the record that survives even when growfs fails and the
+# journal stays starved. The first token after the timestamp is a
+# machine-readable outcome keyword:
 #   grown | already-full | deferred-trial | skipped | failed
 # Logging must never fail (or fail) the grow: the whole append is || true, and
 # timestamps may be pre-NTP fake time on a no-RTC first boot — post-mortems
@@ -55,7 +59,7 @@ crumb() {
 	} 2>/dev/null || true
 }
 # set -eu aborts leave no outcome line — catch them so a wedged grow is visible
-# in the breadcrumb, not just the (lost) journal. Non-zero exits only: the
+# in the breadcrumb, not just the journal. Non-zero exits only: the
 # not-a-mount path exits 0 without crumbing (nowhere durable to write), and
 # crumb sets CRUMBED, which disarms this for the post-reboot SIGTERM of the
 # sleep below.
@@ -143,8 +147,9 @@ dos)
 esac
 sync
 
-# The grown line must land (and sync) BEFORE the reboot — it's the one outcome
-# whose journal is guaranteed lost.
+# The grown line must land (and sync) BEFORE the reboot. The journal keeps this
+# boot once the next boot's growfs succeeds (#853); this line is the record that
+# survives when it does not.
 crumb "grown: $PARTDEV $((P_SZ / 2048))MiB -> $(((P_SZ + TAIL) / 2048))MiB (table=$PTTYPE, part $PARTNUM); rebooting"
 sync
 log "table extended; rebooting so the kernel re-reads it and growfs expands the fs"

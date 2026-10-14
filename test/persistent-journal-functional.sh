@@ -32,6 +32,9 @@
 #   3  the retention cap this image sets is the cap real journald applies
 #   4  tmpfiles: the shipped file wins over stock systemd.conf; the same line in
 #      rasputin.conf does not
+#   5  the grow reboot (geekdojo/geekdojo-brain#853): a rotation in the boot
+#      after the provisioning boot deletes that boot's archive on the ungrown
+#      512M store (5a), and keeps it once the store is grown first (5b)
 #
 # NOT COVERED, and only a booted node can cover it: that the unit's ordering
 # actually puts the bind mount in front of systemd-journal-flush.service on
@@ -111,8 +114,16 @@ start_journald() {
 	inside 'cat /tmp/journald.log'
 	return 1
 }
+# stop_journald — and wait until the daemon is gone, so the next start finds its
+# files closed. The container's PID 1 is sleep, which reaps nothing, so a
+# stopped journald lingers as a zombie: gone or Z is the fact waited on.
 stop_journald() {
-	inside 'kill "$(cat /run/journald.pid 2>/dev/null)" 2>/dev/null; rm -f /run/journald.pid' >/dev/null 2>&1
+	inside 'p=$(cat /run/journald.pid 2>/dev/null) || exit 0; kill "$p" 2>/dev/null
+		i=0; while [ "$i" -lt 100 ] && [ -d "/proc/$p" ] && ! grep -q ") Z" "/proc/$p/stat" 2>/dev/null; do
+			i=$((i + 1)); sleep 0.1; done
+		rm -f /run/journald.pid
+		[ ! -d "/proc/$p" ] || grep -q ") Z" "/proc/$p/stat" 2>/dev/null' >/dev/null 2>&1 \
+		|| echo "  (systemd-journald did not exit within 10s of SIGTERM)"
 	return 0
 }
 # journal_path — where journald says it is writing. The single fact this whole
@@ -243,6 +254,71 @@ inside 'chmod 2755 /var/log/journal && chgrp systemd-journal /var/log/journal' >
 inside 'systemd-tmpfiles --create' >/dev/null 2>&1
 check "the same line in rasputin.conf LOSES to systemd.conf (why the name sorts last)" \
 	"$(yes_if [ "$(mode /var/log/journal)" = 2755 ])" "mode=$(mode /var/log/journal)"
+
+echo
+echo "5. the grow reboot: the provisioning boot's journal and the store's size (#853)"
+# On a fresh flash the persistent partition is 512M when the provisioning boot
+# writes its journal, and growpart reboots before x-systemd.growfs grows it. In
+# the next boot journald flushes into the provisioning boot's system.journal,
+# the clock floor dates this boot's first entry earlier than that file's last,
+# and journald rotates it. The vacuum that follows measures the filesystem: on
+# 512M, SystemKeepFree binds and the archive is deleted (5a). The fix orders the
+# bind mount, and so the flush, after growfs, so the vacuum sees the grown
+# filesystem (5b). Here a tmpfs of each size is the partition, `journalctl
+# --rotate` is the clock-jump rotation, and a fresh boot ID bind-mounted over
+# the kernel's makes each journald start a separate boot.
+CREATED='rasputin-seal-key: outcome=created reason="scenario 5"'
+# new_boot — what journald reads as this boot's ID, fresh. Read at its start.
+new_boot() {
+	inside 'umount /proc/sys/kernel/random/boot_id 2>/dev/null; cat /proc/sys/kernel/random/uuid >/run/boot-id-5 \
+		&& mount --bind /run/boot-id-5 /proc/sys/kernel/random/boot_id' >/dev/null 2>&1
+}
+created_count() { inside "journalctl $1 -o cat --no-pager 2>/dev/null | grep -cF 'rasputin-seal-key: outcome=created'"; }
+archives() { inside 'find /srv/p5/journal -name "system@*.journal" | wc -l'; }
+# grow_boot SIZE GROW — the provisioning boot on a SIZE store, then the next
+# boot, with the store grown to GROW first when GROW is not "-", flushed. The
+# caller rotates, after checking the line is still readable before it.
+grow_boot() {
+	inside "umount /var/log/journal 2>/dev/null; umount /srv/p5 2>/dev/null; mkdir -p /srv/p5 \
+		&& mount -t tmpfs -o size=$1 tmpfs /srv/p5 && mkdir -m 0700 /srv/p5/journal \
+		&& mount -o bind /srv/p5/journal /var/log/journal" >/dev/null || return 1
+	new_boot
+	start_journald || return 1
+	inside "printf '%s\n' '$CREATED' | systemd-cat -t rasputin-seal-key && journalctl --flush" >/dev/null 2>&1
+	stop_journald
+	[ "$2" = - ] || inside "mount -o remount,size=$2 /srv/p5" >/dev/null || return 1
+	new_boot
+	start_journald || return 1
+	inside 'journalctl --flush' >/dev/null 2>&1
+	return 0
+}
+rotate() { inside 'journalctl --rotate' >/dev/null 2>&1; }
+grow_boot 512M - || exit 1
+check "TC-853-03 (5a): before the rotation the created line is readable once" \
+	"$(yes_if [ "$(created_count '')" = 1 ])" "count=$(created_count '')"
+rotate
+STORE5=$(inside 'find /srv/p5/journal -type f -name "*.journal" | sed "s,.*/,,"')
+check "TC-853-03 (5a): on the 512M store the rotation leaves no archived system@*.journal" \
+	"$(yes_if [ "$(archives)" = 0 ])" "store: $STORE5"
+check "TC-853-03 (5a): and the created line is readable 0 times across all boots" \
+	"$(yes_if [ "$(created_count '')" = 0 ])" "count=$(created_count '') store: $STORE5"
+echo "  ls of the 512M store: $(echo $STORE5)"
+stop_journald
+
+grow_boot 512M 8G || exit 1
+rotate
+STORE5=$(inside 'find /srv/p5/journal -type f -name "*.journal" | sed "s,.*/,,"')
+check "TC-853-04 (5b): grown to 8G before the flush, the rotation keeps the archive" \
+	"$(yes_if [ "$(archives)" -ge 1 ])" "store: $STORE5"
+check "TC-853-04 (5b): the created line is readable exactly once across all boots" \
+	"$(yes_if [ "$(created_count '')" = 1 ])" "count=$(created_count '') store: $STORE5"
+check "TC-853-04 (5b): in the earlier boot (-b -1)" \
+	"$(yes_if [ "$(created_count '-b -1')" = 1 ])" "-b -1 count=$(created_count '-b -1'); $(inside 'journalctl --list-boots --no-pager 2>&1')"
+check "TC-853-04 (5b): and not in the current one (-b 0)" \
+	"$(yes_if [ "$(created_count '-b 0')" = 0 ])" "-b 0 count=$(created_count '-b 0')"
+echo "  ls of the grown store: $(echo $STORE5)"
+stop_journald
+inside 'umount /var/log/journal; umount /srv/p5; umount /proc/sys/kernel/random/boot_id' >/dev/null 2>&1
 
 echo
 if [ "$fails" -eq 0 ]; then

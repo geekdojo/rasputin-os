@@ -641,6 +641,84 @@ for SH in $TEST_SHELLS; do
 	store_cases
 done
 
+# ── a TERM ends the audit, cleans up, and writes no verdict ────────────────
+# geekdojo/geekdojo-brain#853. systemd stops the unit with SIGTERM when a
+# shutdown overlaps the audit. The trap used to remove the work directory and
+# then let the script carry on, so the stop waited out the timeout until
+# SIGKILL. Here the audit is held mid-run in its inventory loop: the inventory
+# is a FIFO, and the case's open of its write end returns only once the audit
+# has opened it for that loop, with its work directory made and its traps set.
+# The case sends TERM, then writes one comment line and closes the FIFO, so
+# the audit leaves `read` in every ordering of the signal against it and a
+# pending trap runs. It then waits on the audit's exit.
+#
+# The old trap fails it under every shell: the script carries on with its work
+# directory gone, prints "rasputin-atrest: FAIL failures= checked= first=", a
+# verdict over nothing, and exits 2 rather than 143 (measured in ubuntu:24.04
+# against sh, dash, bash and busybox sh).
+#
+# Why a FIFO and not a stub tool: the CI runner's busybox sh runs its own
+# applets ahead of PATH, so a stubbed `find` or `mktemp` never runs under it,
+# and busybox ash is the image's /bin/sh. The FIFO is read by the shell's own
+# `read`, which no shell resolves through PATH. For the same reason the work
+# directory is pinned two ways: TMPDIR for mktemp implementations that honour
+# it (busybox, coreutils), and a PATH stub for macOS's, which does not.
+#
+# Every wait is on a fact: the FIFO's open, and the audit's exit. TERM_BOUND is
+# a ceiling the watchdog enforces, not a sleep. When it fires it kills the audit
+# and opens the FIFO's read end, so a setup that never reached the loop fails
+# the case instead of hanging the suite.
+TERM_BOUND=30
+REAL_MKTEMP=$(command -v mktemp)
+term_case() {
+	_t=$(mktemp -d "$TMP/term.XXXXXX")
+	mkdir -p "$_t/stub" "$_t/root" "$_t/tmp"
+	mkfifo "$_t/inventory"
+	printf '#!/bin/sh\nexec "%s" -d "%s/work.XXXXXX"\n' \
+		"$REAL_MKTEMP" "$_t/tmp" >"$_t/stub/mktemp"
+	chmod 0755 "$_t/stub/mktemp"
+	if [ "$SH" = busybox_sh ]; then
+		set -- busybox sh
+	else
+		set -- "$SH"
+	fi
+	PATH="$_t/stub:$PATH" TMPDIR="$_t/tmp" \
+		"$@" "$AUDIT" -i "$_t/inventory" -r "$_t/root" -u "$ME" -g "$MYGID" -q \
+		>"$_t/out" 2>&1 &
+	_apid=$!
+	(
+		# Stopped once the audit has exited: the trap takes its sleep with it.
+		trap 'kill "$_s" 2>/dev/null; exit 0' TERM
+		sleep "$TERM_BOUND" &
+		_s=$!
+		wait "$_s" || exit 0
+		kill -KILL "$_apid" 2>/dev/null
+		: 0<>"$_t/inventory"
+	) >/dev/null 2>&1 &
+	_wd=$!
+	exec 9>"$_t/inventory"
+	_work=$(ls "$_t/tmp")
+	kill -TERM "$_apid" 2>/dev/null
+	# SIGPIPE ignored: after the watchdog the FIFO may have no reader left.
+	(trap '' PIPE; echo '#' >&9) 2>/dev/null
+	exec 9>&-
+	wait "$_apid"; _rc=$?
+	kill "$_wd" 2>/dev/null
+	wait "$_wd" 2>/dev/null
+	_out=$(cat "$_t/out")
+	ok "the audit made its work directory before the TERM" \
+		"$(yes_if [ -n "$_work" ])" "$_t/tmp was empty; output: $_out"
+	ok "a TERM ends the audit with status 143 within ${TERM_BOUND}s" \
+		"$(yes_if [ "$_rc" = 143 ])" "exit status $_rc (137 is the watchdog's KILL); output: $_out"
+	ok "a TERM removes the audit's work directory" \
+		"$(yes_if [ -z "$(ls "$_t/tmp")" ])" "left behind: $(ls "$_t/tmp")"
+	ok "a TERM writes no verdict" \
+		"$(yes_if not says 'rasputin-atrest:' "$_out")" "$_out"
+}
+for SH in $TEST_SHELLS; do
+	term_case
+done
+
 # ── an unreadable mode is a FAIL, never an empty one ───────────────────────
 # With no reader at all the audit must say so, and say which path. What shipped
 # instead compared "" against a declared mode — "is , declared 0600", a message

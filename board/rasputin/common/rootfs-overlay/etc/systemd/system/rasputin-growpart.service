@@ -11,6 +11,14 @@
 #   - After var-lib-rasputin.mount: don't race makefs/growfs formatting the fs.
 #   - After rasputin-firstboot.service: let provisioning finish first (it's
 #     preserved across the grow, but no reason to interrupt it).
+#   - After rasputin-api.service: the api is Type=notify and turns the
+#     per-boot seal-key record (/run/rasputin-seal-key) into a job before it
+#     sends READY=1 (geekdojo/geekdojo-brain#833), so the grow's reboot comes
+#     after that and the provisioning boot's created outcome is not lost
+#     (geekdojo/geekdojo-brain#853). Ordering only, no Wants=/Requires=: on a
+#     compute node the api is condition-skipped and this changes nothing, and
+#     a failed or timed-out api start does not block the grow. It makes direct
+#     the edge that already ran through mark-good and the agent.
 #
 # Gate on the persistent MOUNT, not /dev/disk/by-partlabel/persistent: the rpi
 # is MBR and addresses persistent by PARTUUID (no by-partlabel symlink), so the
@@ -18,7 +26,7 @@
 # present; the script resolves the device from the mount.
 [Unit]
 Description=Rasputin: grow the data partition to fill the disk (one-time)
-After=rasputin-mark-good.service var-lib-rasputin.mount rasputin-firstboot.service
+After=rasputin-mark-good.service var-lib-rasputin.mount rasputin-firstboot.service rasputin-api.service
 ConditionPathIsMountPoint=/var/lib/rasputin
 
 [Service]
