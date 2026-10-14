@@ -221,7 +221,8 @@ prepare_arm64() {
   #     Routing PID 1's own log to kmsg puts it on the console.
   #     (Measured on the bench VM: systemd.journald.forward_to_console=1 does
   #     NOT do this — it forwards journal entries, not PID 1's transitions.)
-  CMDLINE="$(tr -d '\n' < "$WORK/cmdline.txt") systemd.log_target=kmsg console=ttyAMA0,115200"
+  SHIPPED_CMDLINE="$(tr -d '\n' < "$WORK/cmdline.txt")"
+  CMDLINE="$SHIPPED_CMDLINE systemd.log_target=kmsg console=ttyAMA0,115200"
   echo "kernel cmdline: $CMDLINE"
   QEMU_KERNEL="$WORK/kernel_2712.img"
   QEMU_APPEND="$CMDLINE"
@@ -907,6 +908,14 @@ if [ "$ARCH" = amd64 ]; then
   cp "$OVMF_VARS" "$WORK/grow-vars.fd" \
     || { echo "::error::could not copy the OVMF vars for the growpart leg"; exit 1; }
   VARS_FD="$WORK/grow-vars.fd"
+else
+  # The shipped cmdline with only `virt`'s console added: no
+  # systemd.log_target=kmsg. The leg polls over SSH, not the console, and with
+  # PID 1 logging to kmsg its unit messages reach the journal as kernel lines
+  # without UNIT= or MESSAGE_ID=, which assertion (i) reads. A Pi logs them to
+  # the journal, as this boot now does.
+  QEMU_APPEND="$SHIPPED_CMDLINE console=ttyAMA0,115200"
+  echo "growpart leg kernel cmdline: $QEMU_APPEND"
 fi
 # die_if_qemu_gone reads QPID and CONSOLE_LOG: from here on they are the leg's.
 # The main boot's console stays where the workflow uploads it from.
@@ -1015,12 +1024,15 @@ leg_mono() {
 }
 API_STARTED=$(leg_mono rasputin-api.service 39f53479d3a045ac8e11786248231fbf)
 GROW_STARTING=$(leg_mono rasputin-growpart.service 7d4958e842da4a758f6c1cdc7b36dcc5)
+LEG_MISSING=""
 case "$API_STARTED" in
-  ''|*[!0-9]*) leg_fail "journalctl -b -1 has no UNIT=rasputin-api.service \"Started\" entry (MESSAGE_ID 39f53479d3a045ac8e11786248231fbf), so the api never sent READY=1 in the provisioning boot (growpart Starting at ${GROW_STARTING:-none}us monotonic)" ;;
+  ''|*[!0-9]*) LEG_MISSING="the UNIT=rasputin-api.service \"Started\" entry (MESSAGE_ID 39f53479d3a045ac8e11786248231fbf)" ;;
 esac
 case "$GROW_STARTING" in
-  ''|*[!0-9]*) leg_fail "journalctl -b -1 has no UNIT=rasputin-growpart.service \"Starting\" entry (MESSAGE_ID 7d4958e842da4a758f6c1cdc7b36dcc5), so growpart's start in the provisioning boot was not recorded (api Started at ${API_STARTED}us monotonic)" ;;
+  ''|*[!0-9]*) LEG_MISSING="${LEG_MISSING:+$LEG_MISSING and }the UNIT=rasputin-growpart.service \"Starting\" entry (MESSAGE_ID 7d4958e842da4a758f6c1cdc7b36dcc5)" ;;
 esac
+[ -z "$LEG_MISSING" ] \
+  || leg_fail "journalctl -b -1 has no $LEG_MISSING, so whether the grow waited for the api's READY=1 in the provisioning boot cannot be read"
 [ "$API_STARTED" -lt "$GROW_STARTING" ] \
   || leg_fail "in the provisioning boot rasputin-api.service was Started at ${API_STARTED}us monotonic, not before rasputin-growpart.service was Starting at ${GROW_STARTING}us: the grow's reboot is not ordered after the api's READY=1"
 echo "growpart leg (i): in boot -1 the api was Started at ${API_STARTED}us, before growpart was Starting at ${GROW_STARTING}us"
