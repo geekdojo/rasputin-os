@@ -27,7 +27,14 @@ ConditionPathIsMountPoint=/var/lib/rasputin
 # report a pass over nothing. rasputin-api.service is not Required — on a
 # compute node it never starts, and the audit still has firstboot's files to
 # check.
-After=rasputin-firstboot.service rasputin-api.service rasputin-coredump-store.service
+# After the agent too (geekdojo/geekdojo-brain#832): its start passes correct
+# the files an older release left behind (the leaf tighten in
+# proxy.StartNodeProxy and docker.TightenAppState), and both run before it
+# sends READY=1, so After= on that Type=notify unit means "after the passes".
+# Auditing before them reports the previous release's modes on every upgrade
+# boot. rasputin-agent.service is deliberately not Required: a node whose agent
+# fails to start is still audited, on whatever is on disk.
+After=rasputin-firstboot.service rasputin-api.service rasputin-coredump-store.service rasputin-agent.service
 Requires=rasputin-firstboot.service
 
 [Service]

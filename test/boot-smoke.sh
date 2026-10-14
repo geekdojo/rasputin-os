@@ -427,9 +427,10 @@ fi
 # shell into the guest.
 #
 # WAITED FOR, NOT ASSUMED PRESENT. rasputin-atrest-audit.service is
-# WantedBy=multi-user.target and ordered After=rasputin-api.service, so its
-# verdict can land well after every assertion above: on a controlplane boot it
-# does not even start until the api has, and it audits the files the api wrote.
+# WantedBy=multi-user.target and ordered After=rasputin-api.service and
+# rasputin-agent.service, so its verdict can land well after every assertion
+# above: it does not start until the agent has (and, on a controlplane boot,
+# the api), and it audits the files they wrote.
 # Polled like everything else here — the instant the line appears this stops
 # waiting — and it is polled BEFORE the qemu kill below, because a verdict that
 # had not arrived yet would otherwise be indistinguishable from one that never
@@ -858,7 +859,7 @@ echo "api healthz + web UI + 70s uptime soak confirmed over hostfwd"
 # this greps it (the arrival was polled above, before the kill).
 ATREST_LINES="$(grep -o 'rasputin-atrest: .*' "$CONSOLE_LOG" | tr -d '\r')"
 if [ "$atrest" != 1 ] || [ -z "$ATREST_LINES" ]; then
-  echo "::error::no 'rasputin-atrest:' verdict reached the serial console in ${ATREST_AT}s — the at-rest mode audit never reported, so NOTHING checked the modes on the persistent partition on this boot. Treated exactly like a FAIL: check that rasputin-atrest-audit.service is still in the overlay, still WantedBy=multi-user.target, not masked, and that its ordering (After=rasputin-api.service) did not leave it behind a unit that never started; check too that the verdict still goes to /dev/kmsg, since journald's output does not reach this console."
+  echo "::error::no 'rasputin-atrest:' verdict reached the serial console in ${ATREST_AT}s — the at-rest mode audit never reported, so NOTHING checked the modes on the persistent partition on this boot. Treated exactly like a FAIL: check that rasputin-atrest-audit.service is still in the overlay, still WantedBy=multi-user.target, not masked, and that its ordering (After=rasputin-api.service rasputin-agent.service) did not leave it behind a unit that never started; check too that the verdict still goes to /dev/kmsg, since journald's output does not reach this console."
   echo "----- any atrest-related console lines (if one appears here, the verdict's own wording changed and this assertion has drifted from rasputin-atrest-audit.sh) -----"
   atrest_ctx="$(grep -nE "atrest" "$CONSOLE_LOG" | tail -20)"
   echo "${atrest_ctx:-(not one line mentions the audit — the unit did not run at all)}"

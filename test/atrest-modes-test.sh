@@ -802,6 +802,14 @@ ok "the audit unit is enabled at multi-user" \
 	"$(yes_if grep -qx 'WantedBy=multi-user.target' "$UNIT")" "$(cat "$UNIT")"
 ok "the audit unit runs after the api has written its files" \
 	"$(yes_if grep -qE '^After=.*rasputin-api\.service' "$UNIT")" "$(cat "$UNIT")"
+# TC-832-15: after the agent, whose start passes correct an older release's
+# modes before READY=1 — but never hard-dependent on it, so a node whose agent
+# fails to start is still audited (geekdojo/geekdojo-brain#832).
+ok "TC-832-15: the audit unit runs after the agent's start passes" \
+	"$(yes_if grep -qE '^After=.*rasputin-agent\.service' "$UNIT")" "$(cat "$UNIT")"
+ok "TC-832-15: the audit unit does not require the agent" \
+	"$(yes_if not grep -qE '^(Requires|BindsTo|Requisite)=.*rasputin-agent\.service' "$UNIT")" \
+	"$(grep -nE '^(Requires|BindsTo|Requisite)=' "$UNIT")"
 
 # The inventory is the audit's whole input, so an empty one would make every
 # run report PASS over nothing.
