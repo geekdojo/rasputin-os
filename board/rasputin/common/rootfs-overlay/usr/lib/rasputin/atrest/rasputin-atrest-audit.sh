@@ -134,7 +134,15 @@ FAILURES="$WORK/failures"
 CHECKED="$WORK/checked"
 : >"$FAILURES"
 : >"$CHECKED"
-trap 'rm -rf "$WORK"' EXIT INT TERM
+# EXIT removes the work directory. INT and TERM end the audit there and then,
+# and the EXIT trap still runs on the way out. A trap that only removed the
+# directory let the script carry on after systemd's SIGTERM, so a shutdown that
+# overlapped the audit waited out the stop timeout until SIGKILL, about 90s in
+# the QEMU smoke's grow reboot (geekdojo/geekdojo-brain#853). A stopped
+# run writes no verdict: it checked nothing to the end.
+trap 'rm -rf "$WORK"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 fail() {
 	echo "$1" >>"$FAILURES"

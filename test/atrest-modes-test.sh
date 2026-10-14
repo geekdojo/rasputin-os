@@ -641,6 +641,91 @@ for SH in $TEST_SHELLS; do
 	store_cases
 done
 
+# ── a TERM ends the audit, cleans up, and writes no verdict ────────────────
+# geekdojo/geekdojo-brain#853. systemd stops the unit with SIGTERM to its whole
+# cgroup when a shutdown overlaps the audit. The trap used to remove the work
+# directory and then let the script carry on, so the stop waited out the
+# timeout until SIGKILL. Here the audit is held mid-run: its first `find` is a
+# stub that reports its PID on READY and then blocks opening BLOCK, a FIFO
+# nothing writes. That puts the shell waiting on a child, as it is for most of
+# a real run. The case sends TERM to the shell and to the stub, as systemd's
+# cgroup kill does, then waits on the audit's exit. The old trap fails it under
+# every shell: the script carries on with its work directory gone and prints
+# "rasputin-atrest: FAIL failures= checked= first=", a verdict over nothing,
+# then exits 2 rather than 143 (measured in ubuntu:24.04 against sh, dash,
+# bash and busybox sh).
+#
+# Every wait is on a fact: the stub's READY line, and the audit's exit.
+# TERM_BOUND is a ceiling the watchdog enforces, not a sleep. When it fires it
+# kills the audit and writes to READY, so a setup that never reached the stub
+# fails the case instead of hanging the suite. Run under every shell in
+# TEST_SHELLS: what a trap does after `exit` is shell behaviour, and busybox ash
+# is the image's /bin/sh. Ubuntu's busybox sh resolves `find` through PATH, so
+# the stub takes effect there; if it did not, the case would fail on the
+# watchdog rather than pass.
+TERM_BOUND=30
+REAL_MKTEMP=$(command -v mktemp)
+term_case() {
+	_t=$(mktemp -d "$TMP/term.XXXXXX")
+	mkdir -p "$_t/stub" "$_t/root" "$_t/tmp"
+	: >"$_t/root/x"; chmod 0600 "$_t/root/x"
+	printf '0600 required /x\n' >"$_t/inventory"
+	mkfifo "$_t/ready" "$_t/block"
+	: >"$_t/pids"
+	printf '#!/bin/sh\necho $$ >>"%s"\necho $$ >"%s"\nexec cat "%s"\n' \
+		"$_t/pids" "$_t/ready" "$_t/block" >"$_t/stub/find"
+	# The audit's one mktemp, pointed at a directory this case can list.
+	# macOS mktemp -d ignores TMPDIR, so TMPDIR alone would not do it.
+	printf '#!/bin/sh\nexec "%s" -d "%s/work.XXXXXX"\n' \
+		"$REAL_MKTEMP" "$_t/tmp" >"$_t/stub/mktemp"
+	chmod 0755 "$_t/stub/find" "$_t/stub/mktemp"
+	if [ "$SH" = busybox_sh ]; then
+		set -- busybox sh
+	else
+		set -- "$SH"
+	fi
+	PATH="$_t/stub:$PATH" \
+		"$@" "$AUDIT" -i "$_t/inventory" -r "$_t/root" -u "$ME" -g "$MYGID" -q \
+		>"$_t/out" 2>&1 &
+	_apid=$!
+	(
+		# Stopped once the audit has exited: the trap takes its sleep with it.
+		trap 'kill "$_s" 2>/dev/null; exit 0' TERM
+		sleep "$TERM_BOUND" &
+		_s=$!
+		wait "$_s" || exit 0
+		kill -KILL "$_apid" 2>/dev/null
+		echo watchdog 1<>"$_t/ready"
+	) >/dev/null 2>&1 &
+	_wd=$!
+	read -r _stub <"$_t/ready"
+	_work=$(ls "$_t/tmp")
+	case "$_stub" in
+	watchdog) ;;
+	*)
+		kill -TERM "$_apid" 2>/dev/null
+		kill -TERM "$_stub" 2>/dev/null
+		;;
+	esac
+	wait "$_apid"; _rc=$?
+	kill "$_wd" 2>/dev/null
+	while read -r _p; do kill -KILL "$_p" 2>/dev/null; done <"$_t/pids"
+	_out=$(cat "$_t/out")
+	ok "the audit reached its first find, held mid-run" \
+		"$(yes_if [ "$_stub" != watchdog ])" "the stub never reported; output: $_out"
+	ok "the audit made its work directory before the TERM" \
+		"$(yes_if [ -n "$_work" ])" "$_t/tmp was empty"
+	ok "a TERM ends the audit with status 143 within ${TERM_BOUND}s" \
+		"$(yes_if [ "$_rc" = 143 ])" "exit status $_rc (137 is the watchdog's KILL); output: $_out"
+	ok "a TERM removes the audit's work directory" \
+		"$(yes_if [ -z "$(ls "$_t/tmp")" ])" "left behind: $(ls "$_t/tmp")"
+	ok "a TERM writes no verdict" \
+		"$(yes_if not says 'rasputin-atrest:' "$_out")" "$_out"
+}
+for SH in $TEST_SHELLS; do
+	term_case
+done
+
 # ── an unreadable mode is a FAIL, never an empty one ───────────────────────
 # With no reader at all the audit must say so, and say which path. What shipped
 # instead compared "" against a declared mode — "is , declared 0600", a message
