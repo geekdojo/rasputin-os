@@ -1005,4 +1005,32 @@ CYCLE=$(ssh_guest "journalctl -b 0 -o cat --no-pager | grep -i 'ordering cycle'"
 [ -z "$CYCLE" ] \
   || leg_fail "journalctl -b 0 logs an ordering cycle: $CYCLE"
 echo "growpart leg (h): journalctl -b 0 has no ordering cycle line"
+# (i) the grow waited for the api's READY=1 in the provisioning boot. systemd's
+# "Started" entry (SD_MESSAGE_UNIT_STARTED) for a Type=notify unit is logged
+# when READY=1 arrives; growpart's "Starting" (SD_MESSAGE_UNIT_STARTING) is
+# logged when its start job runs. Both are boot -1's, so their monotonic stamps
+# compare.
+leg_mono() {
+  ssh_guest "journalctl -b -1 -o export --no-pager UNIT=$1 MESSAGE_ID=$2 | sed -n 's/^__MONOTONIC_TIMESTAMP=//p' | head -1" 2>/dev/null | tr -d '\r'
+}
+API_STARTED=$(leg_mono rasputin-api.service 39f53479d3a045ac8e11786248231fbf)
+GROW_STARTING=$(leg_mono rasputin-growpart.service 7d4958e842da4a758f6c1cdc7b36dcc5)
+case "$API_STARTED" in
+  ''|*[!0-9]*) leg_fail "journalctl -b -1 has no UNIT=rasputin-api.service \"Started\" entry (MESSAGE_ID 39f53479d3a045ac8e11786248231fbf), so the api never sent READY=1 in the provisioning boot (growpart Starting at ${GROW_STARTING:-none}us monotonic)" ;;
+esac
+case "$GROW_STARTING" in
+  ''|*[!0-9]*) leg_fail "journalctl -b -1 has no UNIT=rasputin-growpart.service \"Starting\" entry (MESSAGE_ID 7d4958e842da4a758f6c1cdc7b36dcc5), so growpart's start in the provisioning boot was not recorded (api Started at ${API_STARTED}us monotonic)" ;;
+esac
+[ "$API_STARTED" -lt "$GROW_STARTING" ] \
+  || leg_fail "in the provisioning boot rasputin-api.service was Started at ${API_STARTED}us monotonic, not before rasputin-growpart.service was Starting at ${GROW_STARTING}us: the grow's reboot is not ordered after the api's READY=1"
+echo "growpart leg (i): in boot -1 the api was Started at ${API_STARTED}us, before growpart was Starting at ${GROW_STARTING}us"
+# Where the store's first-start outcomes landed, recorded and not asserted:
+# the bench skill's SST-01 init row has to read the boot they are in.
+for _tag in rasputin-store-init rasputin-store-provision; do
+  for _b in -1 0; do
+    _lines=$(ssh_guest "journalctl -b $_b -o cat --no-pager | grep -F '$_tag: outcome='" 2>/dev/null | tr -d '\r')
+    _n=$(printf '%s' "$_lines" | grep -c . || true)
+    echo "growpart leg ($ARCH) record: boot $_b holds $_n '$_tag: outcome=' line(s)$(printf '%s\n' "$_lines" | sed -n '1s/ reason=.*//p' | sed 's/^/, first: /')"
+  done
+done
 echo "growpart leg ($ARCH): the provisioning boot's journal survived the grow reboot"
