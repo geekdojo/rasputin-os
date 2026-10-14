@@ -565,6 +565,37 @@ for tok in 'outcome=$_outcome key_id=$_key_id reason=' 'rasputin-seal-key: outco
 	ok "TC-803-18 the script names the contract token '$tok'" "$(yes_if contains "$SCRIPT" "$tok")"
 done
 
+# --- TC-853-20: growpart orders on the api's READY=1, ordering only -----------
+# The api turns this script's per-boot record into a job before READY=1
+# (geekdojo/geekdojo-brain#833), so growpart's reboot must come after it
+# (#853). growpart_api_edge UNIT prints "ok" when [Unit] After= holds the api
+# beside the three existing edges and no dependency directive names the api;
+# otherwise it prints what is wrong.
+GROWPART_UNIT="$OVERLAY/etc/systemd/system/rasputin-growpart.service"
+growpart_api_edge() {
+	_d=$(directives "$1")
+	_after=$(words "$_d" Unit After)
+	_why=""
+	for _u in rasputin-api.service rasputin-mark-good.service var-lib-rasputin.mount rasputin-firstboot.service; do
+		printf '%s\n' "$_after" | grep -qxF "$_u" || _why="$_why After= lacks $_u;"
+	done
+	for _k in Wants Requires Requisite BindsTo PartOf; do
+		words "$_d" Unit "$_k" | grep -qxF rasputin-api.service && _why="$_why $_k= names rasputin-api.service;"
+	done
+	printf '%s\n' "${_why:-ok}"
+}
+got=$(growpart_api_edge "$GROWPART_UNIT")
+ok "TC-853-20 rasputin-growpart.service is After= the api and the existing edges, with no dependency on the api" \
+	"$(yes_if test "$got" = ok)" "$got"
+sed 's/^\(After=.*\) rasputin-api\.service/\1/' "$GROWPART_UNIT" > "$TMP/growpart-noapi.service"
+got=$(growpart_api_edge "$TMP/growpart-noapi.service")
+ok "TC-853-20 a copy with the api removed from After= fails (got: $got)" \
+	"$(yes_if test "$got" = ' After= lacks rasputin-api.service;')" "$got"
+awk '{ print } $0 == "[Unit]" { print "Requires=rasputin-api.service" }' "$GROWPART_UNIT" > "$TMP/growpart-requires.service"
+got=$(growpart_api_edge "$TMP/growpart-requires.service")
+ok "TC-853-20 a copy that adds Requires=rasputin-api.service fails (got: $got)" \
+	"$(yes_if test "$got" = ' Requires= names rasputin-api.service;')" "$got"
+
 # --- TC-803-16: the harness refuses root and a missing busybox ----------------
 # Run this file again with a PATH that holds only a stub id: as uid 0 it must
 # fail with a sentence before any case runs; as a user with REQUIRE_BUSYBOX=1
