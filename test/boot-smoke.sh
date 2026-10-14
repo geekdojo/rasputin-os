@@ -979,10 +979,13 @@ echo "growpart leg ($ARCH) clock: boot 1 last __REALTIME_TIMESTAMP=${B1_LAST:-no
 # second or more in boot 1's shutdown, with the entry that ended it.
 B1_JOURNAL="$WORK/grow-boot1.journal"
 ssh_guest 'journalctl -b -1 -o short-unix --no-pager' > "$B1_JOURNAL" 2>/dev/null || : > "$B1_JOURNAL"
-echo "growpart leg ($ARCH) clock: boot 1 clock-save: $(grep -F 'rasputin-clock-save:' "$B1_JOURNAL" | grep -v 'kernel:' | tr '\n' '|')"
-echo "growpart leg ($ARCH) clock: boot 2 floor: $(ssh_guest "journalctl -b 0 -k -o cat --no-pager | grep -F 'rasputin-init:' | grep -iF clock" 2>/dev/null | tr -d '\r' | tr '\n' '|')"
+# journald files a /dev/kmsg line under the identifier its prefix names, so
+# rasputin-init's floor line is read with -t, not grepped for its prefix.
+echo "growpart leg ($ARCH) clock: boot 1 clock-save: $(grep -F ' rasputin-clock-save.sh[' "$B1_JOURNAL" | tr '\n' '|')"
+echo "growpart leg ($ARCH) clock: boot 2 floor: $(ssh_guest 'journalctl -b 0 -t rasputin-init -o short-unix --no-pager' 2>/dev/null | tr -d '\r' | grep -iF clock | tr '\n' '|')"
 leg_tail() { awk '/table extended; rebooting/ { p = 1 } p' "$B1_JOURNAL"; }
 leg_tail | awk -v arch="$ARCH" '{ t = $1 + 0; if (n++ && t - prev >= 1) printf "growpart leg (%s) clock: boot 1 shutdown gap %.3fs before: %s\n", arch, t - prev, $0; prev = t }'
+leg_tail | grep -E "timed out|Killing" | sed "s/^/growpart leg ($ARCH) clock: boot 1 shutdown stall: /"
 
 # (a) growpart grew the partition, rebooted, and found it full on the next boot.
 ssh_guest "awk '\$2 == \"grown:\" { g = 1 } g && \$2 == \"already-full:\" { a = 1 } END { exit !a }' /var/lib/rasputin/growpart.log" \
