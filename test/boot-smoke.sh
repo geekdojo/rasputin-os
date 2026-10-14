@@ -967,8 +967,10 @@ echo "growpart leg ($ARCH) clock: boot 1 last __REALTIME_TIMESTAMP=${B1_LAST:-no
 ssh_guest "awk '\$2 == \"grown:\" { g = 1 } g && \$2 == \"already-full:\" { a = 1 } END { exit !a }' /var/lib/rasputin/growpart.log" \
   || leg_fail "growpart.log does not hold a grown: line followed by an already-full: line"
 echo "growpart leg (a): growpart.log holds grown: then already-full:"
-# (b) the journal holds the provisioning boot and this one.
-NBOOTS=$(ssh_guest 'journalctl --list-boots --no-legend --no-pager | wc -l' 2>/dev/null | tr -d ' ')
+# (b) the journal holds the provisioning boot and this one. journalctl has no
+# --no-legend, so the boot rows are counted by their shape: an index, then a
+# 32-hex boot ID.
+NBOOTS=$(ssh_guest "journalctl --list-boots --no-pager | grep -cE '^ *-?[0-9]+ [0-9a-f]{32} '" 2>/dev/null | tr -d ' ')
 [ "${NBOOTS:-0}" -ge 2 ] 2>/dev/null \
   || leg_fail "journalctl --list-boots shows ${NBOOTS:-no} boot(s), expected at least 2: the provisioning boot's journal is gone"
 echo "growpart leg (b): journalctl --list-boots shows $NBOOTS boots"
