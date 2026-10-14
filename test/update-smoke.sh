@@ -41,7 +41,8 @@
 #      runs firstboot again, so the every-boot oneshot is what creates its key.
 #      rasputin-seal-key.service's Result is success and it is not in
 #      `systemctl --failed`, the key is 32 bytes 0600 0:0, the fragment is
-#      0600 0:0, and the outcome record says created.
+#      0600 0:0, and the outcome record says created when the base had no key
+#      and untouched when it had one (see THE BASE'S STORE STATE below).
 #      The store itself (geekdojo/geekdojo-brain#756, #804): openbao.service
 #      is enabled and the api's store CA is there. The api mints the store's
 #      server and client leaves and restarts it (#758), and its first start
@@ -54,7 +55,8 @@
 #      in to exactly [rasputin-seal-rotate], the api token is refused policy
 #      writes, sys/mounts, identity/entity and token creation, the api's
 #      client leaf.key is 0600 0:0, audit.log HMACs and does not hold the
-#      written value, and the outcome record says initialised; the
+#      written value, and, when the base had no store data, the outcome
+#      record says initialised (with store data: no record and no line); the
 #      store's provisioner (#805, TC-805-36) recorded unchanged, its record
 #      0600 0:0 and exactly the four contract lines, with an unchanged line
 #      and no failed line this boot; the second start changes none of it.
@@ -78,6 +80,16 @@
 #      amd64 marks the booted slot bad, and GRUB falls back to A. Assert slot A
 #      runs ITS kernel (the old image's), with docker, and on arm64 that slot
 #      A's boot partition is byte-identical to before the update.
+#
+# THE BASE'S STORE STATE. What boot 2's seal-key and store-init decide follows
+# from what is on the persistent partition the base left: a base from before
+# the store (2026.10.0) has no seal key and no store data, so boot 2 creates
+# the key and initialises the store; a base that already ran them
+# (2026.10.1-dev.303 on) has both, so boot 2 leaves the key untouched and its
+# store start records nothing. So the harness reads those two facts in boot 1,
+# after the install, with rasputin-api and openbao stopped so neither can
+# change before the power-off, and expects what the scripts decide from them.
+# Never from the base's version string.
 #
 # WHAT IT DOES NOT PROVE. `virt` is not a Pi: the EEPROM bootloader, config.txt
 # kernel selection and the real tryboot flag are emulated by reading the same
@@ -332,6 +344,26 @@ else
 fi
 tail -15 "$WORK/install.log" | sed 's/^/    install: /'
 ssh_guest 'rauc status --detailed' 2>&1 | sed 's/^/    rauc: /'
+# The base's store state (THE BASE'S STORE STATE, above). The api goes first,
+# because it is what starts and restarts the store; a base with no
+# openbao.service has nothing to stop. The listing is the seal-key script's own
+# fact: `ls -A`, its exit status checked.
+ssh_guest 'systemctl stop rasputin-api.service; systemctl stop openbao.service 2>/dev/null; true' >/dev/null 2>&1
+BASE_STATE="$(ssh_guest 'k=nokey; { [ -e /var/lib/rasputin/openbao-seal/seal-key ] || [ -L /var/lib/rasputin/openbao-seal/seal-key ]; } && k=key
+d=/var/lib/rasputin/openbao
+if [ ! -e "$d" ]; then s=nodata; elif e=$(ls -A -- "$d" 2>/dev/null); then if [ -n "$e" ]; then s=data; else s=nodata; fi; else s=unreadable; fi
+echo "$k $s"' 2>/dev/null | tr -d '\r')"
+echo "base store state on $OLD_VERSION: ${BASE_STATE:-<unread>}"
+case "$BASE_STATE" in
+	"key data"|"key nodata") SEAL_WANT=untouched ;;
+	"nokey nodata") SEAL_WANT=created ;;
+	"nokey data") die "the base $OLD_VERSION left store data but no seal key, so boot 2's seal-key would refuse and the api would not start; this run cannot test the update from it" ;;
+	*) die "the base $OLD_VERSION's seal key and store data directory could not be read over SSH (got '${BASE_STATE:-<nothing>}'), so what boot 2 should do is unknown" ;;
+esac
+case "$BASE_STATE" in
+	*" data") STORE_WANT=present ;;
+	*) STORE_WANT=empty ;;
+esac
 poweroff_guest
 
 # ---------------------------------------------- 2: the updated slot (trial) --
@@ -389,7 +421,7 @@ if boot 2; then
 		"$(ssh_guest 'ls -ln /var/lib/rasputin/openbao-seal/seal-key' 2>/dev/null | awk '{print $1, $3, $4, $5}')"
 	expect "boot 2: seal.hcl mode, owner and group" "-rw------- 0 0" \
 		"$(ssh_guest 'ls -ln /var/lib/rasputin/openbao-seal/seal.hcl' 2>/dev/null | awk '{print $1, $3, $4}')"
-	expect "boot 2: the seal-key outcome record says created" created \
+	expect "boot 2: the seal-key outcome record says $SEAL_WANT (base: $BASE_STATE)" "$SEAL_WANT" \
 		"$(ssh_guest 'sed -n "s/^outcome=//p" /run/rasputin-seal-key/outcome' 2>/dev/null)"
 	expect "boot 2: systemctl --failed does not list rasputin-seal-key" "" \
 		"$(ssh_guest 'systemctl --failed --no-legend --plain' 2>/dev/null | grep rasputin-seal-key)"
@@ -412,21 +444,31 @@ if boot 2; then
 	# The api mints the store's server and client leaves and restarts the store
 	# itself (#758), and the store's first start on its empty data directory
 	# self-inits from init.json (#804): an OTA'd node's path. The wait is a
-	# poll on two facts with a hard try count: the outcome record exists and
-	# the store answers sys/health 200.
+	# poll on facts with a hard try count: the store answers sys/health 200
+	# and, from a base with no store data, the outcome record exists. A store
+	# the base already initialised writes no record (rasputin-store-init.sh).
 	STORE_OK=0
+	if [ "$STORE_WANT" = empty ]; then
+		STORE_READY="test -s $STORE_RECORD && "
+		STORE_WHAT="the store initialised itself (record and health 200"
+		STORE_NEVER="both wrote $STORE_RECORD and answered"
+	else
+		STORE_READY=""
+		STORE_WHAT="the base's initialised store answered (health 200"
+		STORE_NEVER="answered"
+	fi
 	if [ "$STORE_CA_OK" = 1 ]; then
 		_i=0
 		while [ "$_i" -lt "$STORE_TRIES" ]; do
-			if [ "$(guest_yes "test -s $STORE_RECORD && BAO_ADDR=https://127.0.0.1:8200 bao status -ca-cert=$STORE_CA -client-cert=$API_LEAF.pem -client-key=$API_LEAF.key >/dev/null 2>&1")" = yes ]; then
+			if [ "$(guest_yes "${STORE_READY}BAO_ADDR=https://127.0.0.1:8200 bao status -ca-cert=$STORE_CA -client-cert=$API_LEAF.pem -client-key=$API_LEAF.key >/dev/null 2>&1")" = yes ]; then
 				STORE_OK=1; break
 			fi
 			_i=$((_i + 1)); sleep 2
 		done
 		if [ "$STORE_OK" = 1 ]; then
-			pass "boot 2: the api minted the store's leaves and the store initialised itself (record and health 200 after $((_i * 2))s)"
+			pass "boot 2: the api minted the store's leaves and $STORE_WHAT after $((_i * 2))s)"
 		else
-			fail "boot 2: in $((STORE_TRIES * 2))s the store never both wrote $STORE_RECORD and answered healthy with the api's own leaf: $(ssh_guest "cat $STORE_RECORD; systemctl show openbao.service -p ActiveState -p Result --value" 2>/dev/null | tr '\n' '|')"
+			fail "boot 2: in $((STORE_TRIES * 2))s the store never $STORE_NEVER healthy with the api's own leaf (base: $BASE_STATE): $(ssh_guest "cat $STORE_RECORD; systemctl show openbao.service -p ActiveState -p Result --value" 2>/dev/null | tr '\n' '|')"
 		fi
 	fi
 	if [ "$STORE_OK" = 1 ]; then
@@ -481,9 +523,14 @@ if boot 2; then
 			if [ "${_h:-0}" -gt 0 ] 2>/dev/null; then pass "boot 2 $_w: (8) audit.log holds hmac-sha256: values ($_h lines)"
 			else fail "boot 2 $_w: (8) audit.log holds no hmac-sha256: value (got '${_h:-<nothing>}')"; fi
 			expect "boot 2 $_w: (8) audit.log does not hold the written value" 0 "$(kv audit_value "$_t")"
-			expect "boot 2 $_w: (9) the outcome record says initialised" initialised "$(kv record_outcome "$_t")"
-			expect "boot 2 $_w: (9) the record is this boot's, three lines" "this 3" "$(kv record_boot "$_t") $(kv record_lines "$_t")"
-			expect "boot 2 $_w: (9) one rasputin-store-init: line this boot" 1 "$(kv store_init_lines "$_t")"
+			if [ "$STORE_WANT" = empty ]; then
+				expect "boot 2 $_w: (9) the outcome record says initialised" initialised "$(kv record_outcome "$_t")"
+				expect "boot 2 $_w: (9) the record is this boot's, three lines" "this 3" "$(kv record_boot "$_t") $(kv record_lines "$_t")"
+				expect "boot 2 $_w: (9) one rasputin-store-init: line this boot" 1 "$(kv store_init_lines "$_t")"
+			else
+				expect "boot 2 $_w: (9) no outcome record, the base had initialised the store" absent "$(ssh_guest "if [ -e $STORE_RECORD ]; then echo present; else echo absent; fi" 2>/dev/null | tr -d '\r')"
+				expect "boot 2 $_w: (9) no rasputin-store-init: line this boot, the base had initialised the store" 0 "$(kv store_init_lines "$_t")"
+			fi
 			# TC-805-36: the store's provisioner (geekdojo/geekdojo-brain#805).
 			expect "boot 2 $_w: (12) the provisioner's record says unchanged" unchanged "$(kv prov_record_outcome "$_t")"
 			expect "boot 2 $_w: (12) the provisioner's record is 0600 root" "-rw------- 0 0" "$(kv prov_record_mode "$_t")"
@@ -506,7 +553,8 @@ if boot 2; then
 		S2="$(store_checks)"
 		assert_store "api-pulled second start" "$S2"
 		expect "boot 2: (10) the record is unchanged by the second start" "$(kv record_sum "$S1")" "$(kv record_sum "$S2")"
-		expect "boot 2: (10) the api-pulled start ran no self-init (no '$SELFINIT_LINE' since the first)" 1 \
+		if [ "$STORE_WANT" = empty ]; then SELFINIT_WANT=1; else SELFINIT_WANT=0; fi
+		expect "boot 2: (10) the api-pulled start ran no self-init ($SELFINIT_WANT '$SELFINIT_LINE' this boot, base: $BASE_STATE)" "$SELFINIT_WANT" \
 			"$(ssh_guest "journalctl -b -u openbao.service --no-pager -o cat | grep -c '$SELFINIT_LINE'" 2>/dev/null | tr -d '\r')"
 		# (11) The listener and the TLS refusals still hold.
 		expect "boot 2: the store's MainPID runs as uid 990" 990 \
