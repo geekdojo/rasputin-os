@@ -958,6 +958,7 @@ leg_fail() {
   echo "----- journalctl --header -----"; ssh_guest 'journalctl --header --no-pager' 2>&1 || true
   echo "----- ls of the journal directory -----"; ssh_guest 'ls -la /var/log/journal/*/' 2>&1 || true
   echo "----- growpart.log -----"; ssh_guest 'cat /var/lib/rasputin/growpart.log' 2>&1 || true
+  echo "----- boot 1 from growpart's reboot to its last entry (journalctl -o short-unix) -----"; leg_tail
   exit 1
 }
 
@@ -971,6 +972,17 @@ case "$B1_LAST$B2_FIRST" in
 esac
 [ -n "$B1_LAST" ] && [ -n "$B2_FIRST" ] || MARGIN="unknown"
 echo "growpart leg ($ARCH) clock: boot 1 last __REALTIME_TIMESTAMP=${B1_LAST:-none} boot 2 first __REALTIME_TIMESTAMP=${B2_FIRST:-none} margin (boot 1 last - boot 2 first)=${MARGIN}us"
+# Where the margin comes from, always recorded. Boot 2's clock starts at the
+# floor that clock-save's ExecStop wrote in boot 1's shutdown, so the margin is
+# boot 1's tail after that save less boot 2's lead to its first entry. The
+# lines below name the save, the floor boot 2 restored, and every gap of a
+# second or more in boot 1's shutdown, with the entry that ended it.
+B1_JOURNAL="$WORK/grow-boot1.journal"
+ssh_guest 'journalctl -b -1 -o short-unix --no-pager' > "$B1_JOURNAL" 2>/dev/null || : > "$B1_JOURNAL"
+echo "growpart leg ($ARCH) clock: boot 1 clock-save: $(grep -F 'rasputin-clock-save:' "$B1_JOURNAL" | grep -v 'kernel:' | tr '\n' '|')"
+echo "growpart leg ($ARCH) clock: boot 2 floor: $(ssh_guest "journalctl -b 0 -k -o cat --no-pager | grep -F 'rasputin-init:' | grep -iF clock" 2>/dev/null | tr -d '\r' | tr '\n' '|')"
+leg_tail() { awk '/table extended; rebooting/ { p = 1 } p' "$B1_JOURNAL"; }
+leg_tail | awk -v arch="$ARCH" '{ t = $1 + 0; if (n++ && t - prev >= 1) printf "growpart leg (%s) clock: boot 1 shutdown gap %.3fs before: %s\n", arch, t - prev, $0; prev = t }'
 
 # (a) growpart grew the partition, rebooted, and found it full on the next boot.
 ssh_guest "awk '\$2 == \"grown:\" { g = 1 } g && \$2 == \"already-full:\" { a = 1 } END { exit !a }' /var/lib/rasputin/growpart.log" \
