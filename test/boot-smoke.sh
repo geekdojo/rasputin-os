@@ -851,8 +851,9 @@ echo "api healthz + web UI + 70s uptime soak confirmed over hostfwd"
 # fully-commented inventory produces: a real PASS line, over nothing.
 #
 # The captured line is echoed into the failure output on purpose. The verdict
-# carries the first failing path and its actual mode, so a red build says WHICH
-# file widened rather than only that an assertion failed.
+# carries the first failing path and what is wrong with it (its actual mode, or
+# its actual uid or gid for an owner or group failure), so a red build says
+# WHICH file regressed rather than only that an assertion failed.
 #
 # Read back AFTER the kill, so qemu is no longer appending to the file while
 # this greps it (the arrival was polled above, before the kill).
@@ -865,7 +866,7 @@ if [ "$atrest" != 1 ] || [ -z "$ATREST_LINES" ]; then
   exit 1
 fi
 if printf '%s\n' "$ATREST_LINES" | grep -q "rasputin-atrest: FAIL"; then
-  echo "::error::the at-rest mode audit FAILED on the booted machine — a path on the persistent partition is not the mode, owner or group /usr/lib/rasputin/atrest/inventory declares for it, or a swept tree holds a group/world-accessible file. The verdict below carries the count and the FIRST offending path with its actual mode; the remaining findings are printed on the audit's stdout, which systemd captures into the guest's journal and which therefore does NOT reach this console — reproduce them with test/atrest-modes-test.sh or on a node. Either the mode regressed or the inventory is out of date — do not widen the inventory to match a widened file."
+  echo "::error::the at-rest mode audit FAILED on the booted machine — a path on the persistent partition is not the mode, owner or group /usr/lib/rasputin/atrest/inventory declares for it, or a swept tree holds a group/world-accessible file. The verdict below carries the count and the FIRST offending path with what is wrong with it: its actual mode, or its actual uid or gid for an owner or group failure; the remaining findings are printed on the audit's stdout, which systemd captures into the guest's journal and which therefore does NOT reach this console — reproduce them with test/atrest-modes-test.sh or on a node. Either the path regressed or the inventory is out of date — do not widen the inventory to match a widened file."
   printf '%s\n' "$ATREST_LINES" | sed 's/^/  /'
   exit 1
 fi
