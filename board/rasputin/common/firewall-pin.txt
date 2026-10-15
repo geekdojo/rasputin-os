@@ -46,12 +46,14 @@
 #
 # WHY THIS VALUE
 #
-# 2026.10.1-dev.155 is the DEV firewall of the 2026.10.1 dev chain for
-# geekdojo/geekdojo-brain#853, published 2026-10-14 from firewall 59b57ee
-# (agent re-pinned to the CP dev release v2026.10.1-dev.195, the same CP release
-# this image's agent/api pins name, and the Snort community rules re-pinned to
-# 9576186d after Talos republished on 2026-10-13; release run 38507944656). Its
-# manifest names version 2026.10.1-dev.155, channel dev. Dev only bakes dev.
+# 2026.10.1 is the STABLE firewall of the 2026.10.1 lockstep, published
+# 2026-10-15 from firewall 75dfce9 (firewall #103: agent re-pinned from dev.195
+# to the CP stable v2026.10.1, the same CP release this image's agent/api pins
+# name; Snort rules re-pinned to 03c4e856, freshness gate passed in pre-flight
+# run 38788482911; tag release run 38789790314). It promotes the
+# 2026.10.1-dev.155 chain; against dev.155 its SBOM moves only LuCI (13 luci-*
+# packages 26.284 -> 26.287, ImageBuilder feed refresh). Its manifest names
+# version 2026.10.1, channel stable. Stable only ever bakes stable.
 #
 # History: 2026.09.4-dev.127 was the first pin -- the FIRST firewall release
 # that publishes manifest.json.sig (dev.126 and earlier ship no sig asset).
@@ -64,6 +66,6 @@
 # dev.279). 2026.09.6 (stable) was the pin of the 2026.09.6 stable OS.
 # On the 2026.10.0 dev line: dev.147 (OS dev.283), dev.148 (OS dev.284).
 # 2026.10.0 (stable) was the pin of the 2026.10.0 stable OS.
-# On the 2026.10.1 dev line: dev.153 (OS dev.303).
+# On the 2026.10.1 dev line: dev.153 (OS dev.303), dev.155 (OS dev.319).
 #
-2026.10.1-dev.155
+2026.10.1
