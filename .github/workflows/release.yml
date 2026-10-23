@@ -770,11 +770,22 @@ jobs:
               >> /tmp/manifest-artifacts.jsonl
           done
 
+          # The security floor (geekdojo/geekdojo-brain#772): the oldest OS
+          # version carrying every fix for a reachable critical or high
+          # advisory, read from security-floor.txt. A control plane alerts on
+          # every node older than it. The script refuses a value that is not
+          # CalVer or ranks above this release (exit non-zero stops the job
+          # here, before anything is published), and prints nothing for an
+          # empty file, so the field is added only when there is a floor and
+          # is never "".
+          floor=$(sh scripts/security-floor.sh security-floor.txt "${{ steps.ver.outputs.version }}")
           jq -n \
             --arg version "${{ steps.ver.outputs.version }}" \
             --arg channel "${{ steps.ver.outputs.channel }}" \
+            --arg floor "$floor" \
             --slurpfile artifacts /tmp/manifest-artifacts.jsonl \
-            '{version:$version, channel:$channel, artifacts:$artifacts}' \
+            '{version:$version, channel:$channel, artifacts:$artifacts}
+              + (if $floor == "" then {} else {securityFloor:$floor} end)' \
             > release-out/manifest.json
 
           # Detached DER CMS signature over the manifest — the trust anchor
