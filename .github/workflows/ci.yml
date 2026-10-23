@@ -360,6 +360,14 @@ jobs:
       # the image's shell.
       - name: Release target guard tests
         run: bash test/release-target-guard-test.sh
+      # cve-watch's OpenBao advisory and release watch
+      # (geekdojo/geekdojo-brain#768): which advisories affect the pin, decided
+      # from patched_versions and failing closed, the release classes, the
+      # SECURITY extraction with links removed, the baseline, the render and
+      # every refusal, against excerpts of upstream's real responses. CI-side
+      # Python; nothing here touches the network.
+      - name: OpenBao watch tests
+        run: python3 -I test/openbao-watch-test.py
       # The live drift check (geekdojo/geekdojo-brain#804, TC-804-11): the
       # pinned api tarball's openbao-policy/ against rasputin-control-plane's
       # storepolicy/ at the same tag, plus its two controls. Red while the api
