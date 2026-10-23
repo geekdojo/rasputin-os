@@ -52,6 +52,19 @@ Group=openbao
 # never here. The seal fragment arrives as a credential and is named by its
 # literal path, because bao expands no variable in its config (#679 Q3).
 ExecStart=/usr/bin/bao server -config=/etc/rasputin/openbao/openbao.hcl -config=/etc/rasputin/openbao/init.json -config=/run/credentials/openbao.service/seal.hcl
+# A staged store restore (geekdojo/geekdojo-brain#766; ADR-0010 S15): when
+# restore-pending/store/ holds one, this swaps its data, seal key and seal
+# fragment in for the live ones and writes restore-pending/store/applied,
+# which the api requires before it starts on a staged store (#765). Nothing
+# staged, or already applied: a silent no-op. First, so the outcome hook's pre
+# below sees the restored data and records no self-init. systemd sets the
+# credentials up again when it spawns bao, so bao gets the restored key and
+# fragment (test/store-unit-functional.sh scenario 12); a missing credential
+# source fails this step's spawn, the unit's first, instead (scenario 4).
+# `+` runs it as root outside this sandbox (the seal directory and the staged
+# tree are root's); no `-`, because a refused or failed apply must fail the
+# store's start rather than start it on the old store.
+ExecStartPre=+/usr/lib/rasputin/store-restore/rasputin-store-restore.sh
 # The self-init outcome (#804): one console and journal line and the record
 # /run/rasputin-store-init/outcome, which #833's reader turns into a job and an
 # alert. pre notes a start that begins on an empty data directory; started
@@ -95,9 +108,11 @@ LoadCredential=seal-rotation:/var/lib/rasputin/openbao-seal/rotation
 # delay and start limit apply (100 ms; 5 starts in 10 s): this unit chooses no
 # duration (ARCH-FACTS). After a crash loop the unit sits in `failed`, nothing
 # listens on 127.0.0.1, and F3.3's client raises the unreachable alert (#760).
-# Recovery is by facts: whatever changes the cause (#758 on a new leaf, #766
-# around a restore, #830 on a rotation) runs `systemctl reset-failed` and then
-# `systemctl restart`. A reboot also resets the count.
+# Recovery is by facts: whatever changes the cause (#758 on a new leaf, #830
+# on a rotation) runs `systemctl reset-failed` and then `systemctl restart`.
+# Around a restore (#766) the api stops the store and exits, and the api's own
+# restart pulls the store's start in ahead of it (Wants=, Before=), which
+# runs the restore step above. A reboot also resets the count.
 Restart=always
 # The filesystem is read-only to the store except its data and audit
 # directories (#754).

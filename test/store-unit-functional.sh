@@ -81,6 +81,16 @@
 #  11  the store's first start with the console redirect below removed: the
 #      outcome writer's line reaches the real /dev/kmsg from inside the
 #      store's unit, its device policy included (TC-804-23's console path)
+#  12  a staged store restore applied around a running store
+#      (geekdojo/geekdojo-brain#766): the shipped rasputin-api.service, with a
+#      stub ExecStart playing the api's restore hook, stops the store and
+#      exits 75; its restart pulls the store's start in, whose first
+#      ExecStartPre= swaps the staged data, seal key and fragment in, and the
+#      store comes up unsealed on the restored secrets before the api's next
+#      start sees the marker (TC-766-16); a staging missing seal.hcl fails the
+#      store's start, changes nothing and writes no marker (TC-766-17); and no
+#      start in scenarios 1 to 11 printed a rasputin-store-restore: line
+#      (TC-766-18)
 # The provisioner runs in every scenario from 2 on, as on a node: each start
 # of the store that reaches READY starts it. Scenario 3's first boot carries TC-805-27's empty
 # provision.tsv half, and scenario 7 its four policies and three roles
@@ -110,14 +120,20 @@
 #     (TC-805-31), a wrong seal key (TC-805-32, TC-805-33) and a LogLevelMax
 #     drop-in that keeps bao's lines out of the journal (TC-805-33);
 #   * scenario 8's missing policy file;
+#   * scenario 12's stub api ExecStart (a drop-in on the shipped
+#     rasputin-api.service), its stand-in rasputin-firstboot.service, the
+#     stores A and B and the staging laid out as the api's PrepareRestore lays
+#     it out, written by the test; A and B share the test store CA, standing
+#     in for the api placing the restored CA (#765);
 #   * `mount --make-rshared /`. A booted image gets a shared root from systemd
 #     itself (mount-setup); a container's root is private, and without this the
 #     credentials systemd mounts never reach the service.
 #
 # NOT COVERED: the image's kernel and squashfs (test/update-smoke.sh), memory
 # under load (F3.6), the api's first-boot handoff (#758), F3.3's alert itself
-# (#760), the job and alert for a failed init (#833), and the other
-# architecture: CI runs this on amd64. The unauthenticated-endpoint codes in
+# (#760), the job and alert for a failed init (#833), the real api binary's
+# restore (#765) and its store CA re-issue, and the other architecture: CI
+# runs this on amd64. The unauthenticated-endpoint codes in
 # scenario 7 cannot tell the options from their defaults; their placement is
 # test/store-config-test.sh's.
 #
@@ -138,6 +154,8 @@ TMPFILES="$OVERLAY/usr/lib/tmpfiles.d/rasputin.conf"
 CONFIG="$OVERLAY/etc/rasputin/openbao/openbao.hcl"
 INIT="$OVERLAY/etc/rasputin/openbao/init.json"
 STOREINIT="$OVERLAY/usr/lib/rasputin/store-init/rasputin-store-init.sh"
+STORERESTORE="$OVERLAY/usr/lib/rasputin/store-restore/rasputin-store-restore.sh"
+APIUNIT="$OVERLAY/etc/systemd/system/rasputin-api.service"
 PUNIT="$OVERLAY/etc/systemd/system/rasputin-store-provision.service"
 PSCRIPT="$OVERLAY/usr/lib/rasputin/store-provision/rasputin-store-provision.sh"
 PTSV="$OVERLAY/etc/rasputin/openbao/provision.tsv"
@@ -158,7 +176,7 @@ for t in openssl make curl tar jq; do
 	command -v "$t" >/dev/null 2>&1 || { echo "FAILED: this test needs $t, and it is not on PATH."; exit 1; }
 done
 for f in "$UNIT" "$TMPFILES" "$POSTBUILD" "$PKG/openbao.mk" "$PKG/openbao.hash" "$TLS_REFUSAL" \
-	"$STOREINIT" "$OUTCOME_LIB" "$APIPKG/rasputin-api.mk" "$APIPKG/rasputin-api.hash" "$PUNIT" "$PSCRIPT" "$PTSV"; do
+	"$STOREINIT" "$STORERESTORE" "$APIUNIT" "$OUTCOME_LIB" "$APIPKG/rasputin-api.mk" "$APIPKG/rasputin-api.hash" "$PUNIT" "$PSCRIPT" "$PTSV"; do
 	[ -f "$f" ] || { echo "FAILED: the file $f is missing."; exit 1; }
 done
 # The store's main config, which this test never writes for itself (TC-756-10).
@@ -233,15 +251,17 @@ fake_root() {
 		"$_r/board/rasputin/common/rootfs-overlay/etc/systemd/system" \
 		"$_r/board/rasputin/common/rootfs-overlay/usr/lib/tmpfiles.d" \
 		"$_r/board/rasputin/common/rootfs-overlay/usr/lib/rasputin/store-init" \
+		"$_r/board/rasputin/common/rootfs-overlay/usr/lib/rasputin/store-restore" \
 		"$_r/board/rasputin/common/rootfs-overlay/usr/lib/rasputin/outcome" \
 		"$_r/board/rasputin/common/rootfs-overlay/usr/lib/rasputin/store-provision" \
 		"$_r/board/rasputin/common/rootfs-overlay/etc/rasputin/openbao"
 	cp "$0" "$_r/test/store-unit-functional.sh"
 	cp "$ROOT"/test/lib/*.sh "$_r/test/lib/"
-	cp "$UNIT" "$PUNIT" "$_r/board/rasputin/common/rootfs-overlay/etc/systemd/system/"
+	cp "$UNIT" "$PUNIT" "$APIUNIT" "$_r/board/rasputin/common/rootfs-overlay/etc/systemd/system/"
 	cp "$CONFIG" "$INIT" "$PTSV" "$_r/board/rasputin/common/rootfs-overlay/etc/rasputin/openbao/"
 	cp "$PSCRIPT" "$_r/board/rasputin/common/rootfs-overlay/usr/lib/rasputin/store-provision/"
 	cp "$STOREINIT" "$_r/board/rasputin/common/rootfs-overlay/usr/lib/rasputin/store-init/"
+	cp "$STORERESTORE" "$_r/board/rasputin/common/rootfs-overlay/usr/lib/rasputin/store-restore/"
 	cp "$OUTCOME_LIB" "$_r/board/rasputin/common/rootfs-overlay/usr/lib/rasputin/outcome/"
 	cp "$APIPKG/rasputin-api.mk" "$APIPKG/rasputin-api.hash" "$_r/package/rasputin-api/"
 	cp "$POSTBUILD" "$_r/board/rasputin/common/"
@@ -331,6 +351,7 @@ install -m 0644 /overlay/etc/systemd/system/openbao.service /etc/systemd/system/
 install -D -m 0644 /overlay/etc/rasputin/openbao/openbao.hcl /etc/rasputin/openbao/openbao.hcl
 install -D -m 0644 /overlay/etc/rasputin/openbao/init.json /etc/rasputin/openbao/init.json
 install -D -m 0755 /overlay/usr/lib/rasputin/store-init/rasputin-store-init.sh /usr/lib/rasputin/store-init/rasputin-store-init.sh
+install -D -m 0755 /overlay/usr/lib/rasputin/store-restore/rasputin-store-restore.sh /usr/lib/rasputin/store-restore/rasputin-store-restore.sh
 install -D -m 0644 /overlay/usr/lib/rasputin/outcome/outcome.sh /usr/lib/rasputin/outcome/outcome.sh
 # The store provisioner (#805): its unit, its script and the shipped
 # provision.tsv, verbatim.
@@ -344,7 +365,7 @@ install -m 0644 /root/openbao-policy/*.hcl /usr/share/rasputin/openbao-policy/
 # TEST HARNESS: in a privileged container /dev/kmsg is the host's, so the
 # outcome writer's console line goes to a file the test reads instead.
 mkdir -p /etc/systemd/system/openbao.service.d
-printf '[Service]\nEnvironment=RASPUTIN_STOREINIT_KMSG=/run/store-init-console\n' >/etc/systemd/system/openbao.service.d/harness-console.conf
+printf '[Service]\nEnvironment=RASPUTIN_STOREINIT_KMSG=/run/store-init-console\nEnvironment=RASPUTIN_STORERESTORE_KMSG=/run/store-restore-console\n' >/etc/systemd/system/openbao.service.d/harness-console.conf
 mkdir -p /etc/systemd/system/rasputin-store-provision.service.d
 printf '[Service]\nEnvironment=RASPUTIN_STOREPROV_KMSG=/run/store-provision-console\n' >/etc/systemd/system/rasputin-store-provision.service.d/harness-console.conf
 systemctl daemon-reload
@@ -504,9 +525,16 @@ journal=$(inside "journalctl -u openbao.service --no-pager -o cat" | grep 'Faile
 check "the unit's journal says the credentials could not be set up" "$(yes_if [ -n "$journal" ])" \
 	"$(inside "journalctl -u openbao.service --no-pager -o cat | tail -5" | tr '\n' '|')"
 [ -n "$journal" ] && printf '         journal: %s\n' "$journal"
-exit_status=$(show ExecMainStatus)
-# 243 is the spawn step's own status: bao was never executed.
-check "the store's start exited 243, systemd's CREDENTIALS status (got '$exit_status')" "$(yes_if [ "$exit_status" = 243 ])"
+# systemd sets the credentials up when it spawns the unit's first process,
+# which since geekdojo/geekdojo-brain#766 is the restore step, the first
+# ExecStartPre=. So the failed spawn is that control process's, and systemd
+# puts 243, the spawn step's own status, on it rather than on ExecMainStatus:
+# bao was never executed (as for the provisioner's control process,
+# TC-805-34).
+c243=$(inside "journalctl -u openbao.service --no-pager -o cat" | grep -c 'Control process exited, code=exited, status=243/CREDENTIALS' || true)
+check "the store's start failed with 243, systemd's CREDENTIALS status, on its first control process (got ${c243:-0} lines)" "$(yes_if [ "${c243:-0}" -ge 1 ])"
+check "the failed spawn is the restore step's, the unit's first process" \
+	"$(yes_if contains "spawning /usr/lib/rasputin/store-restore/rasputin-store-restore.sh" "$journal")" "$journal"
 put_seal
 inside "systemctl reset-failed openbao.service" >/dev/null 2>&1
 
@@ -728,6 +756,14 @@ case "$1" in
 		od -An -N12 -tx1 /dev/urandom | tr -d ' \n' >/root/sentinel
 		c --cert /pki/api.pem --key /pki/api.key -H "@/root/api.token.hdr" -o /dev/null -w '%{http_code}' \
 			-X POST --data "{\"data\":{\"v\":\"$(cat /root/sentinel)\"}}" "$U/rasputin-secrets/data/apps/store-unit-test"
+		;;
+	read)
+		# read — the sentinel's status through the api's role; the body, when
+		# there is one, into /root/read.json (scenario 12).
+		login api rasputin-api /root/api.token || { echo "login failed"; exit 1; }
+		rm -f /root/read.json
+		c --cert /pki/api.pem --key /pki/api.key -H "@/root/api.token.hdr" -o /root/read.json -w '%{http_code}' \
+			"$U/rasputin-secrets/data/apps/store-unit-test"
 		;;
 esac
 READ
@@ -1420,6 +1456,199 @@ check "TC-804-23 the outcome writer did not report that /dev/kmsg refused its li
 km=$(inside "dmesg" | grep -c 'rasputin-store-init: outcome=initialised' || true)
 check "TC-804-23 the kernel log holds the rasputin-store-init: outcome=initialised line (got ${km:-0})" "$(yes_if [ "${km:-0}" -ge 1 ])"
 inside "systemctl stop openbao.service" >/dev/null 2>&1
+
+echo
+echo "12. a staged store restore around a running store (TC-766-16 to TC-766-18)"
+# TC-766-18: every start above ran the restore step with nothing staged, and
+# it printed nothing.
+rl=$(inside "journalctl --no-pager -o cat" | grep -c 'rasputin-store-restore:' || true)
+check "TC-766-18 no start in scenarios 1 to 11 printed a rasputin-store-restore: line (got ${rl:-?})" "$(yes_if [ "${rl:-}" = 0 ])"
+
+RP=$V/restore-pending
+API_STUB_DIR=/run/stub-api
+# TEST HARNESS: the api's restore hook (restoreRestartHook), played by a stub
+# ExecStart on the shipped rasputin-api.service. Every start records whether
+# the marker exists and the store's ActiveState. With the trigger file it
+# stops the store, records the data and seal hashes the store stopped on, and
+# exits 75, as the api does after staging a restore; otherwise it stays up.
+cat >"$SCRATCH/stub-api.sh" <<'STUB'
+#!/bin/sh
+# TEST HARNESS (store-unit-functional.sh scenario 12): stands in for the api.
+D=/run/stub-api
+V=/var/lib/rasputin
+mkdir -p "$D"
+n=$(cat "$D/n" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" >"$D/n"
+a=absent; [ -f "$V/restore-pending/store/applied" ] && a=present
+echo "start=$n applied=$a store=$(systemctl show openbao.service -p ActiveState --value)" >>"$D/log"
+if [ -e "$D/trigger" ]; then
+	rm -f "$D/trigger"
+	systemctl stop openbao.service
+	(cd "$V/openbao" && find . -type f -exec sha256sum {} + | sort | sha256sum) >"$D/data-at-stop"
+	cat "$V/openbao-seal/seal-key" "$V/openbao-seal/seal.hcl" | sha256sum >"$D/seal-at-stop"
+	exit 75
+fi
+exec sleep infinity
+STUB
+docker cp "$SCRATCH/stub-api.sh" "$CID:/root/stub-api.sh" >/dev/null || check "the stub api is copied into the container" 1
+inside "systemctl stop rasputin-api.service openbao.service; systemctl reset-failed openbao.service $PROV 2>/dev/null
+chmod 0755 /root/stub-api.sh
+install -m 0644 /overlay/etc/systemd/system/rasputin-api.service /etc/systemd/system/rasputin-api.service
+mkdir -p /etc/systemd/system/rasputin-api.service.d
+printf '[Service]\nType=simple\nWatchdogSec=0\nExecStart=\nExecStart=/root/stub-api.sh\n' >/etc/systemd/system/rasputin-api.service.d/harness-stub.conf
+printf '[Unit]\nDescription=TEST HARNESS stand-in firstboot\n[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/usr/bin/true\n' >/etc/systemd/system/rasputin-firstboot.service
+printf '[Service]\nEnvironment=RASPUTIN_STOREINIT_KMSG=/run/store-init-console\nEnvironment=RASPUTIN_STORERESTORE_KMSG=/run/store-restore-console\n' >/etc/systemd/system/openbao.service.d/harness-console.conf
+systemctl daemon-reload" >/dev/null 2>&1 || check "the shipped api unit, its stub drop-in and the stand-in firstboot are installed" 1
+want_sha=$(openssl dgst -sha256 -r "$APIUNIT" | cut -d' ' -f1)
+got_sha=$(inside "sha256sum /etc/systemd/system/rasputin-api.service" | cut -d' ' -f1)
+check "TC-766-16 the installed rasputin-api.service is the overlay's, byte for byte (sha256 $got_sha)" \
+	"$(yes_if eval '[ -n "$want_sha" ] && [ "$got_sha" = "$want_sha" ]')"
+
+# fresh_store — a store as on a fresh flash: data and audit wiped, this boot's
+# store-init record cleared, then a start that self-initialises it.
+fresh_store() {
+	inside "systemctl stop rasputin-api.service openbao.service; systemctl reset-failed openbao.service $PROV 2>/dev/null
+rm -rf $V/openbao/* $V/openbao/.[!.]* $V/openbao-audit/* /run/rasputin-store-init $RP
+systemctl start openbao.service" >/dev/null 2>&1
+	wait_for "sys/health answers 200 on the freshly initialised store" "$HEALTH_200" || fails=$((fails + 1))
+}
+# reflash_b — store B, as on a reflashed node: data wiped, the seal key and
+# fragment removed, a new pair from the real rasputin-seal-key.sh, then the
+# store self-initialises on it.
+reflash_b() {
+	inside "systemctl stop rasputin-api.service openbao.service
+rm -rf $V/openbao/* $V/openbao/.[!.]* $V/openbao-seal/seal-key $V/openbao-seal/seal.hcl" >/dev/null 2>&1
+	_o=$(inside "RASPUTIN_SEALKEY_KMSG=/dev/null sh /overlay/usr/lib/rasputin/seal-key/rasputin-seal-key.sh; echo rc=\$?" 2>&1)
+	check "$1: the real rasputin-seal-key.sh made B's key and fragment (outcome=created)" \
+		"$(yes_if eval 'contains "rc=0" "$_o" && contains "rasputin-seal-key: outcome=created" "$_o"')" "$_o"
+	fresh_store
+	_b=$(inside "grep -o 'rasputin-[0-9a-f-]*' $V/openbao-seal/seal.hcl | head -n 1")
+	check "$1: B's key id ($_b) is not A's ($FRAG_A_ID)" "$(yes_if eval '[ -n "$_b" ] && [ "$_b" != "$FRAG_A_ID" ]')"
+	_c=$(inside "sh /root/store-read.sh read")
+	check "$1: store B is running and A's sentinel answers 404 on it (got '$_c')" "$(yes_if [ "$_c" = 404 ])"
+}
+# stage_a [MISSING] — store A staged under restore-pending/ as PrepareRestore
+# lays it out: root, 0700 directories, 0600 files; store/data, seal-key,
+# seal.hcl and openbao-version, and trust/store-ca.{key,pem}. MISSING names a
+# member left out.
+stage_a() {
+	inside "set -e
+rm -rf $RP
+mkdir -m 0700 $RP $RP/store $RP/trust
+cp -a /root/stash-a/data $RP/store/data
+chown -R 0:0 $RP/store/data
+find $RP/store/data -type d -exec chmod 0700 {} +
+find $RP/store/data -type f -exec chmod 0600 {} +
+install -m 0600 /root/stash-a/seal-key $RP/store/seal-key
+install -m 0600 /root/stash-a/seal.hcl $RP/store/seal.hcl
+printf 'v2.7.1\n' >$RP/store/openbao-version; chmod 0600 $RP/store/openbao-version
+install -m 0600 /pki/ca.key $RP/trust/store-ca.key
+install -m 0600 /pki/store-ca.pem $RP/trust/store-ca.pem
+printf '{\"id\":\"store-unit-functional\"}\n' >$RP/restore.json; chmod 0600 $RP/restore.json
+[ -z '${1:-}' ] || rm -f $RP/store/${1:-none}" || check "store A is staged under $RP" 1
+}
+# staged_sum — every path under restore-pending/ but the marker, with each
+# file's sha256.
+staged_sum() { inside "cd $RP && find . ! -path ./store/applied -print | sort | while read -r f; do if [ -f \"\$f\" ]; then sha256sum \"\$f\"; else echo \"\$f\"; fi; done"; }
+# trigger LABEL — the stub api's start, with the trigger: it stops the store
+# and exits 75, and its restart follows.
+trigger() {
+	inside "rm -rf $API_STUB_DIR; mkdir -p $API_STUB_DIR; touch $API_STUB_DIR/trigger; rm -f /run/store-restore-console
+systemctl start --no-block rasputin-api.service" >/dev/null 2>&1
+}
+
+echo "  -- store A, the backup's store"
+put_seal || check "store A's seal key and fragment (the oneshot's, kept in /pki) are installed" 1
+fresh_store
+code=$(inside "sh /root/store-read.sh write")
+check "TC-766-16 the api role writes a sentinel to store A (got '$code')" "$(yes_if [ "$code" = 200 ])"
+# TEST HARNESS: A's data and seal pair kept, standing in for the backup
+# capture, with the store stopped.
+inside "systemctl stop openbao.service; rm -rf /root/stash-a; mkdir -m 0700 /root/stash-a
+cp -a $V/openbao /root/stash-a/data && cp -p $V/openbao-seal/seal-key $V/openbao-seal/seal.hcl /root/stash-a/ && cp -p /root/sentinel /root/stash-a/sentinel" \
+	|| check "store A is stashed" 1
+
+echo "  -- the restore applied around running store B (TC-766-16)"
+reflash_b "TC-766-16"
+stage_a
+STAGED_SUM=$(staged_sum)
+REC_BEFORE=$(inside "sha256sum /run/rasputin-store-init/outcome" | cut -d' ' -f1)
+INV_B=$(show InvocationID)
+check "TC-766-16 store B is active before the restore (InvocationID $INV_B)" "$(yes_if eval '[ "$(show ActiveState)" = active ] && [ -n "$INV_B" ]')"
+C12=$(cursor)
+trigger
+wait_for "the stub api has started a second time, and the store is active under a new invocation" \
+	"grep -q '^start=2 ' $API_STUB_DIR/log && [ \"\$(systemctl show openbao.service -p ActiveState --value)\" = active ] && [ \"\$(systemctl show openbao.service -p InvocationID --value)\" != '$INV_B' ]" \
+	|| fails=$((fails + 1))
+INV_A=$(show InvocationID)
+stub=$(inside "cat $API_STUB_DIR/log")
+printf '%s\n' "$stub" | sed 's/^/         stub api: /'
+check "TC-766-16 the store was stopped by the stub api and started again under a new invocation ($INV_B -> $INV_A)" \
+	"$(yes_if eval '[ -n "$INV_A" ] && [ "$INV_A" != "$INV_B" ] && contains "start=1 applied=absent store=active" "$stub"')" "$stub"
+wait_for "the store's new invocation journals outcome=applied" \
+	"journalctl _SYSTEMD_INVOCATION_ID=$INV_A --no-pager -o cat | grep -q 'rasputin-store-restore: outcome=applied'" || fails=$((fails + 1))
+ji=$(inside "journalctl _SYSTEMD_INVOCATION_ID=$INV_A --no-pager -o cat")
+line=$(printf '%s\n' "$ji" | grep 'rasputin-store-restore: outcome=applied' || true)
+check "TC-766-16 that invocation's journal holds rasputin-store-restore: outcome=applied" "$(yes_if [ -n "$line" ])" \
+	"$(printf '%s\n' "$ji" | tail -5 | tr '\n' '|')"
+[ -n "$line" ] && printf '         journal: %s\n' "$line"
+check "TC-766-16 the stub api's restarted start saw the marker, with the store active" \
+	"$(yes_if contains "start=2 applied=present store=active" "$stub")" "$stub"
+wait_for "sys/health answers 200 on the restored store" "$HEALTH_200" || fails=$((fails + 1))
+check "TC-766-16 sys/health answers 200, unsealed (got '$(store_get sys/health)')" "$(yes_if [ "$(store_get sys/health)" = 200 ])"
+check "TC-766-16 the seal.hcl credential names A's key id ($FRAG_A_ID)" \
+	"$(yes_if inside "grep -qF '$FRAG_A_ID' $CREDS/seal.hcl")"
+check "TC-766-16 the live seal-key is A's, byte for byte" \
+	"$(yes_if [ "$(inside "sha256sum </root/stash-a/seal-key")" = "$(inside "sha256sum <$V/openbao-seal/seal-key")" ])"
+code=$(inside "sh /root/store-read.sh read")
+got=$(inside "cat /root/read.json" | jq -r .data.data.v 2>/dev/null)
+want=$(inside "cat /root/stash-a/sentinel")
+check "TC-766-16 the sentinel reads back as A's value (status '$code')" "$(yes_if eval '[ "$code" = 200 ] && [ -n "$want" ] && [ "$got" = "$want" ]')"
+own=$(inside "stat -c '%a %u:%g' $V/openbao; find $V/openbao ! -uid $BAO_UID | wc -l")
+check "TC-766-16 the data directory is 0700 $BAO_UID:$BAO_GID and every entry under it is owned by $BAO_UID (got '$(printf '%s' "$own" | tr '\n' ' ')')" \
+	"$(yes_if [ "$own" = "700 $BAO_UID:$BAO_GID
+0" ])"
+left=$(inside "find $V -name '.rasputin-restore-*'")
+check "TC-766-16 no .rasputin-restore-* path is left" "$(yes_if [ -z "$left" ])" "$left"
+check "TC-766-16 restore-pending/ is whole, trust/store-ca.* and store/openbao-version included" \
+	"$(yes_if eval '[ "$(staged_sum)" = "$STAGED_SUM" ] && contains "./trust/store-ca.key" "$STAGED_SUM" && contains "./store/openbao-version" "$STAGED_SUM"')"
+check "TC-766-16 /run/rasputin-store-init/outcome is byte-identical to its content before the stop" \
+	"$(yes_if [ "$(inside "sha256sum /run/rasputin-store-init/outcome" | cut -d' ' -f1)" = "$REC_BEFORE" ])"
+check "TC-766-16 that invocation's journal has no rasputin-store-init: outcome=initialised line" \
+	"$(yes_if not_contains 'rasputin-store-init: outcome=initialised' "$ji")"
+hex=$(inside "od -An -v -tx1 /root/stash-a/seal-key | tr -d ' \n' >/root/a-key.hex; wc -c </root/a-key.hex; journalctl --no-pager -o cat | grep -c -F -f /root/a-key.hex; rm -f /root/a-key.hex")
+check "TC-766-16 no byte of A's key, in hex, is in the journal (hex length, journal lines: '$(printf '%s' "$hex" | tr '\n' ' ')')" \
+	"$(yes_if eval '[ "$(printf "%s\n" "$hex" | sed -n 1p | tr -d " ")" = 64 ] && [ "$(printf "%s\n" "$hex" | sed -n 2p)" = 0 ]')"
+
+echo "  -- a staging missing seal.hcl, around running store B (TC-766-17)"
+reflash_b "TC-766-17"
+stage_a seal.hcl
+ACT_B=$(show ActiveEnterTimestampMonotonic)
+INV_B=$(show InvocationID)
+trigger
+wait_for "the stub api has started a second time, and the store is failed with no job after the refusal" \
+	"grep -q '^start=2 ' $API_STUB_DIR/log && [ \"\$(systemctl show openbao.service -p ActiveState --value)\" = failed ] && [ -z \"\$(systemctl show openbao.service -p Job --value)\" ] && journalctl -u openbao.service --after-cursor='$C12' --no-pager -o cat | grep -q 'rasputin-store-restore: outcome=refused'" \
+	|| fails=$((fails + 1))
+stub=$(inside "cat $API_STUB_DIR/log")
+printf '%s\n' "$stub" | sed 's/^/         stub api: /'
+INV_F=$(show InvocationID)
+jf=$(inside "journalctl _SYSTEMD_INVOCATION_ID=$INV_F --no-pager -o cat")
+line=$(printf '%s\n' "$jf" | grep 'rasputin-store-restore: outcome=refused' || true)
+check "TC-766-17 the store's start ($INV_F, not $INV_B) journals rasputin-store-restore: outcome=refused, naming seal.hcl" \
+	"$(yes_if eval '[ "$INV_F" != "$INV_B" ] && contains "$RP/store/seal.hcl is missing" "$line"')" "$(printf '%s\n' "$jf" | tail -5 | tr '\n' '|')"
+[ -n "$line" ] && printf '         journal: %s\n' "$line"
+st="$(show ActiveState) $(show Result)"
+check "TC-766-17 the store's start fails at ExecStartPre: failed, exit-code (got '$st')" "$(yes_if [ "$st" = "failed exit-code" ])"
+check "TC-766-17 the store never became active while the staging was in place (ActiveEnterTimestampMonotonic still $ACT_B)" \
+	"$(yes_if eval '[ "$(show ActiveEnterTimestampMonotonic)" = "$ACT_B" ] && [ "$ACT_B" -gt 0 ]')"
+check "TC-766-17 B's data is unchanged since the store stopped" \
+	"$(yes_if [ "$(inside "cd $V/openbao && find . -type f -exec sha256sum {} + | sort | sha256sum")" = "$(inside "cat $API_STUB_DIR/data-at-stop")" ])"
+check "TC-766-17 B's seal-key and seal.hcl are unchanged" \
+	"$(yes_if [ "$(inside "cat $V/openbao-seal/seal-key $V/openbao-seal/seal.hcl | sha256sum")" = "$(inside "cat $API_STUB_DIR/seal-at-stop")" ])"
+check "TC-766-17 there is no restore-pending/store/applied" "$(yes_if inside "test ! -e $RP/store/applied")"
+check "TC-766-17 the stub api's restarted start recorded the marker absent" "$(yes_if contains "start=2 applied=absent" "$stub")" "$stub"
+left=$(inside "find $V -name '.rasputin-restore-*'")
+check "TC-766-17 no .rasputin-restore-* path is left" "$(yes_if [ -z "$left" ])" "$left"
+inside "systemctl stop rasputin-api.service openbao.service; systemctl reset-failed openbao.service $PROV 2>/dev/null; rm -rf $RP /root/stash-a" >/dev/null 2>&1
 
 echo
 if [ "$fails" -eq 0 ]; then

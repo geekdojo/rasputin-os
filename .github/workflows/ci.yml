@@ -311,6 +311,16 @@ jobs:
         env:
           REQUIRE_BUSYBOX: "1"
         run: sh test/store-init-outcome-test.sh
+      # The staged store restore's apply step (geekdojo/geekdojo-brain#766):
+      # every branch of rasputin-store-restore.sh against a scratch tree, the
+      # swap, the refusals, a copy failure, a failed rename at each phase with
+      # its rollback, a failed rollback, a failed cleanup after the commit, and
+      # no key byte in any output, under dash, bash, busybox ash and busybox's
+      # own applets.
+      - name: Store restore apply tests
+        env:
+          REQUIRE_BUSYBOX: "1"
+        run: sh test/store-restore-test.sh
       # The boot smoke's check that the api reports the secrets store ready
       # (geekdojo/geekdojo-brain#834): the verdict on GET /api/alerts, the
       # wait, the post-kill report, the first-run sign-in through an injected
@@ -495,8 +505,12 @@ jobs:
       # provisioner (geekdojo/geekdojo-brain#805): a first boot, N to N+1 with
       # no root token, the no-op re-apply, a refused write, a wrong-key store
       # ending on bao's own line, the store stopped mid-wait, an absent
-      # provisioner leaf and the record's read point. Same job as the
-      # store paths: it builds the same image. It reads the pinned api
+      # provisioner leaf and the record's read point; and a staged store
+      # restore (geekdojo/geekdojo-brain#766): the shipped api unit with a stub
+      # that stops the store and exits 75, whose restart starts the store
+      # through the restore step onto the restored data, key and fragment, and
+      # a staging missing seal.hcl that fails the store's start and writes no
+      # marker. Same job as the store paths: it builds the same image. It reads the pinned api
       # tarball's policy text (geekdojo/geekdojo-brain#804), so it is red until
       # the store-arming pin moves, by design; it is the job's last step, so
       # the seal-key and api-wiring steps above still run and report.

@@ -138,6 +138,19 @@
 # settle (geekdojo/geekdojo-brain#830). Required, as tmpfiles makes it; the
 # files in it fall under openbao-seal's sweep.
 0700  required  /var/lib/rasputin/openbao-seal/rotation
+# A staged store restore's work directories and marker
+# (geekdojo/geekdojo-brain#766). rasputin-store-restore.sh, openbao.service's
+# first ExecStartPre=, copies the staged store beside the live one and swaps
+# it in by renames; each work directory exists only during that start, or
+# after one that was interrupted. The data copy belongs to the store's uid,
+# as the data directory does; the seal copies are root's and their files fall
+# under openbao-seal's sweep. applied is the marker the api requires before
+# it starts on a staged store (#765), inside the api's root 0700 tree.
+0700  optional  /var/lib/rasputin/openbao/.rasputin-restore-new        990  990
+0700  optional  /var/lib/rasputin/openbao/.rasputin-restore-old
+0700  optional  /var/lib/rasputin/openbao-seal/.rasputin-restore-new
+0700  optional  /var/lib/rasputin/openbao-seal/.rasputin-restore-old
+0600  optional  /var/lib/rasputin/restore-pending/store/applied
 # tls/ and the three leaf directories are root's, written by the api (the
 # provisioner's since #805). Each leaf
 # directory holds leaf.key and leaf.pem. leaf.pem is NOT declared, and the leaf
