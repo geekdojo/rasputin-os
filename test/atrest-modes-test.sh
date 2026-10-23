@@ -634,11 +634,47 @@ store_cases() {
 		"$(yes_if passed "$rc" "$out")" "$out"
 }
 
+# restore_cases — TC-766-15: a staged store restore's work directories and
+# marker (geekdojo/geekdojo-brain#766), each present at its declared mode,
+# pass; each at 0750 or 0755 fails, naming it. The work directories' seal
+# copies are 0600 files under openbao-seal's sweep.
+RESTORE_PATHS="$VAR_RASPUTIN/openbao/.rasputin-restore-new $VAR_RASPUTIN/openbao/.rasputin-restore-old $VAR_RASPUTIN/openbao-seal/.rasputin-restore-new $VAR_RASPUTIN/openbao-seal/.rasputin-restore-old $VAR_RASPUTIN/restore-pending/store/applied"
+restore_cases() {
+	R=$(world)
+	umask 077
+	mkdir -p "$R$VAR_RASPUTIN/restore-pending/store"
+	for p in $RESTORE_PATHS; do
+		case "$p" in
+			*/applied) : >"$R$p"; chmod 0600 "$R$p" ;;
+			*) mkdir -p "$R$p"; chmod 0700 "$R$p" ;;
+		esac
+	done
+	: >"$R$VAR_RASPUTIN/openbao-seal/.rasputin-restore-new/seal-key"
+	chmod 0600 "$R$VAR_RASPUTIN/openbao-seal/.rasputin-restore-new/seal-key"
+	umask 022
+	chgrp -R "$MYGID" "$R"
+	out=$(run_audit "$R"); rc=$?
+	ok "TC-766-15 a tree with every restore work directory and the marker at its declared mode passes" \
+		"$(yes_if passed "$rc" "$out")" "$out"
+	for p in $RESTORE_PATHS; do
+		case "$p" in */applied) want=0600 ;; *) want=0700 ;; esac
+		for bad in 0750 0755; do
+			chmod "$bad" "$R$p"
+			out=$(run_audit "$R"); rc=$?
+			chmod "$want" "$R$p"
+			ok "TC-766-15 $p at $bad is refused" "$(yes_if [ "$rc" -ne 0 ])" "$out"
+			ok "TC-766-15 the failure names $p and its mode" \
+				"$(yes_if says "$p is $bad, declared $want" "$out")" "$out"
+		done
+	done
+}
+
 for SH in $TEST_SHELLS; do
 	echo "== $SH"
 	cases
 	owner_group_cases
 	store_cases
+	restore_cases
 done
 
 # ── a TERM ends the audit, cleans up, and writes no verdict ────────────────
@@ -889,6 +925,17 @@ ok "TC-804-17 openbao-audit is swept" \
 ok "TC-804-17 the inventory declares openbao-audit/audit.log optional 0600, 990:990" \
 	"$(yes_if [ "$(inv_row "$VAR_RASPUTIN/openbao-audit/audit.log")" = "0600 optional 990 990 5" ])" \
 	"inventory: $(inv_row "$VAR_RASPUTIN/openbao-audit/audit.log")"
+# TC-766-15: the restore's rows, with the values written here.
+while read -r rel want; do
+	ok "TC-766-15 the inventory declares $VAR_RASPUTIN/$rel as '$want'" \
+		"$(yes_if [ "$(inv_row "$VAR_RASPUTIN/$rel")" = "$want" ])" "inventory: $(inv_row "$VAR_RASPUTIN/$rel")"
+done <<'EOF_R'
+restore-pending/store/applied 0600 optional 0 0 3
+openbao/.rasputin-restore-new 0700 optional 990 990 5
+openbao/.rasputin-restore-old 0700 optional 0 0 3
+openbao-seal/.rasputin-restore-new 0700 optional 0 0 3
+openbao-seal/.rasputin-restore-old 0700 optional 0 0 3
+EOF_R
 for p in "$VAR_RASPUTIN/openbao" "$VAR_RASPUTIN/tls" \
 	"$VAR_RASPUTIN/tls/openbao-server" "$VAR_RASPUTIN/tls/openbao-client"; do
 	ok "TC-754-02 $p is not swept" \
@@ -928,9 +975,10 @@ ok "TC-754-13 the harness inventory keeps every non-comment line" \
 	"$(yes_if [ "$(grep -Ecv '^[[:space:]]*(#|$)' "$INVENTORY")" = "$(grep -Ecv '^[[:space:]]*(#|$)' "$HARNESS_INV")" ])"
 ok "TC-754-13 the harness inventory keeps every sweep line" \
 	"$(yes_if [ "$(grep '^sweep' "$INVENTORY")" = "$(grep '^sweep' "$HARNESS_INV")" ])"
-# Three since geekdojo-brain#804: the two directories and audit.log.
-ok "TC-754-13 the harness inventory rewrote all three store-owned rows" \
-	"$(yes_if [ "$(awk -v u="$ME" -v g="$MYGID" '$4 == u && $5 == g' "$HARNESS_INV" | grep -c 'rasputin/openbao')" -eq 3 ])" \
+# Three since geekdojo-brain#804: the two directories and audit.log. Four
+# since #766: the restore's data copy, openbao/.rasputin-restore-new.
+ok "TC-754-13 the harness inventory rewrote all four store-owned rows" \
+	"$(yes_if [ "$(awk -v u="$ME" -v g="$MYGID" '$4 == u && $5 == g' "$HARNESS_INV" | grep -c 'rasputin/openbao')" -eq 4 ])" \
 	"$(grep openbao "$HARNESS_INV")"
 ok "TC-754-13 the shipped inventory is untouched" \
 	"$(yes_if [ "$(cksum <"$INVENTORY")" = "$SHIPPED_SUM_BEFORE" ])"

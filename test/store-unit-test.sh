@@ -51,6 +51,11 @@ set +f
 BAO_USER=$1 BAO_UID=$2 BAO_GROUP=$3 BAO_GID=$4
 # The store's two ExecStartPost= values (TC-804-14, TC-805-25).
 STARTED_HOOK='-+/usr/lib/rasputin/store-init/rasputin-store-init.sh started'
+# TC-766-14: the staged-restore step (geekdojo/geekdojo-brain#766), `+` and
+# no `-`, so a refused or failed apply fails the store's start; and the
+# self-init outcome hook's pre after it.
+RESTORE_HOOK='+/usr/lib/rasputin/store-restore/rasputin-store-restore.sh'
+PRE_HOOK='-+/usr/lib/rasputin/store-init/rasputin-store-init.sh pre'
 PROV_PULL='-+/usr/bin/systemctl --no-block start rasputin-store-provision.service'
 [ -n "${BAO_GID:-}" ] || { echo "FAILED: OPENBAO_USERS ('$USERS') has fewer than four fields."; exit 1; }
 
@@ -131,7 +136,11 @@ $(values "$D" "$1" "$2")
 	# as root outside the sandbox) with its phase (geekdojo-brain#804).
 	exactly Service ExecStart \
 		'/usr/bin/bao server -config=/etc/rasputin/openbao/openbao.hcl -config=/etc/rasputin/openbao/init.json -config=/run/credentials/openbao.service/seal.hcl'
-	exactly Service ExecStartPre '-+/usr/lib/rasputin/store-init/rasputin-store-init.sh pre'
+	# TC-766-14: exactly two ExecStartPre lines, the restore step first.
+	_pre=$(values "$D" Service ExecStartPre)
+	check "[Service] ExecStartPre=$RESTORE_HOOK then ExecStartPre=$PRE_HOOK, exactly these two, in this order" \
+		"$(yes_if [ "$_pre" = "$RESTORE_HOOK
+$PRE_HOOK" ])" "got: $(printf '%s' "$_pre" | tr '\n' '|')"
 	# TC-804-14 and TC-805-25 (F-805-28): the outcome hook, then the start of
 	# the provisioner, -+ (never fails the store; root, outside the sandbox)
 	# and --no-block (the provisioner is ordered after this start).
@@ -349,7 +358,8 @@ trap 'rm -rf "$SCRATCH"' EXIT INT TERM
 # shipped one, with LINE added to SECTION (for SECTION "new", appended as its
 # own section; for SECTION "replace:OLD", put in place of the line OLD; for
 # SECTION "tmpfiles:OLD", the unit as shipped and the tmpfiles copy with LINE
-# in place of OLD), must fail verify, and the output must name NEEDLE (the
+# in place of OLD; for SECTION "swap:A|B", the lines A and B swapped and LINE
+# unused), must fail verify, and the output must name NEEDLE (the
 # line itself by default).
 refuses() {
 	mkdir -p "$SCRATCH/c"
@@ -358,6 +368,9 @@ refuses() {
 	case "$2" in
 		new) { cat "$UNIT"; printf '%s\n' "$3"; } >"$_copy" ;;
 		replace:*) awk -v o="${2#replace:}" -v l="$3" '$0 == o { print l; next } { print }' "$UNIT" >"$_copy" ;;
+		swap:*)
+			_a=${2#swap:}; _a=${_a%%|*}; _b=${2#*|}
+			awk -v a="$_a" -v b="$_b" '$0 == a { print b; next } $0 == b { print a; next } { print }' "$UNIT" >"$_copy" ;;
 		tmpfiles:*)
 			cp "$UNIT" "$_copy"
 			_tmpf="$SCRATCH/c/rasputin.conf"
@@ -400,7 +413,13 @@ refuses "GOMEMLIMIT=200MiB, above MemoryMax" 'replace:Environment=GOMEMLIMIT=60M
 # TC-804-14: a hook that could fail the store, one in the store's sandbox, and
 # an ExecStart without the self-init config.
 refuses "ExecStartPre without the - prefix" 'replace:ExecStartPre=-+/usr/lib/rasputin/store-init/rasputin-store-init.sh pre' \
-	'ExecStartPre=+/usr/lib/rasputin/store-init/rasputin-store-init.sh pre' '[Service] ExecStartPre=-+'
+	'ExecStartPre=+/usr/lib/rasputin/store-init/rasputin-store-init.sh pre' 'then ExecStartPre=-+/usr/lib/rasputin/store-init/rasputin-store-init.sh pre'
+# TC-766-14: the restore step with a - prefix, which would start the store on
+# the old data after a failed apply; and the two ExecStartPre lines swapped.
+refuses "the restore step with a -+ prefix" "replace:ExecStartPre=$RESTORE_HOOK" \
+	"ExecStartPre=-$RESTORE_HOOK" "ExecStartPre=$RESTORE_HOOK then"
+refuses "the restore step after the outcome hook's pre" "swap:ExecStartPre=$RESTORE_HOOK|ExecStartPre=$PRE_HOOK" \
+	'' "ExecStartPre=$RESTORE_HOOK then"
 refuses "ExecStopPost without the + prefix" 'replace:ExecStopPost=-+/usr/lib/rasputin/store-init/rasputin-store-init.sh stopped' \
 	'ExecStopPost=-/usr/lib/rasputin/store-init/rasputin-store-init.sh stopped' '[Service] ExecStopPost=-+'
 refuses "ExecStart without init.json" \
