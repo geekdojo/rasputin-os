@@ -12,9 +12,10 @@
 #
 # How. The real script runs with every collaborator pointed at a scratch tree
 # through RASPUTIN_STORERESTORE_*. Failures are injected by shims first on
-# PATH (TEST HARNESS): an mv that fails a chosen rename, an rm that fails on
-# the work directories once the marker is written, and a chown that records
-# its arguments. Each shim then runs the real tool. No root, no systemd: what
+# PATH, and under busybox sh through a function calling the shim (see run)
+# (TEST HARNESS): an mv that fails a chosen rename, an rm that fails on the
+# work directories once the marker is written, and a chown that records its
+# arguments. Each shim then runs the real tool. No root, no systemd: what
 # systemd does with the step is test/store-unit-functional.sh scenario 12.
 #
 # Shells. Every case runs under each shell in TEST_SHELLS (default: whichever
@@ -203,9 +204,23 @@ work_left() { find "$W" -name '.rasputin-restore-*' -print 2>/dev/null; }
 
 # run — the script under $SH; stdout, stderr and status apart. Every output is
 # kept for the secret scan (TC-766-13).
+#
+# busybox sh runs its own mv, rm and chown applets ahead of PATH (Ubuntu's
+# busybox-static, which the CI runner has, does), so a shim on PATH alone
+# never fires there. A shell function does: when a shim is in use, busybox sh
+# defines the shim's command as a function calling it, then sources the
+# script with $0 set as a direct run sets it (the test/tls-refusal-test.sh
+# pattern). TEST HARNESS only; the script itself is unchanged.
 run() {
+	set -- "$SCRIPT"
 	case "$SH" in
-		busybox_sh|busybox_applets) _cmd="busybox sh" ;;
+		busybox_sh|busybox_applets)
+			_cmd="busybox sh"
+			if [ -n "$SHIM_PATH" ]; then
+				_fn=$(basename "$SHIM_PATH")
+				set -- -c "$_fn() { \"$SHIM_PATH/$_fn\" \"\$@\"; }; . \"\$0\"" "$SCRIPT"
+			fi
+			;;
 		*) _cmd=$SH ;;
 	esac
 	_bb=0
@@ -218,7 +233,7 @@ run() {
 		SHIM_CHOWN_LOG="$W/chown.log" \
 		RASPUTIN_STORERESTORE_PENDING="$PENDING" RASPUTIN_STORERESTORE_DATA="$D" \
 		RASPUTIN_STORERESTORE_SEAL="$S" RASPUTIN_STORERESTORE_KMSG="$W/kmsg" \
-		$_cmd "$SCRIPT" > "$W/stdout" 2> "$W/stderr"
+		$_cmd "$@" > "$W/stdout" 2> "$W/stderr"
 	RC=$?
 	OUT=$(cat "$W/stdout")
 	cat "$W/stdout" "$W/stderr" "$W/kmsg" >> "$ALLOUT"
