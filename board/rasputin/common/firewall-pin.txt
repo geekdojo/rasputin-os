@@ -46,12 +46,11 @@
 #
 # WHY THIS VALUE
 #
-# 2026.10.2 is the STABLE firewall of the 2026.10.2 lockstep, published
-# 2026-10-19 from firewall 24520ef (agent re-pinned from dev.197 to the CP
-# stable v2026.10.2, the same CP release this image's agent/api pins name;
-# pre-flight run 39324988260 on the tagged commit; tag release run
-# 39325906740). It promotes the 2026.10.2-dev.160 chain. Its manifest names
-# version 2026.10.2, channel stable. Stable only ever bakes stable.
+# 2026.10.3-dev.164 is the firewall dev build of dev chain A on the 2026.10.3
+# line (epic geekdojo/geekdojo-brain#708), published 2026-10-24 from firewall
+# 0b82cc5 (PR #107: agent pinned to the CP dev release v2026.10.3-dev.199, the
+# same CP release this image's agent/api pins name; Snort rules re-pinned to
+# d267a508; release run 40142230535). Dev only bakes dev.
 #
 # History: 2026.09.4-dev.127 was the first pin -- the FIRST firewall release
 # that publishes manifest.json.sig (dev.126 and earlier ship no sig asset).
@@ -67,5 +66,6 @@
 # On the 2026.10.1 dev line: dev.153 (OS dev.303), dev.155 (OS dev.319).
 # 2026.10.1 (stable) was the pin of the 2026.10.1 stable OS.
 # On the 2026.10.2 dev line: dev.160 (OS dev.323).
+# 2026.10.2 (stable) was the pin of the 2026.10.2 stable OS.
 #
-2026.10.2
+2026.10.3-dev.164
