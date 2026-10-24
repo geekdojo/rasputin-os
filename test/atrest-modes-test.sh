@@ -669,12 +669,45 @@ restore_cases() {
 	done
 }
 
+# rollback_cases — TC-801-27: the store version gate's marker, hold, aside
+# copy and work directories (geekdojo/geekdojo-brain#801), each present at its
+# declared mode, pass; each at a group- or world-readable mode fails, naming
+# it.
+ROLLBACK_PATHS="$VAR_RASPUTIN/openbao-version $VAR_RASPUTIN/openbao-version-hold $VAR_RASPUTIN/openbao-rolled-back.tar $VAR_RASPUTIN/openbao/.rasputin-rollback-new $VAR_RASPUTIN/openbao/.rasputin-rollback-old"
+rollback_cases() {
+	R=$(world)
+	umask 077
+	for p in $ROLLBACK_PATHS; do
+		case "$p" in
+			*/.rasputin-rollback-*) mkdir -p "$R$p"; chmod 0700 "$R$p" ;;
+			*) : >"$R$p"; chmod 0600 "$R$p" ;;
+		esac
+	done
+	umask 022
+	chgrp -R "$MYGID" "$R"
+	out=$(run_audit "$R"); rc=$?
+	ok "TC-801-27 a tree with the gate's marker, hold, aside copy and work directories at their declared modes passes" \
+		"$(yes_if passed "$rc" "$out")" "$out"
+	for p in $ROLLBACK_PATHS; do
+		case "$p" in */.rasputin-rollback-*) want=0700 bads="0750 0755" ;; *) want=0600 bads="0640 0644" ;; esac
+		for bad in $bads; do
+			chmod "$bad" "$R$p"
+			out=$(run_audit "$R"); rc=$?
+			chmod "$want" "$R$p"
+			ok "TC-801-27 $p at $bad is refused" "$(yes_if [ "$rc" -ne 0 ])" "$out"
+			ok "TC-801-27 the failure names $p and its mode" \
+				"$(yes_if says "$p is $bad, declared $want" "$out")" "$out"
+		done
+	done
+}
+
 for SH in $TEST_SHELLS; do
 	echo "== $SH"
 	cases
 	owner_group_cases
 	store_cases
 	restore_cases
+	rollback_cases
 done
 
 # ── a TERM ends the audit, cleans up, and writes no verdict ────────────────
@@ -936,6 +969,17 @@ openbao/.rasputin-restore-old 0700 optional 0 0 3
 openbao-seal/.rasputin-restore-new 0700 optional 0 0 3
 openbao-seal/.rasputin-restore-old 0700 optional 0 0 3
 EOF_R
+# TC-801-27: the store version gate's rows (geekdojo/geekdojo-brain#801).
+while read -r rel want; do
+	ok "TC-801-27 the inventory declares $VAR_RASPUTIN/$rel as '$want'" \
+		"$(yes_if [ "$(inv_row "$VAR_RASPUTIN/$rel")" = "$want" ])" "inventory: $(inv_row "$VAR_RASPUTIN/$rel")"
+done <<'EOF_RB'
+openbao-version 0600 optional 0 0 3
+openbao-version-hold 0600 optional 0 0 3
+openbao-rolled-back.tar 0600 optional 0 0 3
+openbao/.rasputin-rollback-new 0700 optional 990 990 5
+openbao/.rasputin-rollback-old 0700 optional 0 0 3
+EOF_RB
 for p in "$VAR_RASPUTIN/openbao" "$VAR_RASPUTIN/tls" \
 	"$VAR_RASPUTIN/tls/openbao-server" "$VAR_RASPUTIN/tls/openbao-client"; do
 	ok "TC-754-02 $p is not swept" \
@@ -976,9 +1020,10 @@ ok "TC-754-13 the harness inventory keeps every non-comment line" \
 ok "TC-754-13 the harness inventory keeps every sweep line" \
 	"$(yes_if [ "$(grep '^sweep' "$INVENTORY")" = "$(grep '^sweep' "$HARNESS_INV")" ])"
 # Three since geekdojo-brain#804: the two directories and audit.log. Four
-# since #766: the restore's data copy, openbao/.rasputin-restore-new.
-ok "TC-754-13 the harness inventory rewrote all four store-owned rows" \
-	"$(yes_if [ "$(awk -v u="$ME" -v g="$MYGID" '$4 == u && $5 == g' "$HARNESS_INV" | grep -c 'rasputin/openbao')" -eq 4 ])" \
+# since #766: the restore's data copy, openbao/.rasputin-restore-new. Five
+# since #801: the gate's unpacked copy, openbao/.rasputin-rollback-new.
+ok "TC-754-13 the harness inventory rewrote all five store-owned rows" \
+	"$(yes_if [ "$(awk -v u="$ME" -v g="$MYGID" '$4 == u && $5 == g' "$HARNESS_INV" | grep -c 'rasputin/openbao')" -eq 5 ])" \
 	"$(grep openbao "$HARNESS_INV")"
 ok "TC-754-13 the shipped inventory is untouched" \
 	"$(yes_if [ "$(cksum <"$INVENTORY")" = "$SHIPPED_SUM_BEFORE" ])"

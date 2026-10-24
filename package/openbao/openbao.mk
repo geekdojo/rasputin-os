@@ -43,6 +43,11 @@
 # (V=<version> OUT=<path>). Its run for this pin is committed as
 # openbao-evidence/798/raw/signature-verification-v2.7.1.txt.
 #
+# Release ordering (geekdojo/geekdojo-brain#801): the first release that
+# carries the store's version gate (rasputin-store-rollback.sh) must keep this
+# version unchanged, because a fallback from a release that bumps it lands on
+# a slot with no gate, so a bump ships only in a later release.
+#
 # To bump: run the procedure, set VERSION, update openbao.hash and the version
 # in SOURCE (test/openbao-package-test.sh fails if they disagree), and bump
 # the control-plane const in the same batch.

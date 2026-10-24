@@ -91,6 +91,17 @@
 #      store's start, changes nothing and writes no marker (TC-766-17); and no
 #      start in scenarios 1 to 11 printed a rasputin-store-restore: line
 #      (TC-766-18)
+#  13  the store's version gate (geekdojo/geekdojo-brain#801), the unit's
+#      second ExecStartPre=: a start on data with no version marker adopts it
+#      as the pin (TC-801-35); equal versions change nothing (13a,
+#      TC-801-31); data marked newer than the pin with a pre-update copy in
+#      #800's shape, its version the live store's sys/health version, is
+#      rolled back to the copy before bao starts (13b, TC-801-32); with no
+#      copy the store never runs, its data is untouched and it stays stopped
+#      across restarts (13c, TC-801-33); and the gate's lines carry its
+#      identifier (13d, TC-801-34). Scenario 12's staged openbao-version is
+#      the live store's sys/health version (F-801-02), and every start in
+#      scenarios 1 to 12 passed the gate (TC-801-35)
 # The provisioner runs in every scenario from 2 on, as on a node: each start
 # of the store that reaches READY starts it. Scenario 3's first boot carries TC-805-27's empty
 # provision.tsv half, and scenario 7 its four policies and three roles
@@ -125,6 +136,9 @@
 #     stores A and B and the staging laid out as the api's PrepareRestore lays
 #     it out, written by the test; A and B share the test store CA, standing
 #     in for the api placing the restored CA (#765);
+#   * scenario 13's drop-in ExecStartPre= after the shipped three, which
+#     hashes the data directory between the gate and bao, its pre-update copy
+#     built by the test in #800's layout, and its version markers;
 #   * `mount --make-rshared /`. A booted image gets a shared root from systemd
 #     itself (mount-setup); a container's root is private, and without this the
 #     credentials systemd mounts never reach the service.
@@ -155,6 +169,8 @@ CONFIG="$OVERLAY/etc/rasputin/openbao/openbao.hcl"
 INIT="$OVERLAY/etc/rasputin/openbao/init.json"
 STOREINIT="$OVERLAY/usr/lib/rasputin/store-init/rasputin-store-init.sh"
 STORERESTORE="$OVERLAY/usr/lib/rasputin/store-restore/rasputin-store-restore.sh"
+STOREROLLBACK="$OVERLAY/usr/lib/rasputin/store-rollback/rasputin-store-rollback.sh"
+STORESWAP="$OVERLAY/usr/lib/rasputin/store-swap/swap.sh"
 APIUNIT="$OVERLAY/etc/systemd/system/rasputin-api.service"
 PUNIT="$OVERLAY/etc/systemd/system/rasputin-store-provision.service"
 PSCRIPT="$OVERLAY/usr/lib/rasputin/store-provision/rasputin-store-provision.sh"
@@ -176,7 +192,7 @@ for t in openssl make curl tar jq; do
 	command -v "$t" >/dev/null 2>&1 || { echo "FAILED: this test needs $t, and it is not on PATH."; exit 1; }
 done
 for f in "$UNIT" "$TMPFILES" "$POSTBUILD" "$PKG/openbao.mk" "$PKG/openbao.hash" "$TLS_REFUSAL" \
-	"$STOREINIT" "$STORERESTORE" "$APIUNIT" "$OUTCOME_LIB" "$APIPKG/rasputin-api.mk" "$APIPKG/rasputin-api.hash" "$PUNIT" "$PSCRIPT" "$PTSV"; do
+	"$STOREINIT" "$STORERESTORE" "$STOREROLLBACK" "$STORESWAP" "$APIUNIT" "$OUTCOME_LIB" "$APIPKG/rasputin-api.mk" "$APIPKG/rasputin-api.hash" "$PUNIT" "$PSCRIPT" "$PTSV"; do
 	[ -f "$f" ] || { echo "FAILED: the file $f is missing."; exit 1; }
 done
 # The store's main config, which this test never writes for itself (TC-756-10).
@@ -207,6 +223,7 @@ esac
 # The pin, the tarball name and the static user, read the way Buildroot reads
 # them. No version, URL or uid is written in this file.
 SITE=$(mk_var "$PKG/openbao.mk" OPENBAO_SITE) || exit 1
+PIN=$(mk_var "$PKG/openbao.mk" OPENBAO_VERSION) || exit 1
 SOURCE=$(mk_var "$PKG/openbao.mk" OPENBAO_SOURCE BR2_PACKAGE_OPENBAO=y "$BR_ARCH=y") || exit 1
 USERS=$(mk_var "$PKG/openbao.mk" OPENBAO_USERS) || exit 1
 set -f
@@ -252,6 +269,8 @@ fake_root() {
 		"$_r/board/rasputin/common/rootfs-overlay/usr/lib/tmpfiles.d" \
 		"$_r/board/rasputin/common/rootfs-overlay/usr/lib/rasputin/store-init" \
 		"$_r/board/rasputin/common/rootfs-overlay/usr/lib/rasputin/store-restore" \
+		"$_r/board/rasputin/common/rootfs-overlay/usr/lib/rasputin/store-rollback" \
+		"$_r/board/rasputin/common/rootfs-overlay/usr/lib/rasputin/store-swap" \
 		"$_r/board/rasputin/common/rootfs-overlay/usr/lib/rasputin/outcome" \
 		"$_r/board/rasputin/common/rootfs-overlay/usr/lib/rasputin/store-provision" \
 		"$_r/board/rasputin/common/rootfs-overlay/etc/rasputin/openbao"
@@ -262,6 +281,8 @@ fake_root() {
 	cp "$PSCRIPT" "$_r/board/rasputin/common/rootfs-overlay/usr/lib/rasputin/store-provision/"
 	cp "$STOREINIT" "$_r/board/rasputin/common/rootfs-overlay/usr/lib/rasputin/store-init/"
 	cp "$STORERESTORE" "$_r/board/rasputin/common/rootfs-overlay/usr/lib/rasputin/store-restore/"
+	cp "$STOREROLLBACK" "$_r/board/rasputin/common/rootfs-overlay/usr/lib/rasputin/store-rollback/"
+	cp "$STORESWAP" "$_r/board/rasputin/common/rootfs-overlay/usr/lib/rasputin/store-swap/"
 	cp "$OUTCOME_LIB" "$_r/board/rasputin/common/rootfs-overlay/usr/lib/rasputin/outcome/"
 	cp "$APIPKG/rasputin-api.mk" "$APIPKG/rasputin-api.hash" "$_r/package/rasputin-api/"
 	cp "$POSTBUILD" "$_r/board/rasputin/common/"
@@ -352,6 +373,8 @@ install -D -m 0644 /overlay/etc/rasputin/openbao/openbao.hcl /etc/rasputin/openb
 install -D -m 0644 /overlay/etc/rasputin/openbao/init.json /etc/rasputin/openbao/init.json
 install -D -m 0755 /overlay/usr/lib/rasputin/store-init/rasputin-store-init.sh /usr/lib/rasputin/store-init/rasputin-store-init.sh
 install -D -m 0755 /overlay/usr/lib/rasputin/store-restore/rasputin-store-restore.sh /usr/lib/rasputin/store-restore/rasputin-store-restore.sh
+install -D -m 0755 /overlay/usr/lib/rasputin/store-rollback/rasputin-store-rollback.sh /usr/lib/rasputin/store-rollback/rasputin-store-rollback.sh
+install -D -m 0644 /overlay/usr/lib/rasputin/store-swap/swap.sh /usr/lib/rasputin/store-swap/swap.sh
 install -D -m 0644 /overlay/usr/lib/rasputin/outcome/outcome.sh /usr/lib/rasputin/outcome/outcome.sh
 # The store provisioner (#805): its unit, its script and the shipped
 # provision.tsv, verbatim.
@@ -365,7 +388,7 @@ install -m 0644 /root/openbao-policy/*.hcl /usr/share/rasputin/openbao-policy/
 # TEST HARNESS: in a privileged container /dev/kmsg is the host's, so the
 # outcome writer's console line goes to a file the test reads instead.
 mkdir -p /etc/systemd/system/openbao.service.d
-printf '[Service]\nEnvironment=RASPUTIN_STOREINIT_KMSG=/run/store-init-console\nEnvironment=RASPUTIN_STORERESTORE_KMSG=/run/store-restore-console\n' >/etc/systemd/system/openbao.service.d/harness-console.conf
+printf '[Service]\nEnvironment=RASPUTIN_STOREINIT_KMSG=/run/store-init-console\nEnvironment=RASPUTIN_STORERESTORE_KMSG=/run/store-restore-console\nEnvironment=RASPUTIN_STOREROLLBACK_KMSG=/run/store-rollback-console\n' >/etc/systemd/system/openbao.service.d/harness-console.conf
 mkdir -p /etc/systemd/system/rasputin-store-provision.service.d
 printf '[Service]\nEnvironment=RASPUTIN_STOREPROV_KMSG=/run/store-provision-console\n' >/etc/systemd/system/rasputin-store-provision.service.d/harness-console.conf
 systemctl daemon-reload
@@ -678,6 +701,9 @@ store_get() {
 	inside "curl -sS --max-time $CTR_DEADLINE -o /dev/null -w '%{http_code}' --cacert /pki/store-ca.pem --cert /pki/client.pem --key /pki/client.key $* https://127.0.0.1:$PORT/v1/$_sg_path 2>&1"
 }
 # health_is_200 — the wait condition, run inside the container.
+# health_version — the version field of the running store's sys/health, read
+# with jq as the api's capture reads it.
+health_version() { inside "curl -s --max-time $CTR_DEADLINE --cacert /pki/store-ca.pem --cert /pki/client.pem --key /pki/client.key https://127.0.0.1:$PORT/v1/sys/health" | jq -r .version; }
 HEALTH_200="[ \"\$(curl -s --max-time $CTR_DEADLINE -o /dev/null -w '%{http_code}' --cacert /pki/store-ca.pem --cert /pki/client.pem --key /pki/client.key https://127.0.0.1:$PORT/v1/sys/health)\" = 200 ]"
 # only_loopback WHEN — the MainPID's LISTEN sockets, read from its own fds,
 # are exactly 127.0.0.1:8200 (TC-756-12).
@@ -1496,7 +1522,7 @@ install -m 0644 /overlay/etc/systemd/system/rasputin-api.service /etc/systemd/sy
 mkdir -p /etc/systemd/system/rasputin-api.service.d
 printf '[Service]\nType=simple\nWatchdogSec=0\nExecStart=\nExecStart=/root/stub-api.sh\n' >/etc/systemd/system/rasputin-api.service.d/harness-stub.conf
 printf '[Unit]\nDescription=TEST HARNESS stand-in firstboot\n[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/usr/bin/true\n' >/etc/systemd/system/rasputin-firstboot.service
-printf '[Service]\nEnvironment=RASPUTIN_STOREINIT_KMSG=/run/store-init-console\nEnvironment=RASPUTIN_STORERESTORE_KMSG=/run/store-restore-console\n' >/etc/systemd/system/openbao.service.d/harness-console.conf
+printf '[Service]\nEnvironment=RASPUTIN_STOREINIT_KMSG=/run/store-init-console\nEnvironment=RASPUTIN_STORERESTORE_KMSG=/run/store-restore-console\nEnvironment=RASPUTIN_STOREROLLBACK_KMSG=/run/store-rollback-console\n' >/etc/systemd/system/openbao.service.d/harness-console.conf
 systemctl daemon-reload" >/dev/null 2>&1 || check "the shipped api unit, its stub drop-in and the stand-in firstboot are installed" 1
 want_sha=$(openssl dgst -sha256 -r "$APIUNIT" | cut -d' ' -f1)
 got_sha=$(inside "sha256sum /etc/systemd/system/rasputin-api.service" | cut -d' ' -f1)
@@ -1540,7 +1566,7 @@ find $RP/store/data -type d -exec chmod 0700 {} +
 find $RP/store/data -type f -exec chmod 0600 {} +
 install -m 0600 /root/stash-a/seal-key $RP/store/seal-key
 install -m 0600 /root/stash-a/seal.hcl $RP/store/seal.hcl
-printf 'v2.7.1\n' >$RP/store/openbao-version; chmod 0600 $RP/store/openbao-version
+printf '%s' '$A_VERSION' >$RP/store/openbao-version; chmod 0600 $RP/store/openbao-version
 install -m 0600 /pki/ca.key $RP/trust/store-ca.key
 install -m 0600 /pki/store-ca.pem $RP/trust/store-ca.pem
 printf '{\"id\":\"store-unit-functional\"}\n' >$RP/restore.json; chmod 0600 $RP/restore.json
@@ -1561,6 +1587,13 @@ put_seal || check "store A's seal key and fragment (the oneshot's, kept in /pki)
 fresh_store
 code=$(inside "sh /root/store-read.sh write")
 check "TC-766-16 the api role writes a sentinel to store A (got '$code')" "$(yes_if [ "$code" = 200 ])"
+# TC-801-35 (F-801-02): the staged openbao-version is the live store's own
+# sys/health version, as the api stages it, not a literal: the version gate
+# parses it strictly.
+A_VERSION=$(health_version)
+# xyz VERSION — VERSION is the gate's X.Y.Z shape.
+xyz() { printf '%s\n' "$1" | grep -qxE '[0-9]{1,9}[.][0-9]{1,9}[.][0-9]{1,9}'; }
+check "TC-801-35 store A's sys/health version is X.Y.Z (got '$A_VERSION')" "$(yes_if xyz "$A_VERSION")"
 # TEST HARNESS: A's data and seal pair kept, standing in for the backup
 # capture, with the store stopped.
 inside "systemctl stop openbao.service; rm -rf /root/stash-a; mkdir -m 0700 /root/stash-a
@@ -1649,6 +1682,139 @@ check "TC-766-17 the stub api's restarted start recorded the marker absent" "$(y
 left=$(inside "find $V -name '.rasputin-restore-*'")
 check "TC-766-17 no .rasputin-restore-* path is left" "$(yes_if [ -z "$left" ])" "$left"
 inside "systemctl stop rasputin-api.service openbao.service; systemctl reset-failed openbao.service $PROV 2>/dev/null; rm -rf $RP /root/stash-a" >/dev/null 2>&1
+
+echo
+echo "13. the store's version gate (TC-801-31 to TC-801-35)"
+GREC=/run/rasputin-store-rollback/outcome
+COPYF=$V/openbao-preupdate.tar
+ASIDEF=$V/openbao-rolled-back.tar
+MARK=$V/openbao-version
+NEWER_V="$(( ${PIN%%.*} + 1 )).0.0"
+# data_sum — the data directory's files and their hashes, as one hash.
+DATA_SUM="cd $V/openbao && find . -type f -exec sha256sum {} + | sort | sha256sum"
+data_sum() { inside "$DATA_SUM"; }
+gate_outcome() { inside "sed -n 's/^outcome=//p' $GREC 2>/dev/null"; }
+# TEST HARNESS: a fourth ExecStartPre=, after the shipped three (a drop-in's
+# lines come after the unit's), records the data directory's hash between the
+# gate and bao, so the data the gate left can be compared even though bao
+# writes to it once it runs.
+inside "systemctl stop rasputin-api.service openbao.service; systemctl reset-failed openbao.service $PROV 2>/dev/null
+printf '[Service]\nExecStartPre=+/bin/sh -c \"cd $V/openbao && find . -type f -exec sha256sum {} + | sort | sha256sum >/run/data-at-pre\"\n' >/etc/systemd/system/openbao.service.d/harness-gate-hash.conf
+systemctl daemon-reload" >/dev/null 2>&1 || check "the gate-hash drop-in is installed" 1
+pre_sum() { inside "cat /run/data-at-pre 2>/dev/null"; }
+
+echo "  -- the upgrade path: data and no marker (TC-801-35)"
+check "TC-801-35 every start in scenarios 1 to 12 passed the gate: no outcome=refused or outcome=failed line in the journal" \
+	"$(yes_if [ -z "$(inside "journalctl --no-pager -o cat" | grep -E 'rasputin-store-rollback: outcome=(refused|failed)' || true)" ])" \
+	"$(inside "journalctl --no-pager -o cat" | grep 'rasputin-store-rollback: outcome=' | tail -3)"
+check "TC-801-35 the data directory has data before this start" "$(yes_if [ -n "$(inside "ls -A $V/openbao")" ])"
+inside "rm -f $MARK $V/openbao-version-hold $COPYF $ASIDEF; rm -rf /run/rasputin-store-rollback; systemctl start openbao.service" >/dev/null 2>&1
+wait_for "sys/health answers 200 after the upgrade-path start" "$HEALTH_200" || fails=$((fails + 1))
+check "TC-801-35 the record says current (got '$(gate_outcome)')" "$(yes_if [ "$(gate_outcome)" = current ])"
+check "TC-801-35 the marker is the pin, $PIN (got '$(inside "cat $MARK")')" "$(yes_if [ "$(inside "cat $MARK")" = "$PIN" ])"
+check "TC-801-35 the marker is 0600 root:root (got '$(inside "stat -c '%a %u:%g' $MARK")')" \
+	"$(yes_if [ "$(inside "stat -c '%a %u:%g' $MARK")" = "600 0:0" ])"
+inside "systemctl stop openbao.service" >/dev/null 2>&1
+
+echo "  -- 13a equal versions (TC-801-31)"
+inside "touch -d '2020-01-01' $MARK; rm -rf /run/rasputin-store-rollback /run/data-at-pre" >/dev/null
+BEFORE=$(data_sum)
+MARK_BEFORE=$(inside "sha256sum <$MARK; stat -c %Y $MARK")
+inside "systemctl start openbao.service" >/dev/null 2>&1
+wait_for "sys/health answers 200 with equal versions" "$HEALTH_200" || fails=$((fails + 1))
+check "TC-801-31 sys/health answers 200 (got '$(store_get sys/health)')" "$(yes_if [ "$(store_get sys/health)" = 200 ])"
+check "TC-801-31 the data the gate left, hashed before bao ran, is unchanged" "$(yes_if eval '[ -n "$BEFORE" ] && [ "$(pre_sum)" = "$BEFORE" ]')"
+check "TC-801-31 the marker's bytes and mtime are unchanged" "$(yes_if [ "$(inside "sha256sum <$MARK; stat -c %Y $MARK")" = "$MARK_BEFORE" ])"
+check "TC-801-31 the record says current (got '$(gate_outcome)')" "$(yes_if [ "$(gate_outcome)" = current ])"
+check "TC-801-31 no aside copy was written" "$(yes_if inside "test ! -e $ASIDEF")"
+
+echo "  -- 13b newer data and a matching copy (TC-801-32)"
+code=$(inside "sh /root/store-read.sh write && cp /root/sentinel /root/sentinel-p")
+check "TC-801-32 secret P is written (got '$code')" "$(yes_if [ "$code" = 200 ])"
+LIVE_V=$(health_version)
+check "TC-801-32 F-801-02 the live store's sys/health version is the pin (got '$LIVE_V')" "$(yes_if [ "$LIVE_V" = "$PIN" ])"
+# TEST HARNESS: #800's copy, laid out as store_capture writes it: the data
+# directory's regular files as store/data/<rel>, sorted, then
+# store/openbao-version holding the sys/health version with no newline; no
+# directory members.
+inside "set -e
+systemctl stop openbao.service
+rm -rf /root/copy-stage; mkdir -p /root/copy-stage/store
+cp -a $V/openbao /root/copy-stage/store/data
+printf '%s' '$LIVE_V' >/root/copy-stage/store/openbao-version
+cd /root/copy-stage
+tar -cf $COPYF \$(find store/data -type f | LC_ALL=C sort) store/openbao-version
+chmod 0600 $COPYF" >/dev/null 2>&1 || check "TC-801-32 the copy is built" 1
+P_SUM=$(inside "cd /root/copy-stage/store/data && find . -type f -exec sha256sum {} + | sort | sha256sum")
+dirs=$(inside "tar -tvf $COPYF" | grep -c '^d' || true)
+check "TC-801-32 F-801-03 the copy has no directory members (got ${dirs:-?})" "$(yes_if [ "${dirs:-}" = 0 ])"
+inside "systemctl start openbao.service" >/dev/null 2>&1
+wait_for "sys/health answers 200 before secret Q" "$HEALTH_200" || fails=$((fails + 1))
+code=$(inside "sh /root/store-read.sh write && cp /root/sentinel /root/sentinel-q")
+check "TC-801-32 secret Q is written (got '$code')" "$(yes_if [ "$code" = 200 ])"
+inside "systemctl stop openbao.service" >/dev/null 2>&1
+Q_SUM=$(data_sum)
+inside "printf '%s\n' '$NEWER_V' >$MARK; chmod 0600 $MARK; rm -rf /run/rasputin-store-rollback /run/data-at-pre" >/dev/null
+C13=$(cursor)
+inside "systemctl start openbao.service" >/dev/null 2>&1
+wait_for "sys/health answers 200 on the rolled-back store" "$HEALTH_200" || fails=$((fails + 1))
+INV13=$(show InvocationID)
+code=$(inside "sh /root/store-read.sh read")
+got=$(inside "cat /root/read.json" | jq -r .data.data.v 2>/dev/null)
+check "TC-801-32 the store unsealed, and the secret reads back as P (status '$code')" \
+	"$(yes_if eval '[ "$code" = 200 ] && [ -n "$got" ] && [ "$got" = "$(inside "cat /root/sentinel-p")" ]')"
+check "TC-801-32 Q's value is gone" "$(yes_if eval '[ "$got" != "$(inside "cat /root/sentinel-q")" ]')"
+check "TC-801-32 the data the gate left is the copy's store/data, byte for byte" "$(yes_if [ "$(pre_sum)" = "$P_SUM" ])"
+check "TC-801-32 the marker is the pin (got '$(inside "cat $MARK")')" "$(yes_if [ "$(inside "cat $MARK")" = "$PIN" ])"
+AX=$(inside "rm -rf /root/aside-x; mkdir /root/aside-x; tar -xf $ASIDEF -C /root/aside-x && cd /root/aside-x && find . -type f -exec sha256sum {} + | sort | sha256sum")
+check "TC-801-32 the aside copy holds the post-Q data, byte for byte" "$(yes_if eval '[ -n "$Q_SUM" ] && [ "$AX" = "$Q_SUM" ]')"
+check "TC-801-32 the record says restored (got '$(gate_outcome)')" "$(yes_if [ "$(gate_outcome)" = restored ])"
+own=$(inside "find $V/openbao ! -uid $BAO_UID | wc -l; find $V/openbao -name '.rasputin-rollback-*' | wc -l")
+check "TC-801-32 every data entry is owned by $BAO_UID and no work directory is left (got '$(printf '%s' "$own" | tr '\n' ' ')')" \
+	"$(yes_if [ "$own" = "0
+0" ])"
+order=$(inside "journalctl _SYSTEMD_INVOCATION_ID=$INV13 --no-pager -o json" | jq -r '.SYSLOG_IDENTIFIER // empty' | awk '
+	$0 == "rasputin-store-rollback.sh" && !g { g = NR } $0 == "bao" && !b { b = NR } END { print g + 0, b + 0 }')
+check "TC-801-32 the gate's journal line precedes bao's first line in that start (lines: '$order')" \
+	"$(yes_if eval 'set -- $order; [ "$1" -gt 0 ] && [ "$2" -gt "$1" ]')"
+gl=$(journal_after "$C13" | grep 'rasputin-store-rollback: outcome=restored' || true)
+[ -n "$gl" ] && printf '         journal: %s\n' "$gl"
+
+echo "  -- 13c newer data and no copy (TC-801-33)"
+inside "systemctl stop openbao.service; systemctl reset-failed openbao.service $PROV 2>/dev/null
+rm -f $COPYF; printf '%s\n' '$NEWER_V' >$MARK; chmod 0600 $MARK
+rm -rf /run/rasputin-store-rollback /run/rasputin-store-init" >/dev/null 2>&1
+BEFORE=$(data_sum)
+MARK_BEFORE=$(inside "sha256sum <$MARK")
+for n in 1 2; do
+	C13C=$(cursor)
+	inside "systemctl reset-failed openbao.service 2>/dev/null; systemctl start openbao.service" >/dev/null 2>&1
+	wait_for "openbao.service is failed with no job after the refusal (start $n)" \
+		'[ "$(systemctl show openbao.service -p ActiveState --value)" = failed ] && [ -z "$(systemctl show openbao.service -p Job --value)" ]' \
+		|| fails=$((fails + 1))
+	l="TC-801-33 start $n"
+	st="$(show ActiveState) $(show Result)"
+	check "$l: the unit is failed, Result=exit-code (got '$st')" "$(yes_if [ "$st" = "failed exit-code" ])"
+	bl=$(inside "journalctl -u openbao.service --after-cursor='$C13C' --no-pager -o json" | jq -r '.SYSLOG_IDENTIFIER // empty' | grep -cx bao || true)
+	check "$l: no bao process ran: no bao line in the journal and no bao process (got ${bl:-?} lines)" \
+		"$(yes_if eval '[ "${bl:-}" = 0 ] && [ -z "$(inside "for p in /proc/[0-9]*; do [ \"\$(cat \$p/comm 2>/dev/null)\" = bao ] && echo \$p; done; true")" ]')"
+	check "$l: the data is unchanged" "$(yes_if [ "$(data_sum)" = "$BEFORE" ])"
+	check "$l: the marker is unchanged" "$(yes_if [ "$(inside "sha256sum <$MARK")" = "$MARK_BEFORE" ])"
+	check "$l: no store-init pending marker and no store-init record" \
+		"$(yes_if inside "test ! -e /run/rasputin-store-init/pending && test ! -e /run/rasputin-store-init/outcome")"
+	check "$l: the record says refused (got '$(gate_outcome)')" "$(yes_if [ "$(gate_outcome)" = refused ])"
+	rl=$(journal_after "$C13C" | grep -c 'rasputin-store-rollback: outcome=refused' || true)
+	check "$l: the gate refused on each restart (got ${rl:-0} refused lines)" "$(yes_if [ "${rl:-0}" -ge 1 ])"
+done
+
+echo "  -- 13d the gate's journal identifier (TC-801-34)"
+ids=$(inside "journalctl --no-pager -o json" | jq -r 'select((.MESSAGE // "") | tostring | contains("rasputin-store-rollback: outcome=")) | .SYSLOG_IDENTIFIER' | sort -u)
+check "TC-801-34 every gate outcome line carries SYSLOG_IDENTIFIER=rasputin-store-rollback.sh (got '$(printf '%s' "$ids" | tr '\n' ' ')')" \
+	"$(yes_if [ "$ids" = rasputin-store-rollback.sh ])"
+
+inside "systemctl reset-failed openbao.service $PROV 2>/dev/null
+rm -f /etc/systemd/system/openbao.service.d/harness-gate-hash.conf $COPYF $ASIDEF; rm -rf /root/copy-stage /root/aside-x /root/sentinel-p /root/sentinel-q
+printf '%s\n' '$PIN' >$MARK; systemctl daemon-reload" >/dev/null 2>&1
 
 echo
 if [ "$fails" -eq 0 ]; then

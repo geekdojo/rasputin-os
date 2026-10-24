@@ -151,6 +151,20 @@
 0700  optional  /var/lib/rasputin/openbao-seal/.rasputin-restore-new
 0700  optional  /var/lib/rasputin/openbao-seal/.rasputin-restore-old
 0600  optional  /var/lib/rasputin/restore-pending/store/applied
+# The store's version gate (geekdojo/geekdojo-brain#801),
+# rasputin-store-rollback.sh, openbao.service's second ExecStartPre=. The
+# marker records the version that last wrote the data and the hold a staged
+# backup's newer version; the aside copy keeps the newer data a rollback
+# replaced. All three are root's, beside the data directory and not in it.
+# Its work directories exist only during a rollback, or after one that was
+# interrupted: the unpacked copy belongs to the store's uid, as the data
+# directory does, and the old entries' directory is root's, as the restore
+# step's is.
+0600  optional  /var/lib/rasputin/openbao-version
+0600  optional  /var/lib/rasputin/openbao-version-hold
+0600  optional  /var/lib/rasputin/openbao-rolled-back.tar
+0700  optional  /var/lib/rasputin/openbao/.rasputin-rollback-new       990  990
+0700  optional  /var/lib/rasputin/openbao/.rasputin-rollback-old
 # tls/ and the three leaf directories are root's, written by the api (the
 # provisioner's since #805). Each leaf
 # directory holds leaf.key and leaf.pem. leaf.pem is NOT declared, and the leaf

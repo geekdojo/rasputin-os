@@ -321,6 +321,17 @@ jobs:
         env:
           REQUIRE_BUSYBOX: "1"
         run: sh test/store-restore-test.sh
+      # The secrets store's version gate (geekdojo/geekdojo-brain#801): every
+      # branch of rasputin-store-rollback.sh against a scratch tree, with a
+      # pre-update copy in #800's shape: current, restored, refused and failed,
+      # the staged-backup hold, the aside copy, a failed extract, aside write,
+      # rename and marker commit with their rollback, one record per boot, and
+      # no store byte in any output, under dash, bash, busybox ash and
+      # busybox's own applets, tar included.
+      - name: Store version gate tests
+        env:
+          REQUIRE_BUSYBOX: "1"
+        run: sh test/store-rollback-test.sh
       # The boot smoke's check that the api reports the secrets store ready
       # (geekdojo/geekdojo-brain#834): the verdict on GET /api/alerts, the
       # wait, the post-kill report, the first-run sign-in through an injected
@@ -530,7 +541,11 @@ jobs:
       # that stops the store and exits 75, whose restart starts the store
       # through the restore step onto the restored data, key and fragment, and
       # a staging missing seal.hcl that fails the store's start and writes no
-      # marker. Same job as the store paths: it builds the same image. It reads the pinned api
+      # marker; and the store's version gate (geekdojo/geekdojo-brain#801):
+      # data with no marker adopted, equal versions left alone, newer data
+      # rolled back to a pre-update copy before bao starts, and with no copy a
+      # store that never runs, keeps its data and stays stopped. Same job as
+      # the store paths: it builds the same image. It reads the pinned api
       # tarball's policy text (geekdojo/geekdojo-brain#804), so it is red until
       # the store-arming pin moves, by design; it is the job's last step, so
       # the seal-key and api-wiring steps above still run and report.
