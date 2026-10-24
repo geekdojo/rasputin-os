@@ -65,6 +65,24 @@ ExecStart=/usr/bin/bao server -config=/etc/rasputin/openbao/openbao.hcl -config=
 # tree are root's); no `-`, because a refused or failed apply must fail the
 # store's start rather than start it on the old store.
 ExecStartPre=+/usr/lib/rasputin/store-restore/rasputin-store-restore.sh
+# The store's version gate (geekdojo/geekdojo-brain#801): it compares the
+# data's version marker, /var/lib/rasputin/openbao-version, with the binary's
+# `bao version`. Data not newer: nothing changes. Data newer, after a RAUC
+# fallback: the pre-update copy at this binary's version
+# (/var/lib/rasputin/openbao-preupdate.tar, #800) is put back before bao
+# starts. Otherwise the store is held stopped, its data untouched, and it
+# never initialises itself. Its record /run/rasputin-store-rollback/outcome
+# becomes #833's job and alert. Second: after the restore step, so a staged
+# backup's data and version are what it decides on, and before the self-init
+# hook's pre, so that hook sees the data the store will start on. An
+# ExecStartPre= line of this unit rather than a unit of its own, because it
+# must run on every start, the api's restarts of the store within a boot
+# included, which a RemainAfterExit oneshot does not. `+` runs it as root
+# outside this sandbox (the marker, the copy and the record are root's); no
+# `-`, because a refused or failed gate must fail the store's start, so bao
+# never runs on data newer than itself. Restart=always runs it again on each
+# restart, until the start limit leaves the unit failed.
+ExecStartPre=+/usr/lib/rasputin/store-rollback/rasputin-store-rollback.sh
 # The self-init outcome (#804): one console and journal line and the record
 # /run/rasputin-store-init/outcome, which #833's reader turns into a job and an
 # alert. pre notes a start that begins on an empty data directory; started

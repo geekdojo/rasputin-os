@@ -56,6 +56,10 @@ STARTED_HOOK='-+/usr/lib/rasputin/store-init/rasputin-store-init.sh started'
 # self-init outcome hook's pre after it.
 RESTORE_HOOK='+/usr/lib/rasputin/store-restore/rasputin-store-restore.sh'
 PRE_HOOK='-+/usr/lib/rasputin/store-init/rasputin-store-init.sh pre'
+# TC-801-26: the store's version gate (geekdojo/geekdojo-brain#801), second,
+# `+` and no `-`, so a refused or failed gate fails the store's start before
+# bao runs.
+GATE_HOOK='+/usr/lib/rasputin/store-rollback/rasputin-store-rollback.sh'
 PROV_PULL='-+/usr/bin/systemctl --no-block start rasputin-store-provision.service'
 [ -n "${BAO_GID:-}" ] || { echo "FAILED: OPENBAO_USERS ('$USERS') has fewer than four fields."; exit 1; }
 
@@ -136,10 +140,12 @@ $(values "$D" "$1" "$2")
 	# as root outside the sandbox) with its phase (geekdojo-brain#804).
 	exactly Service ExecStart \
 		'/usr/bin/bao server -config=/etc/rasputin/openbao/openbao.hcl -config=/etc/rasputin/openbao/init.json -config=/run/credentials/openbao.service/seal.hcl'
-	# TC-766-14: exactly two ExecStartPre lines, the restore step first.
+	# TC-766-14 and TC-801-26: exactly three ExecStartPre lines, the restore
+	# step first, the version gate second, the self-init hook's pre last.
 	_pre=$(values "$D" Service ExecStartPre)
-	check "[Service] ExecStartPre=$RESTORE_HOOK then ExecStartPre=$PRE_HOOK, exactly these two, in this order" \
+	check "[Service] ExecStartPre=$RESTORE_HOOK then ExecStartPre=$GATE_HOOK then ExecStartPre=$PRE_HOOK, exactly these three, in this order" \
 		"$(yes_if [ "$_pre" = "$RESTORE_HOOK
+$GATE_HOOK
 $PRE_HOOK" ])" "got: $(printf '%s' "$_pre" | tr '\n' '|')"
 	# TC-804-14 and TC-805-25 (F-805-28): the outcome hook, then the start of
 	# the provisioner, -+ (never fails the store; root, outside the sandbox)
@@ -420,6 +426,17 @@ refuses "the restore step with a -+ prefix" "replace:ExecStartPre=$RESTORE_HOOK"
 	"ExecStartPre=-$RESTORE_HOOK" "ExecStartPre=$RESTORE_HOOK then"
 refuses "the restore step after the outcome hook's pre" "swap:ExecStartPre=$RESTORE_HOOK|ExecStartPre=$PRE_HOOK" \
 	'' "ExecStartPre=$RESTORE_HOOK then"
+# TC-801-26: the gate with a - prefix, which would start bao on data newer
+# than itself; the gate before the restore step, which would decide on the
+# data a staged restore is about to replace; the gate after the self-init
+# hook's pre; and the gate removed.
+refuses "the version gate with a -+ prefix" "replace:ExecStartPre=$GATE_HOOK" \
+	"ExecStartPre=-$GATE_HOOK" "ExecStartPre=$RESTORE_HOOK then"
+refuses "the version gate before the restore step" "swap:ExecStartPre=$RESTORE_HOOK|ExecStartPre=$GATE_HOOK" \
+	'' "ExecStartPre=$RESTORE_HOOK then"
+refuses "the version gate after the outcome hook's pre" "swap:ExecStartPre=$GATE_HOOK|ExecStartPre=$PRE_HOOK" \
+	'' "ExecStartPre=$RESTORE_HOOK then"
+refuses "the version gate removed" "replace:ExecStartPre=$GATE_HOOK" '# removed' "ExecStartPre=$RESTORE_HOOK then"
 refuses "ExecStopPost without the + prefix" 'replace:ExecStopPost=-+/usr/lib/rasputin/store-init/rasputin-store-init.sh stopped' \
 	'ExecStopPost=-/usr/lib/rasputin/store-init/rasputin-store-init.sh stopped' '[Service] ExecStopPost=-+'
 refuses "ExecStart without init.json" \

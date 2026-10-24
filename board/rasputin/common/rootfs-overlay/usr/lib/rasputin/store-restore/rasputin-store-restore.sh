@@ -61,6 +61,9 @@ umask 077
 OUTCOME_TAG=rasputin-store-restore
 OUTCOME_KMSG="${RASPUTIN_STORERESTORE_KMSG:-/dev/kmsg}"
 . "$(dirname "$0")/../outcome/outcome.sh"
+# present, move_entries and roll_back, shared with rasputin-store-rollback.sh
+# (geekdojo/geekdojo-brain#801).
+. "$(dirname "$0")/../store-swap/swap.sh"
 
 MARK="$PENDING/applied"
 MARK_TMP="$PENDING/.applied.new"
@@ -69,8 +72,6 @@ DOLD="$DATA/.rasputin-restore-old"
 SNEW="$SEAL/.rasputin-restore-new"
 SOLD="$SEAL/.rasputin-restore-old"
 REFLASH="Reflash the control plane and restore again from the backup disk, whose archive is untouched."
-
-present() { [ -e "$1" ] || [ -L "$1" ]; }
 
 # remove_work — after the commit, remove every work directory; a <4> line
 # names each one left.
@@ -81,34 +82,6 @@ remove_work() {
 		present "$_w" && outcome_log 4 "The work directory $_w is left from an applied restore and could not be removed, so the next start of the store tries again."
 	done
 	return 0
-}
-
-# move_entries KIND FROM TO — move entries of FROM into TO by rename. KIND
-# data moves every entry but the work directories; KIND seal moves seal-key
-# and seal.hcl only. Stops at the first failure and returns 1.
-move_entries() {
-	_from=$2 _to=$3
-	if [ "$1" = seal ]; then
-		set -- "$_from/seal-key" "$_from/seal.hcl"
-	else
-		set -- "$_from"/* "$_from"/.[!.]* "$_from"/..?*
-	fi
-	for _p in "$@"; do
-		present "$_p" || continue
-		case "${_p##*/}" in .rasputin-restore-new|.rasputin-restore-old) continue ;; esac
-		mv -f "$_p" "$_to/" || return 1
-	done
-	return 0
-}
-
-# roll_back KIND DIR NEW OLD PHASE — undo one directory's swap. In phase B
-# every live entry goes back to NEW, then OLD's entries go back to DIR; in
-# phase A only OLD's go back. Returns 1 at the first failed rename.
-roll_back() {
-	if [ "$5" = B ]; then
-		move_entries "$1" "$2" "$3" || return 1
-	fi
-	move_entries "$1" "$4" "$2"
 }
 
 # refuse REASON — a <3> refused line, exit 1. Nothing has been changed.
