@@ -46,11 +46,11 @@
 #
 # WHY THIS VALUE
 #
-# 2026.10.3-dev.165 is the firewall dev build of dev chain B on the 2026.10.3
+# 2026.10.3-dev.166 is the firewall dev build of dev chain A2 on the 2026.10.3
 # line (epic geekdojo/geekdojo-brain#708), published 2026-10-25 from firewall
-# de1359a (PR #108: agent pinned to the CP dev release v2026.10.3-dev.200, the
+# ae38b1a (PR #109: agent pinned to the CP dev release v2026.10.3-dev.201, the
 # same CP release this image's agent/api pins name; Snort rules unchanged at
-# d267a508; release run 40149522635). Dev only bakes dev.
+# d267a508; release run 40227952274). Dev only bakes dev.
 #
 # History: 2026.09.4-dev.127 was the first pin -- the FIRST firewall release
 # that publishes manifest.json.sig (dev.126 and earlier ship no sig asset).
@@ -67,6 +67,6 @@
 # 2026.10.1 (stable) was the pin of the 2026.10.1 stable OS.
 # On the 2026.10.2 dev line: dev.160 (OS dev.323).
 # 2026.10.2 (stable) was the pin of the 2026.10.2 stable OS.
-# On the 2026.10.3 dev line: dev.164 (OS dev.331).
+# On the 2026.10.3 dev line: dev.164 (OS dev.331), dev.165 (OS dev.333).
 #
-2026.10.3-dev.165
+2026.10.3-dev.166
