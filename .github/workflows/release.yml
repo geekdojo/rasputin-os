@@ -107,6 +107,17 @@ jobs:
       # compared; the post-build guard then holds the image to the tarball.
       - name: Store policy live drift check
         run: sh test/store-policy-live-drift.sh
+      # .github/actions/ci-debs installs every package the smokes, sign and the
+      # update smoke need, from actions/cache, and fetches them itself with a
+      # speed floor on a miss. Its refusals are the point (a trickling, 404ing
+      # or lying mirror, a tampered cache), and ci.yml runs only on pull
+      # requests, so they are checked here before any image is built. Local
+      # HTTP servers, no internet. REQUIRE_DPKG=1: the key cases may not skip.
+      - name: CI package-cache tests
+        timeout-minutes: 5
+        env:
+          REQUIRE_DPKG: "1"
+        run: bash test/ci-debs-test.sh
 
   build:
     needs: validate
@@ -478,14 +489,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # bind9-dnsutils: dig, for the CP-nameserver assertion (the api's DNS
+      # listener is queried through a hostfwd, not grepped). sfdisk + jq are
+      # preinstalled on the runner image. e2fsprogs: debugfs, which the
+      # growpart leg uses to set the clock floor between its two boots.
+      #
+      # From actions/cache, not an Ubuntu mirror, on every run but the first on
+      # a new runner image; on a miss each .deb is fetched with a speed floor.
+      # .github/actions/ci-debs says why (a 37.6 kB/s mirror on 2026-10-27).
+      # The timeout bounds the whole install, cold path included.
       - name: Install QEMU + OVMF (UEFI firmware) + mtools
-        run: |
-          sudo apt-get update
-          # bind9-dnsutils: dig, for the CP-nameserver assertion (the api's DNS
-          # listener is queried through a hostfwd, not grepped). sfdisk + jq are
-          # preinstalled on the runner image. e2fsprogs: debugfs, which the
-          # growpart leg uses to set the clock floor between its two boots.
-          sudo apt-get install -y --no-install-recommends qemu-system-x86 ovmf mtools bind9-dnsutils e2fsprogs
+        timeout-minutes: 10
+        uses: ./.github/actions/ci-debs
+        with:
+          label: smoke-amd64
+          packages: qemu-system-x86 ovmf mtools bind9-dnsutils e2fsprogs
+          require: qemu-system-x86_64 mcopy dig debugfs
       - uses: actions/download-artifact@v4
         with:
           pattern: n100-*
@@ -526,14 +545,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # qemu-system-arm ships qemu-system-aarch64. No OVMF: the `virt` guest
+      # is booted with -kernel, not through UEFI. e2fsprogs: debugfs, which
+      # the growpart leg uses to set the clock floor between its two boots.
+      # Through the package cache, bounded, as in smoke-amd64 above.
       - name: Install QEMU (aarch64) + mtools
-        run: |
-          sudo apt-get update
-          # qemu-system-arm ships qemu-system-aarch64. No OVMF: the `virt` guest
-          # is booted with -kernel, not through UEFI. e2fsprogs: debugfs, which
-          # the growpart leg uses to set the clock floor between its two boots.
-          sudo apt-get install -y --no-install-recommends qemu-system-arm mtools bind9-dnsutils e2fsprogs
-          qemu-system-aarch64 --version | head -1
+        timeout-minutes: 10
+        uses: ./.github/actions/ci-debs
+        with:
+          label: smoke-arm64
+          packages: qemu-system-arm mtools bind9-dnsutils e2fsprogs
+          require: qemu-system-aarch64 mcopy dig debugfs
+      - name: QEMU version
+        run: qemu-system-aarch64 --version | head -1
       - uses: actions/download-artifact@v4
         with:
           pattern: rpi-*
@@ -633,10 +657,17 @@ jobs:
           echo "channel=$CHANNEL"       >> "$GITHUB_OUTPUT"
           echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
 
+      # squashfs-tools: scripts/verify-bundle.sh reads the device RAUC config
+      # out of each SKU's rootfs.img with unsquashfs. Through the package
+      # cache, bounded, as in smoke-amd64 above: a trickling mirror here holds
+      # the signing job, and everything after it, as surely as one in a smoke.
       - name: Install rauc + xz + squashfs-tools
-        # squashfs-tools: scripts/verify-bundle.sh reads the device RAUC config
-        # out of each SKU's rootfs.img with unsquashfs.
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends rauc xz-utils squashfs-tools
+        timeout-minutes: 10
+        uses: ./.github/actions/ci-debs
+        with:
+          label: sign
+          packages: rauc xz-utils squashfs-tools
+          require: rauc xz unsquashfs
 
       - uses: actions/download-artifact@v4
         with:
@@ -897,18 +928,17 @@ jobs:
       matrix: ${{ fromJSON(needs.update-plan.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
+      # Through the package cache, bounded, as in smoke-amd64 above. One set
+      # per guest arch (the runner is amd64 for both legs); the legs from
+      # different bases share it, so only the first run on a runner image
+      # fetches anything.
       - name: Install QEMU + mtools + dosfstools
-        env:
-          ARCH: ${{ matrix.arch }}
-        run: |
-          set -eu
-          case "$ARCH" in
-            amd64) pkgs="qemu-system-x86 ovmf" ;;
-            arm64) pkgs="qemu-system-arm" ;;
-          esac
-          sudo apt-get update
-          # shellcheck disable=SC2086
-          sudo apt-get install -y --no-install-recommends $pkgs mtools dosfstools
+        timeout-minutes: 10
+        uses: ./.github/actions/ci-debs
+        with:
+          label: update-smoke-${{ matrix.arch }}
+          packages: ${{ matrix.arch == 'amd64' && 'qemu-system-x86 ovmf' || 'qemu-system-arm' }} mtools dosfstools
+          require: ${{ matrix.arch == 'amd64' && 'qemu-system-x86_64' || 'qemu-system-aarch64' }} mcopy mkfs.vfat
       - uses: actions/download-artifact@v4
         with:
           name: ${{ matrix.sku }}-${{ needs.sign.outputs.version }}

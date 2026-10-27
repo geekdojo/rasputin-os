@@ -1,0 +1,115 @@
+name: ci-debs
+description: >-
+  Install a fixed set of Ubuntu packages from actions/cache, fetching them with
+  a per-mirror speed floor only on a cache miss (scripts/ci-debs.sh).
+
+# Every apt install on the image-build path goes through here instead of a bare
+# `apt-get update && apt-get install`. The bare form has no bound that holds:
+#
+#   2026-10-27, geekdojo/rasputin-openwrt-firewall run 40537097987, the same
+#   qemu-system-x86 + ovmf install on the same ubuntu-latest image: the apt
+#   index came down at 10.9 MB/s, then the 20 .debs (24 MB) came down from
+#   azure.archive.ubuntu.com at 37.6 kB/s. ovmf-generic (5.4 MB) took 2m11s;
+#   qemu-system-x86 (11.5 MB) stalled, was dropped and re-fetched for 3m43s;
+#   the step hit its 10-minute timeout before dpkg had unpacked a thing, and
+#   the day's batched dev build lost its firewall image. 2026-10-25 had a 4m22s
+#   and a 1m35s install of the same set (normal is 10-16 s).
+#
+# apt has no minimum-speed option, so a transfer that trickles rather than dies
+# never trips Acquire::*::Timeout; and the runner's sources already point at
+# the Azure mirror through mirror+file:/etc/apt/apt-mirrors.txt, so a sed
+# rewrite to it matches nothing. Retrying, or a longer step timeout, only waits
+# longer on the same failure.
+#
+# Chosen over the alternatives by risk/value/effort:
+#   - a container image with the packages baked in means building, publishing
+#     and patching an image of our own, for a smoke boot;
+#   - pinned .debs from a fixed source break the day ubuntu-latest moves its
+#     base libraries, and would need a host we publish to;
+#   - this cache needs neither. Its key (ci-debs.sh key) hashes the requested
+#     packages, the architecture, the OS release and the runner's whole
+#     installed package base, so cached .debs only ever land on the exact base
+#     apt resolved them against. The warm path is `sha256sum -c`, then apt
+#     installs the local files with --no-download: no network, no apt index.
+# The cold path (a miss: a new runner image, or 7 days unused) resolves with
+# apt but downloads each .deb itself with a speed FLOOR: under 100 kB/s for
+# 15 s and that mirror is dropped for the next. It verifies size and hash
+# against the signed index and lets apt install with --no-download. Every
+# refusal is a ::error:: naming the package and each mirror tried, and nothing
+# here skips the step that needs the packages.
+#
+# The caller checks out the repo first (the script is scripts/ci-debs.sh) and
+# puts a timeout-minutes on the step that uses this action: a composite step
+# cannot carry one of its own.
+#
+# A copy of geekdojo/rasputin-openwrt-firewall#115, which wires the same script
+# into that repo's smoke-fw job inline. Keep the two in step.
+
+inputs:
+  packages:
+    description: Space-separated Ubuntu package names, as `apt-get install` takes them.
+    required: true
+  label:
+    description: A short name for this set (cache key prefix and directory name), e.g. smoke-amd64.
+    required: true
+  require:
+    description: >-
+      Space-separated commands that must be on PATH after the install. A
+      missing one is a ::error:: and a failed step, so a set that installed
+      without the tool the job needs fails here, not halfway into the job.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Package cache key
+      id: key
+      shell: bash
+      env:
+        PKGS: ${{ inputs.packages }}
+        LABEL: ${{ inputs.label }}
+      run: |
+        set -euo pipefail
+        # shellcheck disable=SC2086  # PKGS is a list of package names
+        echo "key=debs-${LABEL}-$("$GITHUB_WORKSPACE/scripts/ci-debs.sh" key $PKGS)" >> "$GITHUB_OUTPUT"
+    - name: Restore packages
+      id: cache
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ runner.temp }}/debs-${{ inputs.label }}
+        key: ${{ steps.key.outputs.key }}
+    - name: Install packages
+      id: install
+      shell: bash
+      env:
+        PKGS: ${{ inputs.packages }}
+        REQUIRE: ${{ inputs.require }}
+        DIR: ${{ runner.temp }}/debs-${{ inputs.label }}
+        HIT: ${{ steps.cache.outputs.cache-hit }}
+      run: |
+        set -euo pipefail
+        CD="$GITHUB_WORKSPACE/scripts/ci-debs.sh"
+        if [ "$HIT" = "true" ]; then
+          "$CD" install "$DIR"
+        else
+          # shellcheck disable=SC2086
+          "$CD" fetch "$DIR" $PKGS
+          if [ -s "$DIR/SHA256SUMS" ]; then echo "fetched=true" >> "$GITHUB_OUTPUT"; fi
+        fi
+        missing=""
+        for c in $REQUIRE; do
+          command -v "$c" >/dev/null 2>&1 || missing="$missing $c"
+        done
+        [ -z "$missing" ] \
+          || { echo "::error::not on PATH after installing $PKGS:$missing"; exit 1; }
+    # Save only a set this run fetched AND installed: the install step fails
+    # first on anything incomplete, so a cache entry is always a working set.
+    # Two jobs saving the same key at once (update-smoke legs from several
+    # bases) is a warning from actions/cache, not a failure; one of them wins.
+    - name: Save packages
+      if: ${{ steps.install.outputs.fetched == 'true' }}
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ runner.temp }}/debs-${{ inputs.label }}
+        key: ${{ steps.key.outputs.key }}
