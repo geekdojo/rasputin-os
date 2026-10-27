@@ -381,19 +381,6 @@ jobs:
         env:
           REQUIRE_BUSYBOX: "1"
         run: sh test/fetch-vendored-test.sh
-      # .github/actions/ci-debs installs the packages release.yml's smokes,
-      # sign and update smoke need (and verify-bundle's below) from
-      # actions/cache, and fetches them itself with a speed floor on a miss
-      # (2026-10-27: a mirror trickled at 37.6 kB/s and the firewall repo's
-      # smoke never ran). Its refusals are the point: a trickling, 404ing or
-      # lying mirror, a tampered cache. Against local HTTP servers, no
-      # internet. REQUIRE_DPKG=1: the cache-key cases may not skip. CI-side
-      # bash, not the image's shell.
-      - name: CI package-cache tests
-        timeout-minutes: 5
-        env:
-          REQUIRE_DPKG: "1"
-        run: bash test/ci-debs-test.sh
       # release.yml's sign step runs scripts/security-floor.sh to put the
       # security floor in manifest.json (geekdojo/geekdojo-brain#772). A floor
       # it let through above its own release would raise an alert installing
@@ -455,13 +442,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # Through the package cache, bounded (.github/actions/ci-debs says why).
+      # Through the package cache, bounded (the shared ci-debs action in
+      # geekdojo/.github says why).
       # ci.yml runs only on pull requests, so a cache entry saved here is
       # scoped to the PR: a PR's first run takes the cold path, with its speed
       # floor, and its re-runs are warm.
       - name: Install rauc + squashfs-tools
         timeout-minutes: 10
-        uses: ./.github/actions/ci-debs
+        uses: geekdojo/.github/.github/actions/ci-debs@d7072ebcd16ca3569f19669550e384db8208d4eb
         with:
           label: verify-bundle
           packages: rauc squashfs-tools
