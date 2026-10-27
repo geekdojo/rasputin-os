@@ -46,11 +46,10 @@
 #
 # WHY THIS VALUE
 #
-# 2026.10.3 is the STABLE firewall of the lockstep 2026.10.3 stable (secrets
-# store step 4, epic geekdojo/geekdojo-brain#708), tagged 2026-10-26 on
-# firewall 8495292 (PR #112: agent pinned to the CP STABLE v2026.10.3, the
-# same CP release this image's agent/api pins name; Snort rules unchanged at
-# d267a508). Stable only ever bakes stable.
+# 2026.10.4-dev.176 is the firewall dev release of the 2026.10.4 dev chain
+# (Feature geekdojo/geekdojo-brain#713), built 2026-10-27 from firewall commit
+# 89b1ff7a. It carries agent 2026.10.4-dev.204, the same CP dev release this
+# image's agent/api pins name, and OpenWrt 25.12.6. Dev only bakes dev.
 #
 # History: 2026.09.4-dev.127 was the first pin -- the FIRST firewall release
 # that publishes manifest.json.sig (dev.126 and earlier ship no sig asset).
@@ -69,5 +68,6 @@
 # 2026.10.2 (stable) was the pin of the 2026.10.2 stable OS.
 # On the 2026.10.3 dev line: dev.164 (OS dev.331), dev.165 (OS dev.333),
 # dev.166 (OS dev.335), dev.167 (OS dev.337).
+# 2026.10.3 (stable) was the pin of the 2026.10.3 stable OS.
 #
-2026.10.3
+2026.10.4-dev.176

@@ -1,3 +1,3 @@
-# From https://github.com/geekdojo/rasputin-control-plane/releases/tag/v2026.10.3 (*.hash assets)
-sha256  dfbb0bca2ba158c904b8cdf94998d27c53d1cae806e6ec74ce4d5fd3a2aee7f6  rasputin-api-2026.10.3-linux-amd64.tar.gz
-sha256  3979dc5bdfd5dfd718f0d174ef1de5ebcb491ee45068d320d127fbcf444bbfe9  rasputin-api-2026.10.3-linux-arm64.tar.gz
+# From https://github.com/geekdojo/rasputin-control-plane/releases/tag/v2026.10.4-dev.204 (*.hash assets)
+sha256  0baadbe9ca4cb51507c66fb0311017f766341e94a2950a6ffabb3b376922c094  rasputin-api-2026.10.4-dev.204-linux-amd64.tar.gz
+sha256  44e7dbca1509c7cd656fe79142eedec26058b4cf15f4931a1401a9f44eb5ba3c  rasputin-api-2026.10.4-dev.204-linux-arm64.tar.gz
