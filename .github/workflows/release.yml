@@ -107,17 +107,6 @@ jobs:
       # compared; the post-build guard then holds the image to the tarball.
       - name: Store policy live drift check
         run: sh test/store-policy-live-drift.sh
-      # .github/actions/ci-debs installs every package the smokes, sign and the
-      # update smoke need, from actions/cache, and fetches them itself with a
-      # speed floor on a miss. Its refusals are the point (a trickling, 404ing
-      # or lying mirror, a tampered cache), and ci.yml runs only on pull
-      # requests, so they are checked here before any image is built. Local
-      # HTTP servers, no internet. REQUIRE_DPKG=1: the key cases may not skip.
-      - name: CI package-cache tests
-        timeout-minutes: 5
-        env:
-          REQUIRE_DPKG: "1"
-        run: bash test/ci-debs-test.sh
 
   build:
     needs: validate
@@ -496,11 +485,12 @@ jobs:
       #
       # From actions/cache, not an Ubuntu mirror, on every run but the first on
       # a new runner image; on a miss each .deb is fetched with a speed floor.
-      # .github/actions/ci-debs says why (a 37.6 kB/s mirror on 2026-10-27).
+      # The shared ci-debs action (geekdojo/.github) says why: a 37.6 kB/s
+      # mirror on 2026-10-27. Its tests run in that repo's CI.
       # The timeout bounds the whole install, cold path included.
       - name: Install QEMU + OVMF (UEFI firmware) + mtools
         timeout-minutes: 10
-        uses: ./.github/actions/ci-debs
+        uses: geekdojo/.github/.github/actions/ci-debs@d7072ebcd16ca3569f19669550e384db8208d4eb
         with:
           label: smoke-amd64
           packages: qemu-system-x86 ovmf mtools bind9-dnsutils e2fsprogs
@@ -551,7 +541,7 @@ jobs:
       # Through the package cache, bounded, as in smoke-amd64 above.
       - name: Install QEMU (aarch64) + mtools
         timeout-minutes: 10
-        uses: ./.github/actions/ci-debs
+        uses: geekdojo/.github/.github/actions/ci-debs@d7072ebcd16ca3569f19669550e384db8208d4eb
         with:
           label: smoke-arm64
           packages: qemu-system-arm mtools bind9-dnsutils e2fsprogs
@@ -663,7 +653,7 @@ jobs:
       # the signing job, and everything after it, as surely as one in a smoke.
       - name: Install rauc + xz + squashfs-tools
         timeout-minutes: 10
-        uses: ./.github/actions/ci-debs
+        uses: geekdojo/.github/.github/actions/ci-debs@d7072ebcd16ca3569f19669550e384db8208d4eb
         with:
           label: sign
           packages: rauc xz-utils squashfs-tools
@@ -934,7 +924,7 @@ jobs:
       # fetches anything.
       - name: Install QEMU + mtools + dosfstools
         timeout-minutes: 10
-        uses: ./.github/actions/ci-debs
+        uses: geekdojo/.github/.github/actions/ci-debs@d7072ebcd16ca3569f19669550e384db8208d4eb
         with:
           label: update-smoke-${{ matrix.arch }}
           packages: ${{ matrix.arch == 'amd64' && 'qemu-system-x86 ovmf' || 'qemu-system-arm' }} mtools dosfstools
