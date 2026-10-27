@@ -371,6 +371,14 @@ jobs:
       # the image's shell.
       - name: Release target guard tests
         run: bash test/release-target-guard-test.sh
+      # Before a dispatch-publish creates its tag, release.yml's publish step
+      # runs scripts/release-workflow-race-guard.sh: a new tag on a commit
+      # whose .github/workflows differs from main's head is a workflow change
+      # GITHUB_TOKEN cannot make (run 40559492216). Every exit status, against
+      # a throwaway remote and a depth-1 clone shaped like the publish job's
+      # checkout. CI-side bash, not the image's shell.
+      - name: Release workflow race guard tests
+        run: bash test/release-workflow-race-guard-test.sh
       # release.yml's image build runs scripts/fetch-vendored.sh to put the
       # pinned agent/api tarballs in dl/. Its retry exists for a network fault
       # no pull request sees (run 40229531683), so every branch is pinned here

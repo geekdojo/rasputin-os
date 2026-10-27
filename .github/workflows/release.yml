@@ -1008,6 +1008,7 @@ jobs:
           # tagged commit anyway.
           TARGET_SHA: ${{ steps.src.outputs.sha }}
           REPO_URL: ${{ github.server_url }}/${{ github.repository }}.git
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -eu
           ls -lh release-out/
@@ -1029,6 +1030,22 @@ jobs:
             3) created_tag=true ;;
             *) echo "::error::refusing to publish $TAG: see release-target-guard above"; exit 1 ;;
           esac
+
+          # A NEW tag only (status 3; the tag-push path creates nothing): GitHub
+          # counts creating a tag on a commit whose .github/workflows differs
+          # from the default-branch head as a workflow change, and GITHUB_TOKEN
+          # can never be given the workflows permission. So a PR that edits a
+          # workflow and merges while this run builds turns `gh release create`
+          # into a bare "HTTP 403: Resource not accessible by integration" at
+          # the very end (run 40559492216, #343: built cb58b72, #181 merged
+          # 6a0248e mid-build). Fail here instead, before anything is
+          # published, naming the race and the fix: re-dispatch on main. An
+          # unreadable remote fails too, never passes. This explains the race;
+          # it does not prevent it. The durable fix, a GitHub App token with
+          # workflows: write for this step, is not in place yet.
+          if [ "$created_tag" = true ]; then
+            ./scripts/release-workflow-race-guard.sh "$REPO_URL" "$DEFAULT_BRANCH" "$TAG" "$TARGET_SHA"
+          fi
 
           gh release create "$TAG" \
             --target "$TARGET_SHA" \
