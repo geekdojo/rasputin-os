@@ -46,11 +46,12 @@
 #
 # WHY THIS VALUE
 #
-# 2026.10.4-dev.181 is the firewall dev release of the 2026.10.4 dev chain
-# (Feature geekdojo/geekdojo-brain#713), built 2026-10-28 from firewall commit
-# 57c9498f. It carries agent 2026.10.4-dev.205, the same CP dev release this
-# image's agent/api pins name, and the A/B kernel fix (geekdojo/geekdojo-brain#888).
-# Dev only bakes dev.
+# 2026.10.3-dev.168 is the firewall dev release built from the stable 2026.10.3
+# commit (8495292), tagged on the dev channel so dev clusters can take it under
+# the channel lock. It replaces 2026.10.4-dev.181: the 2026.10.4 firewall work
+# (OpenWrt 25.12.6 and the A/B kernel fix, geekdojo/geekdojo-brain#888) was
+# rolled back on 2026-10-28, and dev.176 and dev.181 were deleted. It carries
+# agent 2026.10.3, older than this image's agent/api pins. Dev only bakes dev.
 #
 # History: 2026.09.4-dev.127 was the first pin -- the FIRST firewall release
 # that publishes manifest.json.sig (dev.126 and earlier ship no sig asset).
@@ -70,6 +71,7 @@
 # On the 2026.10.3 dev line: dev.164 (OS dev.331), dev.165 (OS dev.333),
 # dev.166 (OS dev.335), dev.167 (OS dev.337).
 # 2026.10.3 (stable) was the pin of the 2026.10.3 stable OS.
-# On the 2026.10.4 dev line: dev.176 (OS dev.344).
+# On the 2026.10.4 dev line: dev.176 (OS dev.344), dev.181 (OS dev.345);
+# both deleted in the 2026-10-28 rollback.
 #
-2026.10.4-dev.181
+2026.10.3-dev.168
