@@ -46,14 +46,13 @@
 #
 # WHY THIS VALUE
 #
-# 2026.10.3 is the stable firewall, built from 8495292. Stable OS 2026.10.4
-# bakes it because there is no firewall 2026.10.4: the 2026.10.4 firewall work
-# (OpenWrt 25.12.6 and the A/B kernel fix, geekdojo/geekdojo-brain#888) was
-# rolled back on 2026-10-28, and Bryce ruled the same day that this one stable
-# ships without a firewall release of its own ("I'm fine with that for this one
-# go-round"). It is still stable baking stable. The bench validated this pair
-# as OS 2026.10.4-dev.346 with firewall 2026.10.3-dev.168, the same firewall
-# commit on the dev channel. It carries agent 2026.10.3.
+# 2026.10.5-dev.186 is the firewall dev release of the 2026.10.5 dev chain
+# (feature geekdojo/geekdojo-brain#892), built from firewall main 624b87a. It
+# carries the #893 boot layout (each slot boots the kernel from its own
+# squashfs, with the shared 2026.10.3 kernel on the ESP as the fallback),
+# OpenWrt 25.12.6, the Snort rules re-pin, and agent 2026.10.5-dev.208 -- the
+# same control-plane release this OS pins. Dev bakes dev. The previous pin was
+# stable 2026.10.3, which stable OS 2026.10.4 baked.
 #
 # History: 2026.09.4-dev.127 was the first pin -- the FIRST firewall release
 # that publishes manifest.json.sig (dev.126 and earlier ship no sig asset).
@@ -77,4 +76,4 @@
 # both deleted in the 2026-10-28 rollback. 2026.10.3-dev.168 (OS dev.346) was
 # the stable 2026.10.3 commit on the dev channel.
 #
-2026.10.3
+2026.10.5-dev.186
