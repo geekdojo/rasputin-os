@@ -46,12 +46,14 @@
 #
 # WHY THIS VALUE
 #
-# 2026.10.3-dev.168 is the firewall dev release built from the stable 2026.10.3
-# commit (8495292), tagged on the dev channel so dev clusters can take it under
-# the channel lock. It replaces 2026.10.4-dev.181: the 2026.10.4 firewall work
+# 2026.10.3 is the stable firewall, built from 8495292. Stable OS 2026.10.4
+# bakes it because there is no firewall 2026.10.4: the 2026.10.4 firewall work
 # (OpenWrt 25.12.6 and the A/B kernel fix, geekdojo/geekdojo-brain#888) was
-# rolled back on 2026-10-28, and dev.176 and dev.181 were deleted. It carries
-# agent 2026.10.3, older than this image's agent/api pins. Dev only bakes dev.
+# rolled back on 2026-10-28, and Bryce ruled the same day that this one stable
+# ships without a firewall release of its own ("I'm fine with that for this one
+# go-round"). It is still stable baking stable. The bench validated this pair
+# as OS 2026.10.4-dev.346 with firewall 2026.10.3-dev.168, the same firewall
+# commit on the dev channel. It carries agent 2026.10.3.
 #
 # History: 2026.09.4-dev.127 was the first pin -- the FIRST firewall release
 # that publishes manifest.json.sig (dev.126 and earlier ship no sig asset).
@@ -72,6 +74,7 @@
 # dev.166 (OS dev.335), dev.167 (OS dev.337).
 # 2026.10.3 (stable) was the pin of the 2026.10.3 stable OS.
 # On the 2026.10.4 dev line: dev.176 (OS dev.344), dev.181 (OS dev.345);
-# both deleted in the 2026-10-28 rollback.
+# both deleted in the 2026-10-28 rollback. 2026.10.3-dev.168 (OS dev.346) was
+# the stable 2026.10.3 commit on the dev channel.
 #
-2026.10.3-dev.168
+2026.10.3
