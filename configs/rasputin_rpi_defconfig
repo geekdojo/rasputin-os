@@ -92,19 +92,24 @@ BR2_PACKAGE_SYSTEMD_COREDUMP=y
 # the same FAT, config.txt auto-selecting — the Raspberry Pi OS model — tracked
 # as a follow-up. Pin is the one Buildroot 2025.02.x's raspberrypi5_defconfig
 # used (6.6.28, a known-good combination); it does NOT follow a Buildroot bump.
-# CM5 carrier note: bcm2712-rpi-5-b is the Pi 5 board; swap/add the CM5 carrier
-# DTB (bcm2712-rpi-cm5-cb / -cm5io) once a CM5 is on the bench.
 BR2_LINUX_KERNEL=y
 BR2_LINUX_KERNEL_CUSTOM_TARBALL=y
 BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="$(call github,raspberrypi,linux,576cc10e1ed50a9eacffc7a05c796051d7343ea4)/linux-576cc10e1ed50a9eacffc7a05c796051d7343ea4.tar.gz"
 BR2_LINUX_KERNEL_DEFCONFIG="bcm2712"
 BR2_LINUX_KERNEL_DTS_SUPPORT=y
 # UNIFIED image DTBs: Pi 5 (bcm2712-rpi-5-b = rev 1.0 / C-step; bcm2712d0-rpi-5-b
-# = rev 1.1 / D0) + Pi 4 (bcm2711-rpi-4-b). The bcm2712 primary kernel compiles
-# all three DTBs fine (DTS compilation is config-independent); the Pi 4 kernel
-# itself (kernel8.img) is built separately in post-build.sh. NOTE: dropped
-# Buildroot's `bcm2712-rpi-500` (Pi 500) — no build rule at fork commit 576cc10.
-BR2_LINUX_KERNEL_INTREE_DTS_NAME="broadcom/bcm2712-rpi-5-b broadcom/bcm2712d0-rpi-5-b broadcom/bcm2711-rpi-4-b"
+# = rev 1.1 / D0) + Pi 4 (bcm2711-rpi-4-b) + CM5 on the official IO boards
+# (bcm2712-rpi-cm5-cm5io, bcm2712-rpi-cm5-cm4io). The bcm2712 primary kernel
+# compiles all of these (DTS compilation is config-independent); the Pi 4
+# kernel itself (kernel8.img) is built separately in post-build.sh. Firmware
+# auto-selects the DTB by board: a CM5 loads bcm2712-rpi-cm5-cm5io.dtb (pelwell,
+# raspberrypi/firmware#1977) and falls back to the Pi 5 DTB only if that file
+# is absent. NOTE: dropped Buildroot's `bcm2712-rpi-500` (Pi 500) — no build
+# rule at fork commit 576cc10. Lite (`bcm2712-rpi-cm5l-*`) DTBs are also
+# absent at this pin (added later, raspberrypi/linux#6272); do not list names
+# the tree cannot build. Super4C has no published overlay in this kernel.
+# CM5 builds; untested on hardware.
+BR2_LINUX_KERNEL_INTREE_DTS_NAME="broadcom/bcm2712-rpi-5-b broadcom/bcm2712d0-rpi-5-b broadcom/bcm2711-rpi-4-b broadcom/bcm2712-rpi-cm5-cm5io broadcom/bcm2712-rpi-cm5-cm4io"
 BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_RASPUTIN_PATH)/board/rasputin/rpi/linux-4k-page-size.fragment $(BR2_EXTERNAL_RASPUTIN_PATH)/board/rasputin/rpi/linux.fragment"
 BR2_LINUX_KERNEL_NEEDS_HOST_OPENSSL=y
 # Declare the custom kernel's headers series (the fork is 6.6.x). REQUIRED with

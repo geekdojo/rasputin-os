@@ -63,16 +63,18 @@ this image — see
   - `n100` (amd64, UEFI): GRUB with a real boot counter — bootloader-level
     rollback even for a committed slot. Hardware-validated end-to-end
     (install → auto-boot new slot → commit, and mark-bad → auto-revert).
-  - `rpi` (arm64): one unified image boots **Pi 4 / Pi 5** (two-kernel
+  - `rpi` (arm64): one unified image boots **Pi 4 / Pi 5 / CM5** (two-kernel
     FAT, firmware picks per board; Raspberry Pi kernel fork — mainline can't
-    boot current Pi 5 steppings). CM5 is not validated: no CM5 has booted
-    this image, and the build carries no CM5 device tree. A/B uses the Pi
+    boot current Pi 5 steppings). CM5 **builds; untested on hardware** — the
+    image ships the kernel pin's CM5 IO-board DTBs (`bcm2712-rpi-cm5-cm5io`,
+    `bcm2712-rpi-cm5-cm4io`; no Lite `cm5l` DTBs at this pin) and the firmware
+    auto-selects them. A/B uses the Pi
     firmware's one-shot `tryboot` flag via a custom RAUC backend. The firmware **cannot count
     boot attempts and won't auto-fall-back from a committed slot**, so the Pi
-    relies on defense-in-depth: the one-shot trial, a systemd watchdog on the
+    (including CM5) relies on the same defense-in-depth as Pi 5: the one-shot trial, a systemd watchdog on the
     agent, and the update saga's post-reboot health check. Boot, A/B commit,
-    simulated-failure rollback, and OTA are hardware-validated (microSD and
-    NVMe).
+    simulated-failure rollback, and OTA are hardware-validated on Pi 4 / Pi 5
+    (microSD and NVMe), not yet on CM5.
 - **Docker** as the app substrate; the control-plane binaries
   (`rasputin-agent`, `rasputin-api`) are vendored as pre-built static
   release binaries from
