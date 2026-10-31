@@ -371,6 +371,12 @@ jobs:
       # the image's shell.
       - name: Release target guard tests
         run: bash test/release-target-guard-test.sh
+      # scripts/release-manifest-gate.sh: publish refuses to release any file
+      # that is not the one the sign job signed for (missing, extra, short,
+      # altered, or manifest.json / .sig off their pins). Every exit status,
+      # against a throwaway release directory. CI-side bash.
+      - name: Release manifest gate tests
+        run: bash test/release-manifest-gate-test.sh
       # release.yml's image build runs scripts/fetch-vendored.sh to put the
       # pinned agent/api tarballs in dl/. Its retry exists for a network fault
       # no pull request sees (run 40229531683), so every branch is pinned here
