@@ -106,6 +106,13 @@ jobs:
       # identical in a build and in a boot log, so it is pinned here.
       - name: Wired uplink config tests
         run: sh test/wired-network-test.sh
+      # The rpi SKU's device trees and firmware selection. Dropping a CM5 DTB
+      # from the defconfig, pinning device_tree=, or moving kernel= out of its
+      # [pi4]/[pi5] block looks identical in a build and only fails on the
+      # board that needed that file. QEMU never reads config.txt, so this is
+      # pinned here. CM5 builds; untested on hardware.
+      - name: rpi device-tree and firmware-selection tests
+        run: sh test/rpi-dtb-test.sh
       # The stock units this image masks. A mask is a /dev/null symlink, which
       # is the easiest thing in the overlay to lose to a rebase or a copy that
       # resolves links — and losing it looks identical in a build, while the

@@ -530,11 +530,13 @@ printf '%s\n' "${RASPUTIN_VERSION:-0.0.0-dev}" > "$TARGET_DIR/etc/rasputin/image
 # to $TARGET_DIR/lib/modules/<2712-ver>. Here — after that build, BEFORE the
 # rootfs is squashed — we recompile the SAME fork source for bcm2711 (Pi 4) and
 # install its modules ALONGSIDE, so one rootfs serves whichever kernel the Pi
-# firmware boots. The primary kernel's Image + all three DTBs are already copied
+# firmware boots. The primary kernel's Image + the in-tree DTBs (Pi 5, Pi 5 D0,
+# Pi 4, CM5-cm5io, CM5-cm4io) are already copied
 # to images/, so reconfiguring the kernel build dir in place is safe (nothing
 # rebuilds the kernel after post-build). post-image.sh stages BOTH Images onto
-# the FAT (kernel_2712.img for Pi 5, kernel8.img for Pi 4) and config.txt's
-# [pi4]/[pi5] sections select per board. See os-images/buildroot-os.md §3.
+# the FAT (kernel_2712.img for Pi 5 / CM5, kernel8.img for Pi 4) and
+# config.txt's [pi4]/[pi5] sections select per board ([cm5] inherits [pi5]).
+# See os-images/buildroot-os.md §3.
 if [ "$SOC" = "rpi" ]; then
 	O_DIR="$(cd "$(dirname "$TARGET_DIR")" && pwd)"   # output/rpi
 	BIN_DIR="$O_DIR/images"

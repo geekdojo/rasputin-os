@@ -27,6 +27,10 @@ enable_uart=1
 kernel=kernel8.img
 [pi5]
 # Pi 5 / CM5 (bcm2712): the SPI-EEPROM bootloader loads this kernel via config.txt.
+# [pi5] also matches Compute Module 5 (Raspberry Pi config.txt model filters);
+# [cm5] below sees these settings too. Do not add a global `kernel=` or a
+# `device_tree=` — firmware defaults to kernel_2712.img on BCM2712 and picks
+# the DTB by board (bcm2712-rpi-cm5-cm5io.dtb on a CM5).
 kernel=kernel_2712.img
 # Enable the external PCIe x1 lane so the kernel sees an NVMe SSD on the M.2 /
 # SSD HAT (Pi 5 PCIe is OFF by default). Required for booting/running from NVMe;
@@ -34,6 +38,17 @@ kernel=kernel_2712.img
 # EEPROM bootloader has its own NVMe support for finding the boot partition;
 # this is what lets the OS use the drive once booted.
 dtparam=pciex1
+[cm5]
+# CM5-only filter (also sees [pi5]: kernel_2712.img + dtparam=pciex1). No extra
+# firmware files: CM5 boots from its SPI-EEPROM, same as Pi 5; start4.elf on
+# this FAT is the Pi 4 path and is unused here. Native GbE and both RP1 USB3
+# ports are okay in the CM5IO DTB. Do not pin device_tree= — that would force
+# every carrier onto one DTB. DeskPi Super4C: no published overlay in this
+# tree (native 1GbE + USB3 + pciex1/NVMe come from the CM5IO DTB + [pi5];
+# 2.5GbE is a USB3 NIC on RP1 USB1; M.2 is PCIe-only, not SATA). Lite cm5l
+# DTBs are not in this kernel pin — firmware loads cm5-cm5io; SD on Lite is
+# open. CM5 builds; untested on hardware. Rollback is the same tryboot
+# one-shot as Pi 5 (no boot-count fallback).
 [all]
 
 # NOTE: A/B is handled ONE level up, in autoboot.txt (boot_partition switching
