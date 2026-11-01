@@ -153,6 +153,21 @@
           }
         ]
       }
+    },
+    {
+      "auditing": {
+        "request": [
+          {
+            "audited-header-job-id": {
+              "operation": "update",
+              "path": "sys/config/auditing/request-headers/x-rasputin-job-id",
+              "data": {
+                "hmac": false
+              }
+            }
+          }
+        ]
+      }
     }
   ]
 }

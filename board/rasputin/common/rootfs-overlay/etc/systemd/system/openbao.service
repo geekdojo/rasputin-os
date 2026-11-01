@@ -46,10 +46,14 @@ Group=openbao
 # whose core is not initialised, bao creates the policies (their text from
 # /usr/share/rasputin/openbao-policy/, which the api tarball ships), the kv-v2
 # mount, cert auth and the api's, rotation job's and provisioner's roles,
+# and has the audit record the api's X-Rasputin-Job-Id header in plain text,
 # once, and keeps no root token. init.json is FROZEN from the store-arming
 # release on (#805): a store runs it only on its first start, so a later
 # release adds mounts and roles through provision.tsv and the provisioner,
-# never here. The seal fragment arrives as a credential and is named by its
+# never here. The one exception is the audited job-id header request
+# (geekdojo/geekdojo-brain#802), allowed by ADR-0010's amendment:
+# https://github.com/geekdojo/geekdojo-brain/blob/main/projects/rasputin/adr/0010-secrets-store.md#the-initjson-job-header-exception-802
+# A store initialised before it never gets it. The seal fragment arrives as a credential and is named by its
 # literal path, because bao expands no variable in its config (#679 Q3).
 ExecStart=/usr/bin/bao server -config=/etc/rasputin/openbao/openbao.hcl -config=/etc/rasputin/openbao/init.json -config=/run/credentials/openbao.service/seal.hcl
 # A staged store restore (geekdojo/geekdojo-brain#766; ADR-0010 S15): when

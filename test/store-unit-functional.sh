@@ -38,9 +38,11 @@
 #      initialises itself with no sys/init call, leaves t=0 n=0 and no root
 #      token, holds the tarball's policy text, the kv-v2 mount, exactly the
 #      two roles and one audit device whose file is 0600 990:990 and HMACs a
-#      written value, and the outcome record says initialised (TC-804-18); a
-#      restart runs no self-init and changes none of it, unsealing from the
-#      oneshot's fragment with no unseal call (TC-804-19, TC-756-15); the
+#      written value, and the outcome record says initialised (TC-804-18);
+#      the audit records the api's X-Rasputin-Job-Id header in plain text
+#      (TC-802-16); a restart runs no self-init and changes none of it, the
+#      header included, unsealing from the oneshot's fragment with no unseal
+#      call (TC-804-19, TC-756-15); the
 #      only bao socket is 127.0.0.1:8200 (TC-756-12); only a store-CA client
 #      certificate finishes the handshake (TC-756-13); the unauthenticated
 #      rekey and generate-root endpoints (TC-756-14); log level info
@@ -741,7 +743,8 @@ JSON
 # TEST HARNESS, run in the container: logs in and reads, keeping every token
 # in a 0600 file and never printing one. `inspect` prints one "KEY<TAB>JSON"
 # line per read; `write` writes the sentinel through the api's role and prints
-# the status.
+# the status; `job ID` reads it back through the api's role with the header
+# X-Rasputin-Job-Id: ID, as the api sends it under a job (#802).
 cat >"$SCRATCH/store-read.sh" <<'READ'
 #!/bin/sh
 set -u
@@ -783,6 +786,11 @@ case "$1" in
 		c --cert /pki/api.pem --key /pki/api.key -H "@/root/api.token.hdr" -o /dev/null -w '%{http_code}' \
 			-X POST --data "{\"data\":{\"v\":\"$(cat /root/sentinel)\"}}" "$U/rasputin-secrets/data/apps/store-unit-test"
 		;;
+	job)
+		login api rasputin-api /root/api.token || { echo "login failed"; exit 1; }
+		c --cert /pki/api.pem --key /pki/api.key -H "@/root/api.token.hdr" -H "X-Rasputin-Job-Id: $2" -o /dev/null -w '%{http_code}' \
+			"$U/rasputin-secrets/data/apps/store-unit-test"
+		;;
 	read)
 		# read — the sentinel's status through the api's role; the body, when
 		# there is one, into /root/read.json (scenario 12).
@@ -796,6 +804,19 @@ READ
 docker cp "$SCRATCH/test-inspector.json" "$CID:/etc/rasputin/openbao/test-inspector.json" >/dev/null \
 	&& docker cp "$SCRATCH/store-read.sh" "$CID:/root/store-read.sh" >/dev/null \
 	|| { echo "FAILED: could not copy the inspector's config and reader into the container."; exit 1; }
+# job_header LABEL ID — TC-802-16: a read through the api's role carrying
+# X-Rasputin-Job-Id: ID writes the header into its request and response audit
+# entries as request.headers["x-rasputin-job-id"] == [ID], in plain text, so
+# self-init's init.json request configured the audited header. Only the lines
+# holding ID leave the container; the audit HMACs every secret value in them.
+job_header() {
+	_code=$(inside "sh /root/store-read.sh job '$2'")
+	check "TC-802-16 $1: the api's role reads the value with X-Rasputin-Job-Id: $2 (got '$_code')" "$(yes_if [ "$_code" = 200 ])"
+	_types=$(inside "grep -F '$2' $V/openbao-audit/audit.log" \
+		| jq -s -c --arg id "$2" '[.[] | select(.request.headers["x-rasputin-job-id"] == [$id]) | .type] | sort' 2>&1)
+	check "TC-802-16 $1: the request and response audit entries carry request.headers[\"x-rasputin-job-id\"] == [\"$2\"] in plain text (got $_types)" \
+		"$(yes_if [ "$_types" = '["request","response"]' ])"
+}
 # field KEY TEXT — the JSON of the line KEY in an inspect read.
 field() { printf '%s\n' "$2" | awk -F'\t' -v k="$1" '$1 == k { sub(/^[^\t]*\t/, ""); print; exit }'; }
 # view TEXT — what self-init made, one line per fact, for comparing two reads.
@@ -860,6 +881,8 @@ check "TC-804-18 (3) audit.log is 0600 $BAO_UID:$BAO_GID (got '${1:-} ${2:-}')" 
 check "TC-804-18 (3) audit.log holds hmac-sha256: values (got ${3:-0} lines)" "$(yes_if [ "${3:-0}" -gt 0 ])"
 check "TC-804-18 (3) audit.log does not hold the written value (got ${4:-?} lines)" "$(yes_if [ "${4:-}" = 0 ])"
 check "TC-804-18 (1) no request ever reached sys/init (got ${5:-?} audit lines)" "$(yes_if [ "${5:-}" = 0 ])"
+echo "  -- the audited job-id header, from init.json (TC-802-16)"
+job_header "on the start that initialised" "store-unit-job-$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"
 rec7=$(inside "stat -c '%a %u' $RECORD; cat $RECORD")
 boot=$(inside "cat /proc/sys/kernel/random/boot_id")
 r=1
@@ -934,6 +957,7 @@ r8=$(inside "sh /root/store-read.sh inspect")
 v8=$(view "$r8")
 check "TC-804-19 policies, roles, the mount, the audit device and the policy text are identical, with still zero root tokens" \
 	"$(yes_if [ "$v8" = "$v7" ])" "before: $(printf '%s' "$v7" | tr '\n' '|') after: $(printf '%s' "$v8" | tr '\n' '|')"
+job_header "after the restart, with no self-init" "store-unit-job-$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"
 
 echo "  -- the journal (TC-756-16, TC-756-17)"
 journal=$(inside "journalctl -u openbao.service --no-pager -o cat")

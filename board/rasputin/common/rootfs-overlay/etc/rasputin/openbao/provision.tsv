@@ -8,6 +8,9 @@
 # store runs it once, on its first start, so an item added there would reach
 # fresh stores only. A later release adds mounts and roles HERE, and a fresh
 # store gets them here too, from the same provisioner, within its limits.
+# The one exception is the audited job-id header request
+# (geekdojo/geekdojo-brain#802), allowed by ADR-0010's amendment:
+# https://github.com/geekdojo/geekdojo-brain/blob/main/projects/rasputin/adr/0010-secrets-store.md#the-initjson-job-header-exception-802
 #
 # One item per line, its fields separated by one TAB:
 #   mount<TAB><name>               a kv-v2 mount at <name>

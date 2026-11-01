@@ -252,8 +252,9 @@ $(words "$D" Service ReadWritePaths)
 	# reqs — one "PATH<TAB>OPERATION" per request, in order.
 	_reqs=$(jq -r '.initialize[] | to_entries[] | .value.request[] | to_entries[] | .value | "\(.path)\t\(.operation)"' "$J" 2>&1)
 	# TC-805-24: four policies and three roles, the provisioner's added by
-	# geekdojo-brain#805 (the #805 PINS of TC-804-13).
-	check "TC-804-13 TC-805-24 init.json's requests are exactly the four policies, the mount, cert auth and the three roles, in order" \
+	# geekdojo-brain#805 (the #805 PINS of TC-804-13); TC-802-15: then the
+	# audited job-id header, ADR-0010's one exception to the freeze (#802).
+	check "TC-804-13 TC-805-24 TC-802-15 init.json's requests are exactly the four policies, the mount, cert auth, the three roles and the audited job-id header, in order" \
 		"$(yes_if [ "$(printf '%s\n' "$_reqs" | cut -f1)" = 'sys/policies/acl/rasputin-api
 sys/policies/acl/rasputin-seal-rotate
 sys/policies/acl/rasputin-provisioner
@@ -262,7 +263,8 @@ sys/mounts/rasputin-secrets
 sys/auth/cert
 auth/cert/certs/rasputin-api
 auth/cert/certs/rasputin-seal-rotate
-auth/cert/certs/rasputin-provisioner' ])" "got: $(printf '%s' "$_reqs" | cut -f1 | tr '\n' '|')"
+auth/cert/certs/rasputin-provisioner
+sys/config/auditing/request-headers/x-rasputin-job-id' ])" "got: $(printf '%s' "$_reqs" | cut -f1 | tr '\n' '|')"
 	_ops=$(printf '%s\n' "$_reqs" | cut -f2 | sort -u)
 	check "TC-804-13 every request's operation is update" "$(yes_if [ "$_ops" = update ])" "got: $(printf '%s' "$_ops" | tr '\n' '|')"
 	_audit=$(printf '%s\n' "$_reqs" | cut -f1 | grep '^sys/audit' || true)
@@ -278,6 +280,9 @@ auth/cert/certs/rasputin-provisioner' ])" "got: $(printf '%s' "$_reqs" | cut -f1
 	check "TC-804-13 the mount is kv version 2" \
 		"$(yes_if [ "$(req sys/mounts/rasputin-secrets)" = '{"type":"kv","options":{"version":"2"}}' ])" "got: $(req sys/mounts/rasputin-secrets)"
 	check "TC-804-13 cert auth is enabled" "$(yes_if [ "$(req sys/auth/cert)" = '{"type":"cert"}' ])" "got: $(req sys/auth/cert)"
+	_jh=sys/config/auditing/request-headers/x-rasputin-job-id
+	check "TC-802-15 init.json has the audit record X-Rasputin-Job-Id in plain text: update $_jh with hmac false" \
+		"$(yes_if [ "$(req "$_jh")" = '{"hmac":false}' ])" "got: $(req "$_jh")"
 	for _p in rasputin-api rasputin-seal-rotate rasputin-provisioner rasputin-bindable; do
 		_want_pol=$(jq -cn --arg p "/usr/share/rasputin/openbao-policy/$_p.hcl" '{policy: {eval_type: "string", eval_source: "file", path: $p}}')
 		check "TC-804-13 TC-805-24 policy $_p is read from /usr/share/rasputin/openbao-policy/$_p.hcl through a file source" \
@@ -303,6 +308,13 @@ auth/cert/certs/rasputin-provisioner' ])" "got: $(printf '%s' "$_reqs" | cut -f1
 	_pt="$R/$REL_OVERLAY/etc/rasputin/openbao/provision.tsv"
 	_ptf=$(grep -c 'init.json beside this file is FROZEN from the store-arming release on' "$_pt" 2>/dev/null || true)
 	check "TC-805-24 provision.tsv's header says init.json is frozen from the store-arming release on" "$(yes_if [ "$_ptf" = 1 ])" "found ${_ptf:-0} in $_pt"
+	# TC-802-15: both name the one exception and the ADR-0010 amendment allowing it.
+	_adr='geekdojo-brain/blob/main/projects/rasputin/adr/0010-secrets-store.md#the-initjson-job-header-exception-802'
+	for _f in "$U" "$_pt"; do
+		_ex=$(grep -c -e 'The one exception is the audited job-id header request' -e "$_adr" "$_f" 2>/dev/null || true)
+		check "TC-802-15 $(basename "$_f")'s FROZEN comment names the one exception, the job-id header, and links ADR-0010's amendment" \
+			"$(yes_if [ "$_ex" = 2 ])" "found ${_ex:-0} of the 2 lines in $_f"
+	done
 	_items=$(grep -v -e '^#' -e '^[[:space:]]*$' "$_pt" 2>/dev/null || true)
 	check "TC-805-24 the shipped provision.tsv holds no entry" "$(yes_if eval '[ -f "$_pt" ] && [ -z "$_items" ]')" "entries: $(printf '%s' "$_items" | tr '\n' '|')"
 	_stray=$(jq -r --arg ca "$CA_PATH" '[.. | objects | select(.eval_source? == "file") | .path | select((startswith("/usr/share/rasputin/openbao-policy/") or . == $ca) | not)] | join(",")' "$J" 2>&1)
@@ -447,6 +459,11 @@ tree; jqedit "$T/$INIT_REL" '.initialize[0].policies.request[0]."policy-rasputin
 	&& refused 'an env source' 'no env or other non-file source' 'env'
 tree; jqedit "$T/$INIT_REL" '.initialize[1].secrets.request += [{"kv-extra": {"operation": "update", "path": "sys/mounts/extra", "data": {"type": "kv"}}}]' \
 	&& refused 'an extra mount request' "init.json's requests are exactly" 'sys/mounts/extra'
+# TC-802-15: the request removed, and its hmac turned on.
+tree; jqedit "$T/$INIT_REL" 'del(.initialize[] | select(has("auditing")))' \
+	&& refused 'the audited job-id header request removed' 'X-Rasputin-Job-Id in plain text' 'requests on that path: 0'
+tree; jqedit "$T/$INIT_REL" '(.initialize[] | .auditing? // empty | .request[] | ."audited-header-job-id".data.hmac) = true' \
+	&& refused 'the audited job-id header with hmac true' 'X-Rasputin-Job-Id in plain text' '{"hmac":true}'
 tree; jqedit "$T/$INIT_REL" "$(api_role '.allowed_common_names = ["*"]')" \
 	&& refused 'the api role admitting any CommonName' 'role rasputin-api: CN rasputin-api only' '"allowed_common_names":["*"]'
 tree; jqedit "$T/$INIT_REL" "$(api_role '.token_no_default_policy = false')" \
