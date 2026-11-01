@@ -46,14 +46,13 @@
 #
 # WHY THIS VALUE
 #
-# 2026.10.5-dev.189 is the firewall dev release of the #718 follow-on dev
-# chain (geekdojo/geekdojo-brain#783 app-secret lifecycle, #902 release-asset
-# gate, #903 restore run reconcile), built from firewall main 36225af. It
-# carries agent 2026.10.5-dev.210 -- the same control-plane release this OS
-# pins -- whose one agent change is compose removal on app delete (#783), plus
-# the rolling OpenWrt 25.12.6 feed (canary #123: kernel 6.12.112); the Snort
-# rules pin is unchanged at 969a2ced. Dev bakes dev. The previous pin was
-# dev.188 of the #718 dev chain.
+# 2026.10.5 is the STABLE firewall of the lockstep 2026.10.5 stable cut
+# (feature geekdojo/geekdojo-brain#718, secrets store step 6, with #783, #902
+# and #903), built from firewall main 77040e2. It carries agent 2026.10.5 --
+# the control-plane stable v2026.10.5 this OS pins, built from the same CP
+# commit as dev.210 -- plus the rolling OpenWrt 25.12.6 feed (canary #123:
+# kernel 6.12.112); the Snort rules pin is unchanged at 969a2ced. Stable bakes
+# stable. The previous pin was dev.189 of the #718 follow-on dev chain.
 #
 # History: 2026.09.4-dev.127 was the first pin -- the FIRST firewall release
 # that publishes manifest.json.sig (dev.126 and earlier ship no sig asset).
@@ -77,6 +76,7 @@
 # both deleted in the 2026-10-28 rollback. 2026.10.3-dev.168 (OS dev.346) was
 # the stable 2026.10.3 commit on the dev channel.
 # On the 2026.10.5 dev line: dev.186 (OS dev.350), dev.188 (OS dev.351,
-# release deleted 2026-10-31 after its truncated rpi image, #902).
+# release deleted 2026-10-31 after its truncated rpi image, #902),
+# dev.189 (OS dev.353).
 #
-2026.10.5-dev.189
+2026.10.5
