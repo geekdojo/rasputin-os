@@ -187,7 +187,10 @@ BR2_PACKAGE_RASPUTIN_AGENT=y
 BR2_PACKAGE_RASPUTIN_API=y
 BR2_PACKAGE_CADDY=y
 # The secrets store binary and its static user, at the pin in package/openbao
-# (geekdojo/geekdojo-brain#798). No unit yet: nothing runs it.
+# (geekdojo/geekdojo-brain#798). openbao.service runs it on the control plane:
+# post-build.sh wants it on every image (geekdojo/geekdojo-brain#756), and its
+# conditions skip it elsewhere and until the api has minted the store CA and
+# server leaf.
 BR2_PACKAGE_OPENBAO=y
 
 # --- rootfs: squashfs (read-only, verity-friendly) ---
