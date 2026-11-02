@@ -46,14 +46,13 @@
 #
 # WHY THIS VALUE
 #
-# 2026.10.6-dev.193 is the firewall dev release of the first 2026.10.6 dev
-# chain (rasputin-control-plane#516 store audit file to Loki, #517 store
-# health metrics and the "Secret store" dashboard, rasputin-os#193), built
-# from firewall main dbd8cdb. It carries agent 2026.10.6-dev.212 -- the
-# control-plane dev release this OS pins, built from CP main 3ddb62e, with no
-# agent/ change against the 2026.10.5 stable -- plus the rolling OpenWrt
-# 25.12.6 feed; the Snort rules pin is unchanged at 969a2ced. Dev bakes dev.
-# The previous pin was the 2026.10.5 stable.
+# 2026.10.6 is the STABLE firewall of the lockstep 2026.10.6 stable cut
+# (feature geekdojo/geekdojo-brain#726, secrets store step 9: #802 the store's
+# audit trail to Loki, #939 store health metrics), built from firewall main
+# 0555a6f. It carries agent 2026.10.6 -- the control-plane stable v2026.10.6
+# this OS pins, built from the same CP commit as dev.212 -- plus the rolling
+# OpenWrt 25.12.6 feed; the Snort rules pin is unchanged at 969a2ced. Stable
+# bakes stable. The previous pin was dev.193 of the first 2026.10.6 dev chain.
 #
 # History: 2026.09.4-dev.127 was the first pin -- the FIRST firewall release
 # that publishes manifest.json.sig (dev.126 and earlier ship no sig asset).
@@ -80,5 +79,6 @@
 # release deleted 2026-10-31 after its truncated rpi image, #902),
 # dev.189 (OS dev.353).
 # 2026.10.5 (stable) was the pin of the 2026.10.5 stable OS.
+# On the 2026.10.6 dev line: dev.193 (OS dev.358).
 #
-2026.10.6-dev.193
+2026.10.6
