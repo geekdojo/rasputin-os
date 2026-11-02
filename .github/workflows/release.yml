@@ -594,7 +594,7 @@ jobs:
 
 
   # Discrete signing job — the leaf key is scoped to HERE and nowhere else. It
-  # comes from this repository's `signing` environment, is staged and
+  # comes from the organisation's RASPUTIN_LEAF_* secrets, is staged and
   # preflighted by the organisation's shared rasputin-sign action onto an
   # in-memory tmpfs for the duration of `rauc bundle`, and is wiped at the end
   # of the job. (release-pipeline.md §3, geekdojo/geekdojo-brain#524)
@@ -606,13 +606,12 @@ jobs:
   # and a publish must wait for that smoke. So: sign, then update-smoke, then
   # publish, as three jobs.
   #
-  # It therefore also runs on a full_build bench dispatch (publish=false), so
-  # the bench build gets its update smoke too. The `signing` environment has no
-  # deployment-branch policy, so a branch dispatch can sign — exactly as a
-  # branch dispatch with publish=true always could. What that adds is a
-  # release-signed bundle that is NOT published: it exists only as this run's
-  # `release-bundles` artifact, kept for one day (retention-days below), long
-  # enough for the update smoke and the publish job and no longer.
+  # It therefore also runs on a full_build bench dispatch (publish=false) from
+  # main, so the bench build gets its update smoke too; a full_build dispatch
+  # from any other ref does not sign (geekdojo/geekdojo-brain#524). What that
+  # adds is a release-signed bundle that is NOT published: it exists only as
+  # this run's `release-bundles` artifact, kept for one day (retention-days
+  # below), long enough for the update smoke and the publish job and no longer.
   sign:
     needs: [build, smoke-amd64, smoke-arm64]
     # A failing smoke must BLOCK publication. It did not: `!cancelled()` in the
@@ -638,10 +637,8 @@ jobs:
     if: ${{ !cancelled() && needs.smoke-amd64.result == 'success' && needs.smoke-arm64.result == 'success' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && (inputs.full_build == true || inputs.full_build == 'true' || inputs.publish == true || inputs.publish == 'true'))) }}
     runs-on: ubuntu-latest
     # The leaf comes from the org secrets RASPUTIN_LEAF_* (selected repos: this
-    # one and the firewall). The `signing` environment holds no secret and has no
-    # branch policy (both deferred, geekdojo/geekdojo-brain#524). What keeps other
-    # refs from signing is the ref clause in `if:` above, and it is only as
-    # strong as the copy of this file on the dispatched ref.
+    # one and the firewall). Only main dispatches and CalVer tag pushes reach
+    # this job (the `if:` above, geekdojo/geekdojo-brain#524).
     environment: signing
     permissions:
       contents: read
