@@ -377,6 +377,12 @@ jobs:
       # against a throwaway release directory. CI-side bash.
       - name: Release manifest gate tests
         run: bash test/release-manifest-gate-test.sh
+      # release.yml signs only on a pushed tag or a dispatch from main, and
+      # validate refuses publish=true from any other ref. Losing either looks
+      # identical in the Actions UI, so the text of sign's if: and the
+      # Signing ref check step are pinned (geekdojo/geekdojo-brain#524).
+      - name: Signing ref gate tests
+        run: sh test/signing-ref-gate-test.sh
       # release.yml's image build runs scripts/fetch-vendored.sh to put the
       # pinned agent/api tarballs in dl/. Its retry exists for a network fault
       # no pull request sees (run 40229531683), so every branch is pinned here
