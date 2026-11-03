@@ -46,13 +46,14 @@
 #
 # WHY THIS VALUE
 #
-# 2026.10.6 is the STABLE firewall of the lockstep 2026.10.6 stable cut
-# (feature geekdojo/geekdojo-brain#726, secrets store step 9: #802 the store's
-# audit trail to Loki, #939 store health metrics), built from firewall main
-# 0555a6f. It carries agent 2026.10.6 -- the control-plane stable v2026.10.6
-# this OS pins, built from the same CP commit as dev.212 -- plus the rolling
-# OpenWrt 25.12.6 feed; the Snort rules pin is unchanged at 969a2ced. Stable
-# bakes stable. The previous pin was dev.193 of the first 2026.10.6 dev chain.
+# 2026.11.0-dev.198 is the firewall dev build of the first 2026.11.0 dev chain
+# (feature geekdojo/geekdojo-brain#462: #529 one publisher trust anchor),
+# built from firewall main 485627a (PR #130). It carries agent
+# 2026.11.0-dev.214 -- the control-plane dev release this OS pins, built from
+# CP main 5af7a37, whose release build verifies artifacts only against the
+# baked root -- plus firewall PR #129 (signing only from main or a CalVer tag)
+# and the rolling OpenWrt 25.12.6 feed. Dev bakes dev. The previous pin was
+# the 2026.10.6 stable.
 #
 # History: 2026.09.4-dev.127 was the first pin -- the FIRST firewall release
 # that publishes manifest.json.sig (dev.126 and earlier ship no sig asset).
@@ -80,5 +81,6 @@
 # dev.189 (OS dev.353).
 # 2026.10.5 (stable) was the pin of the 2026.10.5 stable OS.
 # On the 2026.10.6 dev line: dev.193 (OS dev.358).
+# 2026.10.6 (stable) was the pin of the 2026.10.6 stable OS.
 #
-2026.10.6
+2026.11.0-dev.198
