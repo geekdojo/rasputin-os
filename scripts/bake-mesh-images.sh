@@ -31,8 +31,9 @@
 # inspect <ref>` succeeding proves only that SOMETHING is tagged with that name.
 # The identity that IS preserved through `docker save`/`docker load` is the
 # image config digest, which the classic store reports as the image ID. So that
-# is what is recorded, and the api refuses to start the mesh server from an
-# image whose ID is not the one named in loaded-ids.tsv.
+# is what is recorded. The api starts the mesh server by the ID named in
+# loaded-ids.tsv; if that image is not loaded, it falls back to pulling the
+# digest-pinned reference, and fails closed if the pull fails.
 #
 # It is read out of the SAVED TARBALL (manifest.json -> .Config), not from
 # `docker image inspect --format {{.Id}}`. That is not fussiness: under the
@@ -90,7 +91,7 @@ count=$(jq -r '.images | length' "$PIN")
 IDS="$OUT/loaded-ids.tsv"
 {
 	printf '# ref\timage id — written by the rasputin-os build.\n'
-	printf '# The api refuses to start the mesh server from an image whose ID is not named here.\n'
+	printf '# The api runs the mesh server by the ID named here; if it is not loaded, it pulls the digest-pinned ref.\n'
 } > "$IDS"
 
 jq -r --arg a "linux/$ARCH" \
