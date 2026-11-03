@@ -530,7 +530,7 @@ printf '%s\n' "${RASPUTIN_VERSION:-0.0.0-dev}" > "$TARGET_DIR/etc/rasputin/image
 # to $TARGET_DIR/lib/modules/<2712-ver>. Here — after that build, BEFORE the
 # rootfs is squashed — we recompile the SAME fork source for bcm2711 (Pi 4) and
 # install its modules ALONGSIDE, so one rootfs serves whichever kernel the Pi
-# firmware boots. The primary kernel's Image + all three DTBs are already copied
+# firmware boots. The primary kernel's Image + every family DTB are already copied
 # to images/, so reconfiguring the kernel build dir in place is safe (nothing
 # rebuilds the kernel after post-build). post-image.sh stages BOTH Images onto
 # the FAT (kernel_2712.img for Pi 5, kernel8.img for Pi 4) and config.txt's
@@ -550,7 +550,7 @@ if [ "$SOC" = "rpi" ]; then
 	MK="make -C $KSRC ARCH=arm64 CROSS_COMPILE=$CROSS KCFLAGS=-Wno-attribute-alias WERROR=0 REGENERATE_PARSERS=1"
 	$MK mrproper
 	$MK bcm2711_defconfig
-	# Our fragments (squashfs / netfilter / CONFIG_MODULE_COMPRESS_NONE / etc.)
+	# Our fragments (squashfs / netfilter / module compression off / etc.)
 	# must apply to the Pi 4 kernel too — appended last so they win, then
 	# olddefconfig resolves. 4K-page fragment is a no-op on bcm2711 (already 4K).
 	cat "$FRAG/linux-4k-page-size.fragment" "$FRAG/linux.fragment" >> "$KSRC/.config"

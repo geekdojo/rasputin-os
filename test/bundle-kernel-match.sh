@@ -22,7 +22,14 @@
 #      build version, since dev.276 changed the config without changing the
 #      release string;
 #   4. the rootfs carries modules.builtin + modules.dep for each of those
-#      releases, and no module tree for a release no payload kernel has.
+#      releases, and no module tree for a release no payload kernel has;
+#   5. every module tree is loadable: no compressed module (*.ko.xz/.gz/.zst),
+#      at least one *.ko, and a non-empty modules.dep. The build's depmod
+#      cannot index compressed modules, so a compressed tree ships an empty
+#      modules.dep and modprobe loads nothing — exFAT, WireGuard, USB NICs —
+#      while every smoke stays green, because what docker needs is built in.
+#      The rpi fragment's module-compression override is what prevents it, and
+#      the 6.12 bump silently dropped the old form (geekdojo/geekdojo-brain#1061).
 # Every failure is reported, then the script exits 1.
 #
 # Tools: mcopy and unsquashfs from the build's own host dir when present (the
@@ -140,6 +147,32 @@ else
 	else
 		ok "no module tree without a kernel"
 	fi
+
+	# --- 5. every module tree is loadable --------------------------------------
+	[ -s "$TMP/module-releases" ] || bad "The bundle's rootfs has no module tree under /usr/lib/modules."
+	while IFS= read -r rel; do
+		[ -n "$rel" ] || continue
+		pfx="squashfs-root/usr/lib/modules/$rel/"
+		n_ko=$(grep -F -e "$pfx" "$TMP/rootfs.list" | grep -c '\.ko$')
+		n_zko=$(grep -F -e "$pfx" "$TMP/rootfs.list" | grep -c -E '\.ko\.(xz|gz|zst)$')
+		"$UNSQUASHFS" -no-xattrs -q -d "$TMP/d-$rel" "$B/rootfs.img" "usr/lib/modules/$rel/modules.dep" >/dev/null 2>&1 || true
+		dep="$TMP/d-$rel/usr/lib/modules/$rel/modules.dep"
+		tree_ok=1
+		if [ "$n_zko" -gt 0 ]; then
+			bad "The module tree for $rel carries $n_zko compressed modules, which modprobe cannot load from this build."
+			grep -F -e "$pfx" "$TMP/rootfs.list" | grep -E '\.ko\.(xz|gz|zst)$' | head -3 | sed 's/^/    /'
+			tree_ok=0
+		fi
+		if [ "$n_ko" -eq 0 ]; then
+			bad "The module tree for $rel has no uncompressed module (*.ko)."
+			tree_ok=0
+		fi
+		if [ ! -s "$dep" ]; then
+			bad "The module tree for $rel has an empty or missing modules.dep, so modprobe can load none of its modules."
+			tree_ok=0
+		fi
+		[ "$tree_ok" -eq 0 ] || ok "module tree $rel is loadable ($n_ko modules, none compressed, modules.dep $(wc -l < "$dep" | tr -d ' ') lines)"
+	done < "$TMP/module-releases"
 fi
 
 if [ "$FAILS" -gt 0 ]; then

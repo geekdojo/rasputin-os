@@ -90,30 +90,35 @@ BR2_PACKAGE_SYSTEMD_COREDUMP=y
 # Pi-5-focused; Pi 4 (which booted fine on mainline) is dropped for the moment.
 # True Pi 4 + Pi 5 unification = a SECOND kernel (`kernel8.img` from bcm2711) on
 # the same FAT, config.txt auto-selecting — the Raspberry Pi OS model — tracked
-# as a follow-up. Pin is the one Buildroot 2025.02.x's raspberrypi5_defconfig
-# used (6.6.28, a known-good combination); it does NOT follow a Buildroot bump.
-# CM5 carrier note: bcm2712-rpi-5-b is the Pi 5 board; swap/add the CM5 carrier
-# DTB (bcm2712-rpi-cm5-cb / -cm5io) once a CM5 is on the bench.
+# as a follow-up. Pin: 21b41014 (6.12.61, rpi-6.12.y, 2025-12-09) — the commit
+# Buildroot 2026.08.1's raspberrypi5 / raspberrypi4_64 / raspberrypicm5io
+# defconfigs use, and one commit after the kernel our pinned rpi-firmware
+# (063bcab6, uname_string8 "6.12.61-v8+") and its prebuilt overlays were built
+# from. It does NOT follow a Buildroot bump and cve-watch does not track it: it
+# moves only by a hand edit here. The previous pin, 576cc10 (6.6.28), had no
+# CM5 Lite or Pi 500 device tree, so a CM5 Lite could not boot this image
+# (geekdojo/geekdojo-brain#1061).
 BR2_LINUX_KERNEL=y
 BR2_LINUX_KERNEL_CUSTOM_TARBALL=y
-BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="$(call github,raspberrypi,linux,576cc10e1ed50a9eacffc7a05c796051d7343ea4)/linux-576cc10e1ed50a9eacffc7a05c796051d7343ea4.tar.gz"
+BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="$(call github,raspberrypi,linux,21b410140c47ffab5668399f6f143c7d7b935c8b)/linux-21b410140c47ffab5668399f6f143c7d7b935c8b.tar.gz"
 BR2_LINUX_KERNEL_DEFCONFIG="bcm2712"
 BR2_LINUX_KERNEL_DTS_SUPPORT=y
-# UNIFIED image DTBs: Pi 5 (bcm2712-rpi-5-b = rev 1.0 / C-step; bcm2712d0-rpi-5-b
-# = rev 1.1 / D0) + Pi 4 (bcm2711-rpi-4-b). The bcm2712 primary kernel compiles
-# all three DTBs fine (DTS compilation is config-independent); the Pi 4 kernel
-# itself (kernel8.img) is built separately in post-build.sh. NOTE: dropped
-# Buildroot's `bcm2712-rpi-500` (Pi 500) — no build rule at fork commit 576cc10.
-BR2_LINUX_KERNEL_INTREE_DTS_NAME="broadcom/bcm2712-rpi-5-b broadcom/bcm2712d0-rpi-5-b broadcom/bcm2711-rpi-4-b"
+# UNIFIED image DTBs: every Pi 4 and Pi 5 family board, the list in
+# board/rasputin/rpi/family-dtbs.txt (test/rpi-family-dtbs.sh fails CI when this
+# line and that list disagree). The bcm2712 primary kernel compiles the bcm2711
+# DTBs fine too (DTS compilation is config-independent); the Pi 4 kernel itself
+# (kernel8.img) is built separately in post-build.sh. Installed flat at the FAT
+# root (BR2_LINUX_KERNEL_DTB_KEEP_DIRNAME unset), where the firmware looks.
+BR2_LINUX_KERNEL_INTREE_DTS_NAME="broadcom/bcm2711-rpi-4-b broadcom/bcm2711-rpi-400 broadcom/bcm2711-rpi-cm4 broadcom/bcm2711-rpi-cm4-io broadcom/bcm2711-rpi-cm4s broadcom/bcm2712-rpi-5-b broadcom/bcm2712d0-rpi-5-b broadcom/bcm2712-d-rpi-5-b broadcom/bcm2712-rpi-500 broadcom/bcm2712-rpi-cm5-cm5io broadcom/bcm2712-rpi-cm5-cm4io broadcom/bcm2712-rpi-cm5l-cm5io broadcom/bcm2712-rpi-cm5l-cm4io"
 BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_RASPUTIN_PATH)/board/rasputin/rpi/linux-4k-page-size.fragment $(BR2_EXTERNAL_RASPUTIN_PATH)/board/rasputin/rpi/linux.fragment"
 BR2_LINUX_KERNEL_NEEDS_HOST_OPENSSL=y
-# Declare the custom kernel's headers series (the fork is 6.6.x). REQUIRED with
+# Declare the custom kernel's headers series (the fork is 6.12.x). REQUIRED with
 # a CUSTOM_TARBALL kernel: without it Buildroot defaults the kernel-headers
 # version to 2.6, which (a) fails the linux-headers staging check ("expected
-# 2.6.x, got 6.6.x") and (b) drops BR2_TOOLCHAIN_HEADERS_AT_LEAST below glibc's
+# 2.6.x, got 6.12.x") and (b) drops BR2_TOOLCHAIN_HEADERS_AT_LEAST below glibc's
 # floor → kconfig silently falls the toolchain back to uClibc. Matches
 # Buildroot's raspberrypi5_defconfig.
-BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_6_6=y
+BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_6_12=y
 
 # --- RPi firmware (the GPU/boot firmware on the FAT) ---
 # Pi 5 boots from its SPI-EEPROM bootloader → config.txt → kernel (no start*.elf

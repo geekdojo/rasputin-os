@@ -233,9 +233,29 @@ jobs:
         env:
           REQUIRE_BUSYBOX: "1"
         run: sh test/boot-hook-test.sh
+      # The rpi defconfig builds every Pi 4 / Pi 5 family device tree in
+      # board/rasputin/rpi/family-dtbs.txt (geekdojo/geekdojo-brain#1061). A
+      # board whose device tree is not built does not boot, and only the long
+      # release build would otherwise show it. The script's own tests are the
+      # rpi-family-dtbs job below.
+      - name: Every Pi family device tree is in the rpi defconfig
+        run: sh test/rpi-family-dtbs.sh defconfig board/rasputin/rpi/family-dtbs.txt configs/rasputin_rpi_defconfig
+      # squashfs-tools for the kernel-match tests' bundle-kernel-match cases,
+      # which build a real squashfs rootfs. Through the package cache, bounded
+      # (the shared ci-debs action in geekdojo/.github says why).
+      - name: Install squashfs-tools
+        timeout-minutes: 10
+        uses: geekdojo/.github/.github/actions/ci-debs@d7072ebcd16ca3569f19669550e384db8208d4eb
+        with:
+          label: shell
+          packages: squashfs-tools
+          require: unsquashfs mksquashfs
       # The once-per-boot kernel/rootfs verdict both QEMU smokes assert
       # (geekdojo/geekdojo-brain#807): what must NOT match is the point — the
       # same release built at another time, a release-only line, no list.
+      # Also the build-side check that every module tree a bundle ships is
+      # loadable — no compressed module, a non-empty modules.dep
+      # (test/bundle-kernel-match.sh section 5, geekdojo/geekdojo-brain#1061).
       - name: Kernel-match verdict tests
         env:
           REQUIRE_BUSYBOX: "1"
@@ -450,6 +470,27 @@ jobs:
   # behaviour is pinned here against a throwaway PKI and both SKUs' real
   # rauc-system.conf: the production leaf profile passes, a wrong-purpose leaf
   # fails, and the outcome follows the config's [keyring] check-purpose.
+  # test/rpi-family-dtbs.sh, the check release.yml runs on every rpi build that
+  # every Pi 4 / Pi 5 family device tree is on both boot slots and in the
+  # bundle's boot.vfat (geekdojo/geekdojo-brain#1061). It only runs on a
+  # release, so its behaviour is pinned here on real fixtures: FATs made with
+  # mkfs.vfat and mcopy, an MBR image laid out with sfdisk. A miss in one place
+  # is named with that place, a prefix is not a match, and every missing input
+  # fails rather than passing.
+  rpi-family-dtbs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install mtools + dosfstools + jq
+        timeout-minutes: 10
+        uses: geekdojo/.github/.github/actions/ci-debs@d7072ebcd16ca3569f19669550e384db8208d4eb
+        with:
+          label: rpi-family-dtbs
+          packages: mtools dosfstools jq
+          require: mcopy mdir mkfs.vfat sfdisk jq
+      - name: Pi family device-tree check tests
+        run: sh test/rpi-family-dtbs-test.sh
+
   verify-bundle:
     runs-on: ubuntu-latest
     steps:

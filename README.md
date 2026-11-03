@@ -65,8 +65,10 @@ this image — see
     (install → auto-boot new slot → commit, and mark-bad → auto-revert).
   - `rpi` (arm64): one unified image boots **Pi 4 / Pi 5** (two-kernel
     FAT, firmware picks per board; Raspberry Pi kernel fork — mainline can't
-    boot current Pi 5 steppings). CM5 is not validated: no CM5 has booted
-    this image, and the build carries no CM5 device tree. A/B uses the Pi
+    boot current Pi 5 steppings). **Supported boards:** Pi 4 Model B,
+    Pi 400, CM4 (eMMC and Lite), CM4S, Pi 5 (all revisions), Pi 500, CM5
+    and CM5 Lite — the image carries the device tree each one boots with
+    (`board/rasputin/rpi/family-dtbs.txt`, checked on every build). A/B uses the Pi
     firmware's one-shot `tryboot` flag via a custom RAUC backend. The firmware **cannot count
     boot attempts and won't auto-fall-back from a committed slot**, so the Pi
     relies on defense-in-depth: the one-shot trial, a systemd watchdog on the
