@@ -10,8 +10,13 @@
 #     can't load ANY module (bridge, br_netfilter, …) even though the .ko.xz
 #     files are present. Bench-confirmed on the Pi 5: dockerd couldn't create
 #     docker0 ("create bridge: operation not supported"). Uncompressed modules
-#     → depmod indexes them → modules load. ---
-CONFIG_MODULE_COMPRESS_NONE=y
+#     → depmod indexes them → modules load.
+#     Written as "is not set" since the 6.12 fork (geekdojo/geekdojo-brain#1061):
+#     MODULE_COMPRESS became a bool with GZIP/XZ/ZSTD under it and
+#     CONFIG_MODULE_COMPRESS_NONE no longer exists, so kconfig would drop the old
+#     line silently and the defconfigs' MODULE_COMPRESS=y + _XZ=y would win.
+#     test/bundle-kernel-match.sh fails the build if a compressed module ships. ---
+# CONFIG_MODULE_COMPRESS is not set
 
 # --- expose the running kernel config on-device (/proc/config.gz) so a missing
 #     option can be diagnosed by SSH instead of a rebuild ---

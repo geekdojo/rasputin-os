@@ -84,11 +84,12 @@ case "$SOC" in
 		#     No kernel/config — so the firmware MUST honor boot_partition + redirect
 		#     to a real boot slot. The RAUC backend edits autoboot.txt here at runtime
 		#     (mounted /run/rasputin-seed).
-		#   - boot-a (p2, RASPUTIN-A): slot A's COMPLETE boot env, cmdline.txt → rootfs-0.
-		#   - boot-b (p3, RASPUTIN-B): same, cmdline.txt → rootfs-1.
+		#   - boot-a (p2, RASPUTIN-BT): slot A's COMPLETE boot env, cmdline.txt → rootfs-0.
+		#   - boot-b (p3, RASPUTIN-BT): same, cmdline.txt → rootfs-1.
 		# boot-a/boot-b shared contents, flattened to root: kernel_2712.img (Pi 5/CM5
 		# bcm2712 `Image`) + kernel8.img (Pi 4 bcm2711, built in post-build.sh) + all
-		# *.dtb (bcm2712-rpi-5-b + bcm2712d0-rpi-5-b D0 + bcm2711-rpi-4-b) +
+		# *.dtb (every Pi 4 / Pi 5 family board, board/rasputin/rpi/family-dtbs.txt;
+		# test/rpi-family-dtbs.sh checks they reach the bundle and both slots) +
 		# rpi-firmware/* (GPU/boot firmware incl. start4.elf/fixup4.dat + config.txt +
 		# overlays/). config.txt arrives via rpi-firmware/ (Buildroot CONFIG_FILE).
 		# The Pi 4 fix: the EEPROM loads start4.elf FROM boot_partition (p2/p3), so

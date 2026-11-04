@@ -479,6 +479,17 @@ jobs:
       - name: Bundle installs its rootfs's kernel
         run: sh test/bundle-kernel-match.sh '${{ matrix.sku }}' 'output/${{ matrix.sku }}'
 
+      # Every Pi 4 / Pi 5 family device tree in board/rasputin/rpi/family-dtbs.txt
+      # is at the FAT root of the bundle's boot.vfat (what an update ships) and of
+      # the flash image's boot slots p2 and p3 (what a user flashes). A board
+      # whose device tree is missing does not boot, and the arm64 smoke cannot
+      # see it: QEMU's `virt` needs no Pi device tree (geekdojo/geekdojo-brain#1061).
+      # Placed like the step above: a miss fails this job, which blocks publish.
+      # mcopy from output/rpi/host/bin; sfdisk + jq are preinstalled on the runner.
+      - name: Every Pi family device tree ships
+        if: matrix.sku == 'rpi'
+        run: sh test/rpi-family-dtbs.sh image board/rasputin/rpi/family-dtbs.txt output/rpi
+
   # Boot-smoke the built images in QEMU — the relaxation of "no boot test in
   # CI" that needs NO hardware. Both SKUs now have one; the assertions live in
   # ONE script (test/boot-smoke.sh) that both jobs call, so they cannot drift

@@ -1,0 +1,30 @@
+# The Raspberry Pi 4 and Pi 5 family boards the rpi image supports, by the
+# device tree the Pi firmware asks for on each (geekdojo/geekdojo-brain#1061).
+# This is the one list of supported boards:
+#   - test/rpi-family-dtbs.sh checks it against BR2_LINUX_KERNEL_INTREE_DTS_NAME
+#     in configs/rasputin_rpi_defconfig (ci.yml, every PR) and against the boot
+#     FATs of every release build (release.yml);
+#   - README.md "Supported boards" is written from it by hand.
+# A board the firmware recognises whose device tree is missing does not boot:
+# a CM5 Lite stopped at 'Device-tree file "bcm2712-rpi-cm5l-cm5io.dtb" not
+# found' on 2026-11-03.
+#
+# Format: one board per line, "<dtb basename> <board name>". The board name is
+# the rest of the line. '#' starts a comment; blank lines are ignored.
+
+# Pi 4 family (BCM2711): kernel8.img, the firmware's [pi4] section.
+bcm2711-rpi-4-b         Pi 4 Model B
+bcm2711-rpi-400         Pi 400
+bcm2711-rpi-cm4         CM4
+bcm2711-rpi-cm4-io      CM4
+bcm2711-rpi-cm4s        CM4S
+
+# Pi 5 family (BCM2712): kernel_2712.img, the firmware's [pi5] section.
+bcm2712-rpi-5-b         Pi 5
+bcm2712d0-rpi-5-b       Pi 5
+bcm2712-d-rpi-5-b       Pi 5
+bcm2712-rpi-500         Pi 500
+bcm2712-rpi-cm5-cm5io   CM5
+bcm2712-rpi-cm5-cm4io   CM5
+bcm2712-rpi-cm5l-cm5io  CM5 Lite
+bcm2712-rpi-cm5l-cm4io  CM5 Lite
