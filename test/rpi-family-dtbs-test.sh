@@ -238,6 +238,18 @@ check "TC-1061-14 no p3: exit 1" "1" "$(rc_of "$out")"
 check "TC-1061-14 no p3: said" "yes" "$(has "$out" "::error::rpi-family-dtbs: The flash image $FX/images/rasputin-os-rpi-test.img has no partition 3, the boot slot the firmware reads it from.")"
 check "TC-1061-14 no p3: p2 still checked" "yes" "$(has "$out" "ok  image p2: 13 of 13")"
 
+# F-1061-11: an image the partition reader cannot read — said as that, with the reader's
+# own message, and not reported as a missing partition.
+make_fixture "$FX" "" "" ""
+dd if=/dev/zero of="$FX/images/rasputin-os-rpi-test.img" bs=1M count=8 2>/dev/null
+out=$(run image "$LIST" "$FX")
+check "F-1061-11 unreadable table: exit 1" "1" "$(rc_of "$out")"
+check "F-1061-11 unreadable table: said" "yes" "$(has "$out" "::error::rpi-family-dtbs: The partition table of the flash image $FX/images/rasputin-os-rpi-test.img could not be read, so its boot slots cannot be checked.")"
+check "F-1061-11 unreadable table: reader's stderr shown" "yes" "$(has "$out" "    sfdisk:")"
+check "F-1061-11 unreadable table: not a missing partition" "no" "$(has "$out" "has no partition")"
+check "F-1061-11 unreadable table: one error" "1" "$(errors "$out")"
+check "F-1061-11 unreadable table: bundle still checked" "yes" "$(has "$out" "ok  bundle boot.vfat: 13 of 13")"
+
 # TC-1061-15: the build's mcopy gone, a system one still on PATH — no fallback.
 make_fixture "$FX" "" "" ""
 rm "$FX/host/bin/mcopy"

@@ -140,8 +140,14 @@ image)
 	else
 		IMG=$(cat "$TMP/images")
 		for p in 2 3; do
-			off=$(part_offset "$IMG" "$p" 2>/dev/null)
-			if [ -z "$off" ]; then
+			# part_offset is a pipe whose status is jq's, so a reader failure shows only
+			# on stderr: keep it, to tell "could not read the table" from "no partition".
+			off=$(part_offset "$IMG" "$p" 2> "$TMP/part.err")
+			if [ -z "$off" ] && [ -s "$TMP/part.err" ]; then
+				bad "The partition table of the flash image $IMG could not be read, so its boot slots cannot be checked."
+				sed 's/^/    /' "$TMP/part.err"
+				break
+			elif [ -z "$off" ]; then
 				bad "The flash image $IMG has no partition $p, the boot slot the firmware reads it from."
 			else
 				read_fat "image p$p" "$IMG@@$off"

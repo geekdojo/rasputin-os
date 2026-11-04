@@ -73,8 +73,10 @@ this image — see
     boot attempts and won't auto-fall-back from a committed slot**, so the Pi
     relies on defense-in-depth: the one-shot trial, a systemd watchdog on the
     agent, and the update saga's post-reboot health check. Boot, A/B commit,
-    simulated-failure rollback, and OTA are hardware-validated (microSD and
-    NVMe).
+    simulated-failure rollback, and OTA are hardware-validated on the Pi 4
+    Model B and Pi 5 (microSD and NVMe), and a CM4 with eMMC runs this image
+    on our bench. The other boards listed (Pi 400, CM4 Lite, CM4S, Pi 500, CM5
+    and CM5 Lite) are supported by device tree but not yet hardware-validated.
 - **Docker** as the app substrate; the control-plane binaries
   (`rasputin-agent`, `rasputin-api`) are vendored as pre-built static
   release binaries from
