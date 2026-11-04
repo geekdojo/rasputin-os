@@ -433,6 +433,14 @@ jobs:
       # Python; nothing here touches the network.
       - name: OpenBao watch tests
         run: python3 -I test/openbao-watch-test.py
+      # cve-watch's rpi kernel pin watch (geekdojo/geekdojo-brain#1062): the
+      # pin parse against the real defconfig, the Buildroot relation (equal,
+      # behind by ancestry or by version across a divergence, newer, diverged),
+      # the branch-head distance, unreachable or malformed upstream reading
+      # unknown, the refusals and the gh adapter. Nothing here touches the
+      # network.
+      - name: rpi kernel watch tests
+        run: python3 -I test/rpi-kernel-watch-test.py
       # The live drift check (geekdojo/geekdojo-brain#804, TC-804-11): the
       # pinned api tarball's openbao-policy/ against rasputin-control-plane's
       # storepolicy/ at the same tag, plus its two controls. Red while the api
