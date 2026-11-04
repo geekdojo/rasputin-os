@@ -94,10 +94,10 @@ BR2_PACKAGE_SYSTEMD_COREDUMP=y
 # Buildroot 2026.08.1's raspberrypi5 / raspberrypi4_64 / raspberrypicm5io
 # defconfigs use, and one commit after the kernel our pinned rpi-firmware
 # (063bcab6, uname_string8 "6.12.61-v8+") and its prebuilt overlays were built
-# from. It does NOT follow a Buildroot bump and cve-watch does not track it: it
-# moves only by a hand edit here. The previous pin, 576cc10 (6.6.28), had no
-# CM5 Lite or Pi 500 device tree, so a CM5 Lite could not boot this image
-# (geekdojo/geekdojo-brain#1061).
+# from. It does NOT follow a Buildroot bump: it moves only by a hand edit here,
+# and cve-watch reports when it falls behind Buildroot's Pi pin. The previous
+# pin, 576cc10 (6.6.28), had no CM5 Lite or Pi 500 device tree, so a CM5 Lite
+# could not boot this image (geekdojo/geekdojo-brain#1061).
 BR2_LINUX_KERNEL=y
 BR2_LINUX_KERNEL_CUSTOM_TARBALL=y
 BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="$(call github,raspberrypi,linux,21b410140c47ffab5668399f6f143c7d7b935c8b)/linux-21b410140c47ffab5668399f6f143c7d7b935c8b.tar.gz"
