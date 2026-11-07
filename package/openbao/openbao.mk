@@ -6,7 +6,9 @@
 # pre-built release binary, per arch, from a flat tarball (bao, LICENSE,
 # README.md, CHANGELOG.md at the root), installed to /usr/bin/bao with its
 # licence and an MPL-2.0 source notice. CGO-free static Go (GOARM64=v8.0,
-# GOAMD64=v1), so it runs on the musl userland on a Pi 4's A72 and an N100.
+# GOAMD64=v1), so it runs on a Pi 4's A72 and an N100 without depending on the
+# image's C library: the userland is glibc (BR2_TOOLCHAIN_BUILDROOT_GLIBC in
+# both defconfigs), and a static binary needs no particular glibc version.
 # No systemd unit and no config here: both are in the rootfs overlay
 # (openbao.service and /etc/rasputin/openbao/openbao.hcl).
 #

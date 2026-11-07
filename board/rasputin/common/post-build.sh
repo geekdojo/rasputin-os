@@ -35,7 +35,8 @@ ln -sf /etc/systemd/system/rasputin-agent.service \
 # it against a tree under real preset-all.
 ln -sf /etc/systemd/system/openbao.service "$TARGET_DIR/etc/systemd/system/multi-user.target.wants/openbao.service"
 # Per-role transient hostname, every boot (firstboot is run-once; a transient
-# hostname isn't). Only the controlplane may answer rasputin.local via mDNS.
+# hostname isn't). Only the controlplane may answer <cluster-id>.local via
+# mDNS (ADR-0003; "rasputin" is only the default cluster id).
 ln -sf /etc/systemd/system/rasputin-hostname.service \
 	"$TARGET_DIR/etc/systemd/system/multi-user.target.wants/rasputin-hostname.service"
 # Give systemd-timesyncd a WRITABLE timestamp file stamped at the image build
@@ -508,11 +509,12 @@ mkdir -p "$TARGET_DIR/var/lib/rasputin"
 # sends getaddrinfo() callers to resolved (so mDNS .local works for them), but
 # a PURE-GO resolver — which tailscale binaries are (CGO_ENABLED=0) — reads
 # /etc/resolv.conf directly and would query the upstream DNS, getting NXDOMAIN
-# for rasputin.local. Pointing at the stub makes every resolver, cgo or not,
-# go through resolved (mDNS for .local, forward for everything else). This is
-# what lets tailscaled reach the mesh login server at https://rasputin.local
-# (see rasputin-api.service RASPUTIN_HEADSCALE_URL). /etc is read-only squashfs,
-# so the symlink is baked here.
+# for <cluster-id>.local. Pointing at the stub makes every resolver, cgo or
+# not, go through resolved (mDNS for .local, forward for everything else). This
+# is what lets tailscaled reach the mesh login server at
+# https://<cluster-id>.local:18080, which the api derives from the cluster id
+# (see the RASPUTIN_HEADSCALE_URL note in rasputin-api.service). /etc is
+# read-only squashfs, so the symlink is baked here.
 ln -sf ../run/systemd/resolve/stub-resolv.conf "$TARGET_DIR/etc/resolv.conf"
 
 # Bake the OS image version (CalVer) into a uniform runtime file. The agent

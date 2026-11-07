@@ -74,8 +74,10 @@ Environment=RASPUTIN_NATS_HOST=0.0.0.0
 # Headscale + every node's tailscale state, so a lease change drops the whole
 # mesh (bench: .180→.181→.182 across reboots). The leaf cert already carries
 # the cluster's name in its SAN. Requires every node to resolve that name at
-# the OS level (CP: resolved mDNS via the stub resolv.conf below; firewall: its
-# own mDNS resolver).
+# the OS level. Rasputin OS nodes: systemd-resolved, through the stub
+# resolv.conf that post-build.sh links. Firewall: hostsync and dnsmasq — its
+# agent writes the control plane's address, read off its bus connection, into
+# a dnsmasq hosts file; the agent's own mDNS client only dials the bus.
 #
 # Also NOT set here, and this one is subtler: the api reads
 # RASPUTIN_HEADSCALE_URL in TWO places. As the supervisor's server_url it now

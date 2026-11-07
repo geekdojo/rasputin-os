@@ -11,7 +11,7 @@ DHCP=yes
 # on this link only when networkd sets this. Global responder mode lives in
 # etc/systemd/resolved.conf.d/10-rasputin-mdns.conf. Which hostname is
 # announced is decided per-role by rasputin-hostname.service — only the
-# controlplane answers rasputin.local.
+# controlplane answers <cluster-id>.local (ADR-0003).
 MulticastDNS=yes
 # IPv4 link-local FALLBACK for the dumb-switch/no-DHCP bench scenario.
 # "ipv4" = IPv4 LL only while DHCPv4 has no lease: systemd 258's networkd
