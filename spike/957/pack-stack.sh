@@ -52,13 +52,23 @@ while [ "${#queue[@]}" -gt 0 ]; do
 		[ -n "$lib" ] || continue
 		[ -z "${seen[$lib]:-}" ] || continue
 		seen["$lib"]=1
+		# (seen is per library name, so a desktop-only miss is recorded once)
 		if is_glibc "$lib"; then echo "node-glibc $lib" >> "$REPORT"; continue; fi
 		if [ -n "${jre[$lib]:-}" ]; then echo "jre-runpath $lib" >> "$REPORT"; continue; fi
 		src=""
 		for d in lib usr/lib; do
 			if [ -e "$TARGET/$d/$lib" ]; then src="$TARGET/$d/$lib"; break; fi
 		done
-		if [ -z "$src" ]; then echo "UNRESOLVED $lib (needed by ${f#"$STAGE"/})" >> "$REPORT"; continue; fi
+		if [ -z "$src" ]; then
+			# The JRE's desktop libraries (AWT/X11, the splash screen, sound)
+			# name X11 and ALSA libraries no headless image carries; a headless
+			# JVM never loads them (#958 found the same, results/image.txt).
+			case "${f##*/}" in
+				libawt_xawt.so|libjawt.so|libsplashscreen.so|libjsound.so)
+					echo "headless-unloaded $lib (needed by ${f#"$STAGE"/})" >> "$REPORT"; continue ;;
+			esac
+			echo "UNRESOLVED $lib (needed by ${f#"$STAGE"/})" >> "$REPORT"; continue
+		fi
 		cp -L "$src" "$STAGE/lib/$lib"
 		echo "packed $lib" >> "$REPORT"
 		queue+=("$STAGE/lib/$lib")
