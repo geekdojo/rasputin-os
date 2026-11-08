@@ -1,0 +1,6 @@
+config BR2_PACKAGE_KEYCLOAK
+	bool "keycloak (SPIKE ONLY)"
+	depends on BR2_PACKAGE_TEMURIN_JRE
+	help
+	  Keycloak, built at image build with platform.md §2.3's build
+	  options and installed to /usr/lib/keycloak. Spike only.

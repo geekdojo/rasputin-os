@@ -1,0 +1,7 @@
+config BR2_PACKAGE_TEMURIN_JRE
+	bool "temurin-jre (SPIKE ONLY)"
+	depends on BR2_aarch64 || BR2_x86_64
+	depends on BR2_TOOLCHAIN_USES_GLIBC
+	help
+	  Eclipse Temurin JRE 25, prebuilt, installed to
+	  /usr/lib/temurin-jre (platform.md §2.1). Spike only.

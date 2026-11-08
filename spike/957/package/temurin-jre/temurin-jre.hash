@@ -1,0 +1,4 @@
+# From Adoptium's published .sha256.txt beside each asset
+# (github.com/adoptium/temurin25-binaries, release jdk-25.0.5+8), read 2026-11-08.
+sha256  963931723891302ebb2687178532c3d793d71e2577cd058061c7efb396140a86  OpenJDK25U-jre_aarch64_linux_hotspot_25.0.5_8.tar.gz
+sha256  6fac98f0c8202efc3135a9e9e42aa61963ec42d1c5cbb40caf231e7b14a24ef6  OpenJDK25U-jre_x64_linux_hotspot_25.0.5_8.tar.gz

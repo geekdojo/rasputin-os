@@ -1,0 +1,278 @@
+# SPIKE ONLY — geekdojo/geekdojo-brain#957 (identity footprint: image sizes and
+# the scratch stack the footprint probe runs). Copied from #677's
+# spike-e22-677-size.yml and extended.
+#
+# Per SKU, three CLEAN builds from ONE commit, each in its own output dir:
+#   1. baseline           — the stock defconfig (identical content to main)
+#   2. +identity          — plus spike/957's external tree: Temurin JRE 25.0.5+8,
+#                           Keycloak 26.8.2 built with platform.md §2.3's options,
+#                           Buildroot's PostgreSQL 18.6 (OpenSSL, systemd, unit masked)
+#   3. +identity +FreeRADIUS — as 2, with freeradius/freeradius-server:3.2.10-alpine
+#                           baked beside the mesh images, pinned by the digest
+#                           resolved in this job (MESH_PIN_FILE)
+# It reports squashfs, .raucb and .img.xz sizes with their deltas, and the
+# rootfs file-list diffs. On rpi it also measures one first-flash option: the
+# build-3 .img recompressed as one xz stream whose dictionary spans the slot
+# distance, with the peak memory of `xz -d`.
+#
+# It packs identity-stack-<arch>.squashfs from build 2's target/ for the
+# footprint probe's scratch mode (spike/957/pack-stack.sh).
+#
+# Never publishes, never tags, never saves a cache, never reads the signing
+# environment. Every .raucb is signed with ONE throwaway, job-local key, so the
+# signature size cancels out of the deltas. Artifacts are kept 7 days.
+name: spike-e14-957-identity-footprint
+
+on:
+  push:
+    branches:
+      - spike/e14-957-identity-footprint
+
+permissions:
+  contents: read
+
+jobs:
+  size:
+    runs-on: ubuntu-24-16core
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - sku: rpi
+            defconfig: rasputin_rpi_defconfig
+            arch: arm64
+          - sku: n100
+            defconfig: rasputin_n100_defconfig
+            arch: amd64
+    env:
+      RASPUTIN_VERSION: 0.0.0-spike957
+      BR2_DL_DIR: ${{ github.workspace }}/dl
+      RASPUTIN_REQUIRE_FIREWALL_MANIFEST: "1"
+      FREERADIUS_REF: freeradius/freeradius-server:3.2.10-alpine
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Init Buildroot (pinned release)
+        run: ./scripts/init-buildroot.sh
+
+      - name: Compute Buildroot cache key (same expression as release.yml)
+        id: brkey
+        env:
+          BR_CACHE_HASH: ${{ hashFiles(format('configs/{0}', matrix.defconfig), 'scripts/init-buildroot.sh', format('board/rasputin/{0}/*.fragment', matrix.sku), 'board/rasputin/common/post-build.sh') }}
+        run: |
+          set -euo pipefail
+          test -n "${BR_CACHE_HASH}"
+          echo "key=br-${{ matrix.sku }}-${BR_CACHE_HASH}" >> "$GITHUB_OUTPUT"
+
+      # Restore ONLY. There is deliberately no save step.
+      - name: Restore Buildroot dl + ccache (read-only)
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            dl
+            ~/.buildroot-ccache
+          key: ${{ steps.brkey.outputs.key }}-spike957-never-saved
+          restore-keys: |
+            ${{ steps.brkey.outputs.key }}-
+            br-${{ matrix.sku }}-
+            br-rpi-
+
+      - name: Inject trust root
+        run: |
+          echo "${{ vars.RASPUTIN_ROOT_CA_PEM }}" \
+            > board/rasputin/common/rootfs-overlay/etc/rasputin/trust/root-ca.pem
+
+      - name: Fetch vendored binaries (control-plane release)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/fetch-vendored.sh . '${{ matrix.arch }}' "$BR2_DL_DIR" rasputin-agent rasputin-api
+
+      - name: Bake mesh container images (stock pin)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/bake-mesh-images.sh '${{ matrix.arch }}' '${{ github.workspace }}/mesh-images'
+
+      # The stock pin from the same control-plane release bake-mesh-images.sh
+      # reads, plus one freeradius entry pinned by the index digest resolved
+      # here and its per-architecture digests from that index.
+      - name: Bake mesh container images (+FreeRADIUS pin)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ver=$(sed -n 's/^RASPUTIN_API_VERSION = //p' package/rasputin-api/rasputin-api.mk | tr -d '[:space:]')
+          test -n "$ver"
+          w=$(mktemp -d)
+          gh release download "v$ver" --repo geekdojo/rasputin-control-plane \
+            --pattern mesh-images.json --pattern mesh-images.json.sha256 --dir "$w" --clobber
+          want=$(tr -d '[:space:]' < "$w/mesh-images.json.sha256")
+          got=$(sha256sum "$w/mesh-images.json" | awk '{print $1}')
+          test "$want" = "$got"
+          index=$(docker buildx imagetools inspect "$FREERADIUS_REF" --format '{{json .Manifest}}' | jq -r .digest)
+          raw=$(docker buildx imagetools inspect "$FREERADIUS_REF" --raw)
+          d_arm64=$(printf '%s' "$raw" | jq -r '[.manifests[] | select(.platform.os=="linux" and .platform.architecture=="arm64")][0].digest')
+          d_amd64=$(printf '%s' "$raw" | jq -r '[.manifests[] | select(.platform.os=="linux" and .platform.architecture=="amd64")][0].digest')
+          case "$index$d_arm64$d_amd64" in *null*|"") echo "::error::could not resolve $FREERADIUS_REF"; exit 1 ;; esac
+          jq --arg ref "${FREERADIUS_REF}@${index}" --arg a "$d_arm64" --arg b "$d_amd64" \
+            '.images.freeradius = {ref: $ref, platforms: {"linux/arm64": $a, "linux/amd64": $b}}' \
+            "$w/mesh-images.json" > "${{ github.workspace }}/mesh-pin-radius.json"
+          echo "freeradius pin: ${FREERADIUS_REF}@${index} arm64=$d_arm64 amd64=$d_amd64" | tee freeradius-pin.txt
+          MESH_PIN_FILE="${{ github.workspace }}/mesh-pin-radius.json" \
+            scripts/bake-mesh-images.sh '${{ matrix.arch }}' '${{ github.workspace }}/mesh-images-radius'
+
+      - name: Install measurement tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends rauc xz-utils squashfs-tools time binutils
+
+      - name: Build 1 — baseline (stock defconfig, clean)
+        env:
+          RASPUTIN_MESH_IMAGES_DIR: ${{ github.workspace }}/mesh-images
+          O: ${{ github.workspace }}/output/${{ matrix.sku }}
+        run: |
+          set -euo pipefail
+          make -C buildroot BR2_EXTERNAL=${{ github.workspace }} O="$O" ${{ matrix.defconfig }}
+          if grep -q '^BR2_PACKAGE_KEYCLOAK=y' "$O/.config"; then echo "::error::baseline has keycloak"; exit 1; fi
+          make -C buildroot BR2_EXTERNAL=${{ github.workspace }} O="$O"
+          mkdir -p out/baseline
+          cp "$O/images/rootfs.squashfs" out/baseline/rootfs.squashfs
+          cp -r "$O/images/bundle" out/baseline/bundle
+          cp "$O"/images/rasputin-os-*.img out/baseline/
+
+      # Builds 2 and 3 are clean builds in their own output dirs: re-running
+      # make in a finished dir fails on the read-only target/etc files
+      # post-build.sh leaves (#677, run 36791544560).
+      - name: Build 2 — clean, +identity
+        env:
+          RASPUTIN_MESH_IMAGES_DIR: ${{ github.workspace }}/mesh-images
+          O2: ${{ github.workspace }}/output/${{ matrix.sku }}-identity
+        run: |
+          set -euo pipefail
+          EXT="${{ github.workspace }} ${{ github.workspace }}/spike/957"
+          make -C buildroot BR2_EXTERNAL="$EXT" O="$O2" ${{ matrix.defconfig }}
+          cat spike/957/identity.fragment >> "$O2/.config"
+          make -C buildroot BR2_EXTERNAL="$EXT" O="$O2" olddefconfig
+          for p in TEMURIN_JRE KEYCLOAK POSTGRESQL OPENSSL; do grep -q "^BR2_PACKAGE_$p=y" "$O2/.config"; done
+          make -C buildroot BR2_EXTERNAL="$EXT" O="$O2"
+          mkdir -p out/identity
+          cp "$O2/images/rootfs.squashfs" out/identity/rootfs.squashfs
+          cp -r "$O2/images/bundle" out/identity/bundle
+          cp "$O2"/images/rasputin-os-*.img out/identity/
+
+      - name: Build 3 — clean, +identity +FreeRADIUS
+        env:
+          RASPUTIN_MESH_IMAGES_DIR: ${{ github.workspace }}/mesh-images-radius
+          O3: ${{ github.workspace }}/output/${{ matrix.sku }}-radius
+        run: |
+          set -euo pipefail
+          EXT="${{ github.workspace }} ${{ github.workspace }}/spike/957"
+          make -C buildroot BR2_EXTERNAL="$EXT" O="$O3" ${{ matrix.defconfig }}
+          cat spike/957/identity.fragment >> "$O3/.config"
+          make -C buildroot BR2_EXTERNAL="$EXT" O="$O3" olddefconfig
+          make -C buildroot BR2_EXTERNAL="$EXT" O="$O3"
+          mkdir -p out/radius
+          cp "$O3/images/rootfs.squashfs" out/radius/rootfs.squashfs
+          cp -r "$O3/images/bundle" out/radius/bundle
+          cp "$O3"/images/rasputin-os-*.img out/radius/
+
+      - name: Pack the scratch stack (from build 2)
+        run: |
+          set -euo pipefail
+          T='${{ github.workspace }}/output/${{ matrix.sku }}-identity/target'
+          sudo spike/957/pack-stack.sh "$T" identity-stack-${{ matrix.arch }}.squashfs stack-closure-${{ matrix.arch }}.txt
+          sudo chown "$(id -u):$(id -g)" identity-stack-${{ matrix.arch }}.squashfs stack-closure-${{ matrix.arch }}.txt
+          {
+            echo "--- identity-stack-${{ matrix.arch }}.squashfs, bytes: $(stat -c%s identity-stack-${{ matrix.arch }}.squashfs)"
+            echo "--- unsquashfs -s"
+            unsquashfs -s identity-stack-${{ matrix.arch }}.squashfs
+            echo "--- unsquashfs -l"
+            unsquashfs -d / -l identity-stack-${{ matrix.arch }}.squashfs
+            echo "--- usr/lib/keycloak/data"
+            unsquashfs -d / -ll identity-stack-${{ matrix.arch }}.squashfs | grep -E ' /usr/lib/keycloak/data( |$)'
+            echo "--- NEEDED closure"
+            cat stack-closure-${{ matrix.arch }}.txt
+          } > stack-${{ matrix.arch }}.txt
+          head -40 stack-${{ matrix.arch }}.txt
+
+      - name: Measure
+        run: |
+          set -euo pipefail
+          R=report-${{ matrix.sku }}.txt
+          T2='${{ github.workspace }}/output/${{ matrix.sku }}-identity/target'
+          {
+            echo "sku=${{ matrix.sku }} arch=${{ matrix.arch }} commit=${GITHUB_SHA} run=${GITHUB_RUN_ID} buildroot=$(git -C buildroot describe --tags) version=${RASPUTIN_VERSION}"
+            cat freeradius-pin.txt
+            echo "--- installed trees, bytes (du -sb)"
+            du -sb "$T2/usr/lib/temurin-jre" "$T2/usr/lib/keycloak" "$T2/usr/lib/postgresql" "$T2/usr/share/postgresql" "$T2/usr/bin/postgres" | sed "s|$T2||"
+            echo "--- keycloak data link"; ls -l "$T2/usr/lib/keycloak/data" | sed "s|$T2||"
+            echo "--- postgresql.service mask"; ls -l "$T2/etc/systemd/system/postgresql.service" | sed "s|$T2||"
+            echo "--- rootfs file-list diff (baseline -> identity); expect only the JRE, Keycloak, PostgreSQL and its libraries"
+            unsquashfs -d / -lc out/baseline/rootfs.squashfs | sort > /tmp/base.lst
+            unsquashfs -d / -lc out/identity/rootfs.squashfs | sort > /tmp/id.lst
+            unsquashfs -d / -lc out/radius/rootfs.squashfs   | sort > /tmp/rad.lst
+            diff /tmp/base.lst /tmp/id.lst > /tmp/d1 || true
+            echo "lines added: $(grep -c '^>' /tmp/d1 || true), removed: $(grep -c '^<' /tmp/d1 || true)"
+            echo "added outside /usr/lib/temurin-jre and /usr/lib/keycloak:"
+            grep '^>' /tmp/d1 | grep -v -e '^> //usr/lib/temurin-jre' -e '^> //usr/lib/keycloak' || true
+            echo "removed:"; grep '^<' /tmp/d1 || true
+            echo "--- rootfs file-list diff (identity -> identity +FreeRADIUS); expect only the FreeRADIUS image tarball"
+            diff /tmp/id.lst /tmp/rad.lst || true
+            echo "--- squashfs superblocks: baseline, identity, identity+radius"
+            for v in baseline identity radius; do unsquashfs -s "out/$v/rootfs.squashfs" | grep -E 'Filesystem size|Compression|Block size'; done
+          } > "$R"
+
+          k=$(mktemp -d)
+          openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+            -keyout "$k/key.pem" -out "$k/cert.pem" -subj /CN=spike957-throwaway -days 1 2>/dev/null
+          for v in baseline identity radius; do
+            if [ -f "out/$v/bundle/hook.sh" ]; then chmod 0755 "out/$v/bundle/hook.sh"; fi
+            rauc bundle --cert="$k/cert.pem" --key="$k/key.pem" --signing-keyring="$k/cert.pem" \
+              "out/$v/bundle" "out/$v/rasputin-os-${{ matrix.sku }}.raucb"
+            img=$(ls out/$v/rasputin-os-*.img | head -1)
+            echo "img.xz source for $v: $(basename "$img")" >> "$R"
+            # The release's own compression (release.yml: xz --keep --threads=0 -T0 -c).
+            xz --keep --threads=0 -T0 -c "$img" > "out/$v/img.xz"
+          done
+          rm -rf "$k"
+
+          size() { stat -c%s "$1"; }
+          {
+            echo "--- sizes, bytes: baseline identity identity+radius delta(identity) delta(radius-over-identity) delta(total)"
+            for f in rootfs.squashfs rasputin-os-${{ matrix.sku }}.raucb img.xz; do
+              b=$(size "out/baseline/$f"); i=$(size "out/identity/$f"); r=$(size "out/radius/$f")
+              echo "$f $b $i $r $((i - b)) $((r - i)) $((r - b))"
+            done
+          } >> "$R"
+
+          # First-flash option (rpi): one xz stream whose dictionary spans the
+          # slot distance, so slot B's copy of slot A compresses against it.
+          if [ '${{ matrix.sku }}' = rpi ]; then
+            img=$(ls out/radius/rasputin-os-*.img | head -1)
+            /usr/bin/time -v xz -T1 --keep -c --lzma2=preset=9e,dict=1536MiB "$img" > out/radius/img.longwin.xz 2> /tmp/xz-c.txt
+            /usr/bin/time -v xz -d -T1 -c out/radius/img.longwin.xz 2> /tmp/xz-d.txt | sha256sum > /tmp/longwin.sha
+            sha256sum < "$img" > /tmp/img.sha
+            {
+              echo "--- first-flash option: +identity +FreeRADIUS .img as one xz stream, --lzma2=preset=9e,dict=1536MiB, -T1"
+              echo ".img bytes $(size "$img")"
+              echo "plain img.xz (release compression) bytes $(size out/radius/img.xz)"
+              echo "long-window img.xz bytes $(size out/radius/img.longwin.xz)"
+              echo "delta long-window minus plain $(( $(size out/radius/img.longwin.xz) - $(size out/radius/img.xz) ))"
+              echo "round trip identical: $(cmp -s /tmp/longwin.sha /tmp/img.sha && echo yes || echo NO)"
+              echo "xz -d peak memory (Maximum resident set size, kbytes): $(sed -n 's/.*Maximum resident set size (kbytes): //p' /tmp/xz-d.txt)"
+              echo "xz -d wall clock: $(sed -n 's/.*Elapsed (wall clock) time[^:]*: //p' /tmp/xz-d.txt)"
+              echo "xz compress peak memory (kbytes): $(sed -n 's/.*Maximum resident set size (kbytes): //p' /tmp/xz-c.txt)"
+              echo "xz compress wall clock: $(sed -n 's/.*Elapsed (wall clock) time[^:]*: //p' /tmp/xz-c.txt)"
+            } >> "$R"
+          fi
+          cat "$R"
+
+      - name: Upload the reports and the scratch stack
+        uses: actions/upload-artifact@v4
+        with:
+          name: spike957-${{ matrix.sku }}
+          path: |
+            report-${{ matrix.sku }}.txt
+            stack-${{ matrix.arch }}.txt
+            identity-stack-${{ matrix.arch }}.squashfs
+          retention-days: 7

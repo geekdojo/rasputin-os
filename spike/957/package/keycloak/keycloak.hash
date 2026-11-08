@@ -1,0 +1,4 @@
+# From Maven Central's published .sha256 beside the artifact
+# (org/keycloak/keycloak-quarkus-dist/26.8.2), read 2026-11-08, and matched by
+# a local download the same day. Signature checking is #958's.
+sha256  dd124787283918bc597628887168333465ee2a811a389e0003569e52be7e487f  keycloak-quarkus-dist-26.8.2.tar.gz

@@ -1,0 +1,4 @@
+menu "SPIKE ONLY: geekdojo-brain#957 identity runtime"
+source "$BR2_EXTERNAL_SPIKE957_PATH/package/temurin-jre/Config.in"
+source "$BR2_EXTERNAL_SPIKE957_PATH/package/keycloak/Config.in"
+endmenu

@@ -1,0 +1,7 @@
+# SPIKE ONLY (geekdojo-brain#957): the identity runtime, appended to the stock
+# defconfig for builds 2 and 3. PostgreSQL is Buildroot 2026.08.1's own package
+# (18.6) with OpenSSL (for -Dssl=openssl) and systemd (already on).
+BR2_PACKAGE_OPENSSL=y
+BR2_PACKAGE_POSTGRESQL=y
+BR2_PACKAGE_TEMURIN_JRE=y
+BR2_PACKAGE_KEYCLOAK=y
