@@ -46,13 +46,15 @@
 #
 # WHY THIS VALUE
 #
-# 2026.11.0 is the STABLE firewall of the lockstep 2026.11.0 stable cut
-# (features geekdojo/geekdojo-brain#464, #907 and #462), built from firewall
-# main 5528c4c. It carries agent 2026.11.0 -- the control-plane stable
-# v2026.11.0 this OS pins, built from the same CP commit (388dbfc) as dev.215,
-# so no functional agent change -- plus the rolling OpenWrt 25.12.6 feed; the
-# Snort rules pin is unchanged at b8a7e5ad. Stable bakes stable. The previous
-# pin was dev.200 of the 2026.11.0 dev chain.
+# 2026.11.1-dev.204 is the firewall dev release of the 2026.11.1 dev chain for
+# feature geekdojo/geekdojo-brain#910 (CP PR #529, the POST /api/bmc/csr route
+# of geekdojo/geekdojo-brain#1065), built from firewall main fdf121b
+# (rasputin-openwrt-firewall PR #134, release run 42508125061). It carries
+# agent 2026.11.1-dev.217 -- the control-plane dev release this OS pins, built
+# from CP main a363312, with no functional agent change against 2026.11.0 --
+# plus the Snort rules re-pin to 72eb1f34 (Talos republish 2026-11-05) and the
+# rolling OpenWrt 25.12.6 feed. Dev bakes dev. The previous pin was the
+# 2026.11.0 stable.
 #
 # History: 2026.09.4-dev.127 was the first pin -- the FIRST firewall release
 # that publishes manifest.json.sig (dev.126 and earlier ship no sig asset).
@@ -82,5 +84,6 @@
 # On the 2026.10.6 dev line: dev.193 (OS dev.358).
 # 2026.10.6 (stable) was the pin of the 2026.10.6 stable OS.
 # On the 2026.11.0 dev line: dev.198 (OS dev.363), dev.200 (OS dev.365).
+# 2026.11.0 (stable) was the pin of the 2026.11.0 stable OS.
 #
-2026.11.0
+2026.11.1-dev.204
