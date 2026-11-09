@@ -189,7 +189,7 @@ jobs:
             echo "--- unsquashfs -l"
             unsquashfs -d / -l identity-stack-${{ matrix.arch }}.squashfs
             echo "--- usr/lib/keycloak/data"
-            unsquashfs -d / -ll identity-stack-${{ matrix.arch }}.squashfs | grep -E ' /usr/lib/keycloak/data( |$)'
+            unsquashfs -d / -ll identity-stack-${{ matrix.arch }}.squashfs | grep -E ' /+usr/lib/keycloak/data -> '
             echo "--- NEEDED closure"
             cat stack-closure-${{ matrix.arch }}.txt
           } > stack-${{ matrix.arch }}.txt
@@ -260,9 +260,9 @@ jobs:
               echo "delta long-window minus plain $(( $(size out/radius/img.longwin.xz) - $(size out/radius/img.xz) ))"
               echo "round trip identical: $(cmp -s /tmp/longwin.sha /tmp/img.sha && echo yes || echo NO)"
               echo "xz -d peak memory (Maximum resident set size, kbytes): $(sed -n 's/.*Maximum resident set size (kbytes): //p' /tmp/xz-d.txt)"
-              echo "xz -d wall clock: $(sed -n 's/.*Elapsed (wall clock) time[^:]*: //p' /tmp/xz-d.txt)"
+              echo "xz -d wall clock: $(sed -n 's/.*Elapsed (wall clock) time (h:mm:ss or m:ss): //p' /tmp/xz-d.txt)"
               echo "xz compress peak memory (kbytes): $(sed -n 's/.*Maximum resident set size (kbytes): //p' /tmp/xz-c.txt)"
-              echo "xz compress wall clock: $(sed -n 's/.*Elapsed (wall clock) time[^:]*: //p' /tmp/xz-c.txt)"
+              echo "xz compress wall clock: $(sed -n 's/.*Elapsed (wall clock) time (h:mm:ss or m:ss): //p' /tmp/xz-c.txt)"
             } >> "$R"
           fi
           cat "$R"
