@@ -18,6 +18,10 @@ OUT="${2:?usage}"
 REPORT="${3:?usage}"
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
+# mktemp makes the directory 0700, and it becomes the squashfs root: the
+# identity units run as nobody and must traverse it (run 42539656579's stack
+# failed initdb with 203/EXEC on exactly this).
+chmod 0755 "$STAGE"
 
 mkdir -p "$STAGE/usr/lib" "$STAGE/usr/bin" "$STAGE/usr/share" "$STAGE/lib"
 cp -a "$TARGET/usr/lib/keycloak" "$STAGE/usr/lib/keycloak"
