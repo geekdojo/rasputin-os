@@ -194,6 +194,16 @@ BR2_PACKAGE_OPENBAO=y
 BR2_TARGET_ROOTFS_SQUASHFS=y
 BR2_TARGET_ROOTFS_SQUASHFS4_XZ=y
 
+# Global patch directory: patches/<package>/<version>/*.patch are applied after
+# Buildroot's own package patches. It carries systemd's upstream revert
+# 658e5ac06f80 (in 258.8): systemd 258.5-258.7 let resolved take its own
+# looped-back mDNS replies as a rival's, so restarting resolved could rename the
+# host and lose its .local name (geekdojo/geekdojo-brain#1067). The 258.7/
+# subdirectory applies only while Buildroot's SYSTEMD_VERSION is 258.7; delete
+# it when the pin moves to systemd >= 258.8. ci.yml's resolved-mdns-loopback job
+# checks the patched source for both defconfigs.
+BR2_GLOBAL_PATCH_DIR="$(BR2_EXTERNAL_RASPUTIN_PATH)/board/rasputin/common/patches"
+
 # --- overlay + hooks (shared across both arches) ---
 BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_RASPUTIN_PATH)/board/rasputin/common/rootfs-overlay"
 BR2_ROOTFS_POST_BUILD_SCRIPT="$(BR2_EXTERNAL_RASPUTIN_PATH)/board/rasputin/common/post-build.sh"
