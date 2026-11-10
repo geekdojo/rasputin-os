@@ -1,17 +1,20 @@
 # Wired uplink — match any kernel/udev name an onboard NIC can get:
 # udev predictable naming gives enp*/eno*/ens* (enp1s0 on the Mu); plain
 # eth0 only survives with net.ifnames=0. Container/virtual interfaces
-# (docker0, br-*, veth*) intentionally don't match.
+# (docker0, br-*, veth*) intentionally don't match, so networkd does not manage
+# them — which does NOT keep mDNS off them (see MulticastDNS= below).
 [Match]
 Name=en* eth*
 
 [Network]
 DHCP=yes
-# mDNS per-link opt-in (defaults to false): resolved answers <hostname>.local
-# on this link only when networkd sets this. Global responder mode lives in
-# etc/systemd/resolved.conf.d/10-rasputin-mdns.conf. Which hostname is
-# announced is decided per-role by rasputin-hostname.service — only the
-# controlplane answers rasputin.local.
+# mDNS on this link. networkd's per-link MulticastDNS= defaults to no, but only
+# on links networkd manages; resolved gives a link with no networkd state a
+# per-link yes. The effective value is the lower of the per-link and the global
+# setting (etc/systemd/resolved.conf.d/10-rasputin-mdns.conf), so the global
+# switch is a ceiling: it also turns mDNS on for docker0, br-* and veth*, which
+# this file does not match. Which hostname is announced is decided per-role by
+# rasputin-hostname.service — only the controlplane answers rasputin.local.
 MulticastDNS=yes
 # IPv4 link-local FALLBACK for the dumb-switch/no-DHCP bench scenario.
 # "ipv4" = IPv4 LL only while DHCPv4 has no lease: systemd 258's networkd

@@ -240,6 +240,13 @@ jobs:
       # rpi-family-dtbs job below.
       - name: Every Pi family device tree is in the rpi defconfig
         run: sh test/rpi-family-dtbs.sh defconfig board/rasputin/rpi/family-dtbs.txt configs/rasputin_rpi_defconfig
+      # The check that resolved drops its own looped-back mDNS packets before it
+      # handles replies (geekdojo/geekdojo-brain#1067), on fixtures shaped like
+      # systemd 258.8 (fixed) and 258.7 (broken), plus every input it must refuse
+      # to decide on. The check itself runs on the real, patched source in the
+      # resolved-mdns-loopback job below.
+      - name: resolved mDNS loopback check tests
+        run: sh test/resolved-mdns-loopback-test.sh
       # squashfs-tools for the kernel-match tests' bundle-kernel-match cases,
       # which build a real squashfs rootfs. Through the package cache, bounded
       # (the shared ci-debs action in geekdojo/.github says why).
@@ -498,6 +505,43 @@ jobs:
           require: mcopy mdir mkfs.vfat sfdisk jq
       - name: Pi family device-tree check tests
         run: sh test/rpi-family-dtbs-test.sh
+
+  # systemd 258.5-258.7 let resolved take its own looped-back mDNS replies as a
+  # rival's, so restarting resolved while the host's name was being probed
+  # renamed the host and lost its .local name (geekdojo/geekdojo-brain#1067).
+  # The image carries upstream's revert as a Buildroot global patch, keyed to
+  # systemd 258.7. A defconfig that drops BR2_GLOBAL_PATCH_DIR, a patch that
+  # stops applying, or a Buildroot bump to a systemd with the regression and no
+  # patch for its version would all look identical in a build, so this job has
+  # each defconfig's pinned Buildroot download, extract and patch systemd
+  # exactly as the image build does (no toolchain needed), then runs the
+  # source check on what it produced.
+  resolved-mdns-loopback:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The same pinned checkout release.yml uses.
+      - name: Check out the pinned Buildroot
+        run: ./scripts/init-buildroot.sh
+      - name: Each defconfig's patched systemd drops looped-back mDNS packets
+        run: |
+          fail=0
+          for sku in rpi n100; do
+            out="$PWD/output/$sku"
+            make -C buildroot BR2_EXTERNAL="$PWD" O="$out" "rasputin_${sku}_defconfig"
+            make -C buildroot BR2_EXTERNAL="$PWD" O="$out" systemd-patch
+            set --
+            for d in "$out"/build/systemd-[0-9]*; do
+              if [ -d "$d" ]; then set -- "$@" "$d"; fi
+            done
+            if [ "$#" -ne 1 ]; then
+              echo "::error::resolved-mdns-loopback: The $sku build has $# systemd source directories under $out/build, where exactly one was expected, so its patched source cannot be checked."
+              fail=1
+              continue
+            fi
+            sh test/resolved-mdns-loopback.sh "$1/src/resolve/resolved-mdns.c" || fail=1
+          done
+          exit $fail
 
   verify-bundle:
     runs-on: ubuntu-latest
