@@ -16,7 +16,7 @@
 #
 # HOW THE HASHES IN openbao.hash ARE TAKEN. Never from a download alone: only
 # from upstream's checksums.txt after its signature is verified two ways. V is
-# the version (2.7.1) and M the minor (2.7). The anchors are from
+# the version (2.7.2) and M the minor (2.7). The anchors are from
 # geekdojo/geekdojo-brain#678, re-checked against install.mdx at the tag. In
 # an empty scratch dir:
 #
@@ -41,7 +41,7 @@
 # geekdojo-brain's projects/rasputin/research/openbao-evidence/678/
 # verify-signatures.sh runs every step above plus negative controls
 # (V=<version> OUT=<path>). Its run for this pin is committed as
-# openbao-evidence/798/raw/signature-verification-v2.7.1.txt.
+# openbao-evidence/rasputin-os-197/raw/signature-verification-v2.7.2.txt.
 #
 # Release ordering (geekdojo/geekdojo-brain#801): the first release that
 # carries the store's version gate (rasputin-store-rollback.sh) must keep this
@@ -54,7 +54,7 @@
 #
 ################################################################################
 
-OPENBAO_VERSION = 2.7.1
+OPENBAO_VERSION = 2.7.2
 OPENBAO_SITE = https://github.com/openbao/openbao/releases/download/v$(OPENBAO_VERSION)
 
 # Only when the package is on: a defconfig without the store must build on any
