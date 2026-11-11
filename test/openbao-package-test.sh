@@ -6,7 +6,7 @@
 #
 #   * the per-arch tarball map. An architecture it does not know must fail the
 #     build when the store is on, and only then; an empty GOARCH would ask for
-#     openbao_2.7.1_linux_.tar.gz and fail late with a download error that
+#     openbao_2.7.2_linux_.tar.gz and fail late with a download error that
 #     names nothing useful;
 #   * openbao.hash. Every tarball the map can ask for, and LICENSE, need exactly
 #     one sha256 line. Buildroot's check-hash refuses a missing hash on its own
@@ -201,7 +201,7 @@ check "TC-798-08 no version: message" "$_msg" "SOURCE does not name the pinned O
 echo "── mk_var fails closed"
 # TC-798-09: one row per input. Each failure: non-zero, nothing on stdout, a
 # capitalised sentence ending in a full stop on stderr.
-check "TC-798-09 reads OPENBAO_VERSION" "$(mk_var "$MK" OPENBAO_VERSION)" 2.7.1
+check "TC-798-09 reads OPENBAO_VERSION" "$(mk_var "$MK" OPENBAO_VERSION)" 2.7.2
 printf 'OPENBAO_EMPTY =\n' > "$TMP/empty.mk"
 mkvar_fails() { # mkvar_fails LABEL WANT_STDERR -- then the call runs in a subshell
 	_label="$1"; _want="$2"; shift 2
