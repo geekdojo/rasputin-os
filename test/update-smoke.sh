@@ -75,6 +75,18 @@
 #      build's rootfs with a shell into the guest, on both arches, and it is an
 #      OTA'd node: its persistent shadow was seeded by the old image and has no
 #      openbao row, which is exactly the path `id openbao` must work on.
+#      The operator (geekdojo/geekdojo-brain#967): in boot 1 the harness
+#      registers smoke-operator on the base image through the old console's
+#      passkey ceremony (test/lib/signin.py legacy-register, over the api's
+#      HTTPS with the base's controlplane CA as the trust anchor), and in boot
+#      2 that operator must sign in to the updated console (legacy-sign-in,
+#      then /api/auth/me naming it). A refusal fails the run, so publish does
+#      not run. The client's state, its needles and the CA live only in
+#      $WORK/operator, which the EXIT trap removes, and the console logs (the
+#      run's artifacts) are scanned for every needle first.
+#      UPDATE_SMOKE_FIXTURE=operator-gone (TEST-ONLY; CI never sets it, and it
+#      prints a FIXTURE: line) moves the api's rasputin.db aside in boot 2
+#      before the sign-in, to show the refusal path.
 #   4. Roll back without committing: arm64 powers off without mark-good, and the
 #      next NORMAL boot falls back to the [all] partition (the one-shot rollback);
 #      amd64 marks the booted slot bad, and GRUB falls back to A. Assert slot A
@@ -116,6 +128,7 @@ KID="$HERE/../scripts/kernel-id.sh"
 . "$HERE/lib/mk-var.sh"
 . "$HERE/lib/test-pki.sh"
 . "$HERE/lib/listen-sockets.sh"
+. "$HERE/lib/secret-scan.sh"
 
 case "$ARCH" in amd64|arm64) ;; *) echo "::error::unknown arch '$ARCH'"; exit 2 ;; esac
 for f in "$OLD_IMG" "$BUNDLE" "$NEW_IMG"; do
@@ -127,12 +140,14 @@ BAO_PIN="$(mk_var "$HERE/../package/openbao/openbao.mk" OPENBAO_VERSION)" \
 	|| { echo "::error::Could not read the OpenBao pin from package/openbao/openbao.mk, so boot 2's store checks have nothing to compare against."; exit 2; }
 
 SSH_PORT=12222
+HTTPS_PORT=18443   # the hostfwd to the api's :443
 BUDGET=1800        # hard bound on one QEMU run (a whole boot + install session)
 SSH_TRIES=150      # 2s apart: 300s for dropbear to answer after QEMU starts
 GONE_TRIES=90      # 2s apart: 180s for the guest to power off
 READY_TIMEOUT=600  # one `systemctl is-system-running --wait` call
 STORE_CA_TRIES=60  # 2s apart: 120s for the api to mint the store CA after boot settles
 STORE_TRIES=60     # 2s apart: 120s for the api's leaf mint, the store's restart and self-init (#804)
+HS_TRIES=60        # 2s apart: 120s for the api's HTTPS /healthz, boot-smoke.sh's ceiling, above the api's 90s clock gate
 
 # The store's files on the guest (geekdojo/geekdojo-brain#756).
 STORE_CA=/var/lib/rasputin/trust/store-ca.pem
@@ -145,6 +160,9 @@ STORE_RECORD=/run/rasputin-store-init/outcome
 # logged only by a start that runs the self-init stanzas.
 SELFINIT_LINE='beginning post-unseal configuration'
 GUEST_PKI=/run/update-smoke-store
+# The operator the update must not lock out (#967), and the sign-in client.
+OPERATOR=smoke-operator
+SIGNIN="$HERE/lib/signin.py"
 
 rm -rf "$WORK"
 mkdir -p "$WORK"
@@ -157,6 +175,8 @@ cleanup() {
 	rm -f "$KEY" "$KEY.pub" "$DISK" "$WORK/bundle.vfat" "$WORK"/*.bin
 	# So are the store's harness CA keys and test leaves (TC-756-24).
 	rm -rf "$WORK/store-pki"
+	# And the operator's passkey, session and needles (#967).
+	rm -rf "$WORK/operator"
 	return 0
 }
 trap cleanup EXIT
@@ -227,7 +247,7 @@ boot() {
 	LOG="$WORK/console-$_n.log"
 	: > "$LOG"
 	(QEMU_DISK2="$WORK/bundle.vfat" qemu_exec "$ARCH" "$DISK" "$BUDGET" "$LOG" \
-		"hostfwd=tcp:127.0.0.1:${SSH_PORT}-:22" -no-reboot) &
+		"hostfwd=tcp:127.0.0.1:${SSH_PORT}-:22,hostfwd=tcp:127.0.0.1:${HTTPS_PORT}-:443" -no-reboot) &
 	QPID=$!
 	_i=0
 	while [ "$_i" -lt "$SSH_TRIES" ]; do
@@ -282,6 +302,35 @@ arm64_load_slot() {
 	QEMU_APPEND="$_cl systemd.log_target=kmsg console=ttyAMA0,115200"
 	echo "loading partition $1: kernel $(sh "$KID" "$QEMU_KERNEL" 2>/dev/null || echo '?')"
 	echo "  cmdline: $QEMU_APPEND"
+}
+
+# api_https_wait — poll the api's HTTPS /healthz until it answers 200 (a
+# readiness read only: the sign-in after it verifies the api's certificate).
+# Each try first checks QEMU is alive. Status 1, with fail, if it never answers.
+api_https_wait() {
+	_i=0
+	while [ "$_i" -lt "$HS_TRIES" ]; do
+		if qemu_gone; then fail "QEMU exited before the api's HTTPS answered"; return 1; fi
+		[ "$(curl -sk -o /dev/null -w '%{http_code}' --max-time 2 "https://127.0.0.1:${HTTPS_PORT}/healthz" || true)" = 200 ] && return 0
+		_i=$((_i + 1)); sleep 2
+	done
+	fail "the api's HTTPS /healthz did not answer 200 in $((HS_TRIES * 2))s"
+	return 1
+}
+
+# signin VERB — test/lib/signin.py VERB for the operator against the api's
+# HTTPS, trusting only the base's controlplane CA. Its one stdout line goes to
+# SIGNIN_LINE and its sentence to SIGNIN_WHY; its stderr is printed
+# indented; its status is returned.
+signin() {
+	SIGNIN_LINE=$(python3 -I "$SIGNIN" "$1" --name "$OPERATOR" --base "https://127.0.0.1:${HTTPS_PORT}" \
+		--ca "$WORK/operator/mesh-ca.pem" --state "$WORK/operator" 2>"$WORK/operator.err")
+	_rc=$?
+	sed 's/^/    signin: /' "$WORK/operator.err"
+	rm -f "$WORK/operator.err"
+	SIGNIN_WHY=${SIGNIN_LINE#signin * * }
+	SIGNIN_WHY=${SIGNIN_WHY:-signin.py printed no verdict (exit $_rc)}
+	return "$_rc"
 }
 
 running_id() { ssh_guest 'echo "$(uname -r) $(uname -v)"' 2>/dev/null; }
@@ -344,6 +393,18 @@ else
 fi
 tail -15 "$WORK/install.log" | sed 's/^/    install: /'
 ssh_guest 'rauc status --detailed' 2>&1 | sed 's/^/    rauc: /'
+# The operator (#967): registered on the base through the old console's
+# ceremony, so boot 2 can sign it in after the update. The CA is the base's
+# controlplane CA, which issued the api's HTTPS leaf; it is public.
+if api_https_wait; then
+	(umask 077 && mkdir -p "$WORK/operator" && ssh_guest "cat $MESH_CA" >"$WORK/operator/mesh-ca.pem") 2>/dev/null \
+		|| fail "boot 1: could not read the controlplane CA $MESH_CA over SSH"
+	if signin legacy-register; then
+		pass "boot 1: $OPERATOR registered on $OLD_VERSION through the old console ceremony"
+	else
+		fail "boot 1: $OPERATOR could not be registered on $OLD_VERSION: $SIGNIN_WHY"
+	fi
+fi
 # The base's store state (THE BASE'S STORE STATE, above). The api goes first,
 # because it is what starts and restarts the store; a base with no
 # openbao.service has nothing to stop. The listing is the seal-key script's own
@@ -392,6 +453,20 @@ if boot 2; then
 		"rasputin-kernel-match: MATCH "*) pass "boot 2: kernel-match verdict ($KM)" ;;
 		*) fail "boot 2: kernel-match verdict is not MATCH: '${KM:-<none on the console>}'" ;;
 	esac
+	# The pre-update operator signs in after the update (#967). Before the
+	# store leg, which restarts the api.
+	if [ "${UPDATE_SMOKE_FIXTURE:-}" = operator-gone ]; then
+		echo "FIXTURE: operator-gone: stopping the api and moving /var/lib/rasputin/rasputin.db aside, so the console no longer knows $OPERATOR"
+		ssh_guest 'systemctl stop rasputin-api.service && mv /var/lib/rasputin/rasputin.db /var/lib/rasputin/rasputin.db.fixture-aside && systemctl start rasputin-api.service' >/dev/null 2>&1 \
+			|| fail "boot 2: FIXTURE: operator-gone could not move rasputin.db aside"
+	fi
+	if api_https_wait; then
+		if signin legacy-sign-in; then
+			pass "boot 2: the pre-update operator $OPERATOR signed in after the update"
+		else
+			fail "the pre-update operator $OPERATOR could not sign in after the update: $SIGNIN_WHY"
+		fi
+	fi
 	# The secrets-store binary (geekdojo/geekdojo-brain#798). Only busybox
 	# applets the image has: no stat and no pgrep, so ls -ln and pidof.
 	BAO_LINE="$(ssh_guest '/usr/bin/bao version' 2>/dev/null | tr -d '\r' | head -1)"
@@ -493,6 +568,8 @@ if boot 2; then
 			done
 			ssh_guest "umask 077 && cat >$GUEST_PKI/store-guest-checks.sh" <"$HERE/lib/store-guest-checks.sh" \
 				|| fail "boot 2: could not copy test/lib/store-guest-checks.sh to the guest"
+			ssh_guest "umask 077 && cat >$GUEST_PKI/secret-scan.sh" <"$HERE/lib/secret-scan.sh" \
+				|| fail "boot 2: could not copy test/lib/secret-scan.sh to the guest"
 			pass "boot 2: the harness wrote its rasputin-seal-rotate and controlplane-CA test leaves to $GUEST_PKI"
 		else
 			fail "boot 2: the harness could not mint and write its test leaves"
@@ -694,6 +771,23 @@ if [ -d "$WORK/store-pki" ]; then
 	_hits="$(grep -c hit "$WORK/store-pki/hits")"
 	expect "the consoles hold no PEM private-key text and no line of the harness's keys (counts)" "0 0" "$_pem $_hits"
 fi
+
+# No secret of the operator's in the run's artifacts (#967): every needle the
+# sign-in client held, looked for in the logs CI uploads ($WORK/*.log), every
+# other entry in $WORK excluded. Reading nothing is a failure, not a pass.
+console_scan() {
+	set --
+	for _e in "$WORK"/*; do
+		case "$_e" in *.log) ;; *) set -- "$@" "$_e" ;; esac
+	done
+	_cs=$(scan_tree "$WORK" "$WORK/operator/needles" "$@")
+	case $? in
+		0) pass "the run's logs hold none of the operator's secrets ($(printf '%s' "$_cs" | tr '\n' ' '))" ;;
+		1) fail "the run's logs hold a secret of the operator's ($(printf '%s' "$_cs" | tr '\n' ' '))" ;;
+		*) fail "the scan of the run's logs for the operator's secrets read nothing: $(printf '%s' "$_cs" | tr '\n' ' ')" ;;
+	esac
+}
+console_scan
 
 echo "== consoles: $WORK/console-{1,2,3}.log"
 if [ "$FAILS" -gt 0 ]; then

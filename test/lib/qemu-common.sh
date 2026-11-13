@@ -12,6 +12,11 @@
 #
 # Needs: sfdisk, jq, timeout, ssh, and qemu-system-x86_64 / qemu-system-aarch64.
 
+# Guest memory, both arches, every smoke: 4096 MiB, a 4 GiB device's memory
+# and what the identity service needs beside the rest
+# (geekdojo/geekdojo-brain#967).
+QEMU_MEM_MIB=4096
+
 # part_offset IMG N — byte offset of partition number N (MBR or GPT; logical
 # MBR partitions count from 5, as the kernel numbers them). Empty if absent.
 part_offset() {
@@ -69,7 +74,7 @@ qemu_exec() {
 			set -- -drive file="$QEMU_DISK2",format=raw,if=virtio "$@"
 		fi
 		exec timeout "$_budget" qemu-system-x86_64 \
-			-machine q35 -m 2048 -smp 2 -cpu max -nographic \
+			-machine q35 -m "$QEMU_MEM_MIB" -smp 2 -cpu max -nographic \
 			-drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
 			-drive if=pflash,format=raw,file="$VARS_FD" \
 			-drive file="$_img",format=raw,if=virtio \
@@ -81,7 +86,7 @@ qemu_exec() {
 			set -- -drive file="$QEMU_DISK2",format=raw,if=none,id=hd1 -device virtio-blk-pci,drive=hd1 "$@"
 		fi
 		exec timeout "$_budget" qemu-system-aarch64 \
-			-machine virt,gic-version=3 -accel tcg -m 2048 -smp 2 -cpu cortex-a72 -nographic \
+			-machine virt,gic-version=3 -accel tcg -m "$QEMU_MEM_MIB" -smp 2 -cpu cortex-a72 -nographic \
 			-kernel "$QEMU_KERNEL" -append "$QEMU_APPEND" \
 			-drive file="$_img",format=raw,if=none,id=hd0 -device virtio-blk-pci,drive=hd0 \
 			-netdev "user,id=n0,$_fwd" \

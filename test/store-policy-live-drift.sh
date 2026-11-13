@@ -40,32 +40,20 @@ set -u
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 DRIFT="$ROOT/scripts/store-policy-drift.sh"
-REPO=https://github.com/geekdojo/rasputin-control-plane
 SRCDIR=api/internal/secretstore/storepolicy
 for t in make curl openssl tar git; do
 	command -v "$t" >/dev/null 2>&1 || { echo "FAILED: this check needs $t, and it is not on PATH."; exit 2; }
 done
-for f in "$DRIFT" "$ROOT/test/lib/mk-var.sh" "$ROOT/test/lib/api-tarball.sh"; do
+for f in "$DRIFT" "$ROOT/test/lib/mk-var.sh" "$ROOT/test/lib/api-tarball.sh" "$ROOT/test/lib/cp-fetch.sh"; do
 	[ -f "$f" ] || { echo "FAILED: the file $f is missing."; exit 2; }
 done
 . "$ROOT/test/lib/mk-var.sh"
 . "$ROOT/test/lib/api-tarball.sh"
+# cp_fetch TAG DEST DIR: the sparse, shallow control-plane clone.
+. "$ROOT/test/lib/cp-fetch.sh"
 
 W=$(mktemp -d)
 trap 'rm -rf "$W"' EXIT INT TERM
-
-# cp_fetch TAG DEST — a sparse, shallow clone of control-plane at TAG holding
-# only the policy directory; prints the directory's path. Fails with a
-# sentence.
-cp_fetch() {
-	if ! git clone -q --depth 1 --filter=blob:none --sparse --branch "$1" "$REPO" "$2" >/dev/null 2>&1 \
-		|| ! git -C "$2" sparse-checkout set "$SRCDIR" >/dev/null 2>&1; then
-		echo "FAILED: could not clone $REPO at $1, so there is no policy source to compare with." >&2
-		return 1
-	fi
-	[ -d "$2/$SRCDIR" ] || { echo "FAILED: $REPO at $1 has no $SRCDIR." >&2; return 1; }
-	printf '%s\n' "$2/$SRCDIR"
-}
 
 # Either architecture's tarball carries the same text; amd64 is fetched.
 api_policy_fetch "$ROOT" BR2_x86_64 "$W/api" || exit 2
@@ -73,10 +61,10 @@ TAG="v$API_VERSION"
 LABEL="the api $API_VERSION tarball"
 [ -n "${RASPUTIN_API_TARBALL:-}" ] && LABEL="the local api tarball (override)"
 if [ -n "${RASPUTIN_CP_SRC:-}" ]; then
-	echo "LOCAL OVERRIDE: comparing with RASPUTIN_CP_SRC=$RASPUTIN_CP_SRC instead of $REPO at $TAG. This run says nothing about the pin."
+	echo "LOCAL OVERRIDE: comparing with RASPUTIN_CP_SRC=$RASPUTIN_CP_SRC instead of $CP_REPO at $TAG. This run says nothing about the pin."
 	SRC="$RASPUTIN_CP_SRC/$SRCDIR"
 else
-	SRC=$(cp_fetch "$TAG" "$W/cp") || exit 2
+	SRC=$(cp_fetch "$TAG" "$W/cp" "$SRCDIR") || exit 2
 fi
 
 echo "comparing $LABEL's openbao-policy/ with $SRCDIR at $TAG"
@@ -99,7 +87,7 @@ fi
 echo "  refused, exit 1"
 
 echo "control: a clone at a tag that does not exist must fail (this script's exit 2 path)"
-if cp_fetch v0.0.0-store-policy-drift-control "$W/missing" >/dev/null 2>"$W/missing.err"; then
+if cp_fetch v0.0.0-store-policy-drift-control "$W/missing" "$SRCDIR" >/dev/null 2>"$W/missing.err"; then
 	echo "FAILED: a clone at a missing tag succeeded, so a failed fetch could pass unseen."
 	exit 1
 fi
