@@ -10,7 +10,10 @@
 #
 # Shells: each of TEST_SHELLS (default: dash and bash where installed, and
 # `busybox sh` when busybox is installed). REQUIRE_BUSYBOX=1 (CI sets it)
-# makes a missing busybox a failure.
+# makes a missing busybox a failure. The busybox row puts busybox's own
+# grep, tr and find ahead of PATH, because the image's are busybox's: its
+# grep with several needles misses one after a NUL (F-967-14), which a
+# `busybox sh` reaching the host's GNU grep would not show.
 #
 # Run:  sh test/secret-scan-test.sh
 set -u
@@ -43,6 +46,12 @@ EOF
 chmod +x "$TMP/bin/journalctl"
 PATH="$TMP/bin:$PATH"
 export PATH
+BB="$TMP/busybox-applets"
+mkdir -p "$BB"
+for applet in grep tr find; do
+	printf '#!/bin/sh\nexec busybox %s "$@"\n' "$applet" >"$BB/$applet"
+	chmod 0755 "$BB/$applet"
+done
 
 rand_hex() { od -An -N12 -tx1 /dev/urandom | tr -d ' \n'; }
 rand_alnum() { tr -dc 'A-Za-z0-9' </dev/urandom | head -c 24; }
@@ -51,7 +60,7 @@ lines() { printf '%s\n' "$1" | grep -c ''; }
 # shell_run ARGS... — sh with $SH, so `busybox sh` is two words.
 shell_run() {
 	case "$SH" in
-		busybox_sh) busybox sh "$@" ;;
+		busybox_sh) PATH="$BB:$PATH" busybox sh "$@" ;;
 		*) "$SH" "$@" ;;
 	esac
 }
@@ -71,7 +80,8 @@ for SH in $TEST_SHELLS; do
 	printf 'clean\n' >"$T/tree/clean"
 	printf '%s\n' "$n3" >"$T/tree/excluded/hidden"
 
-	# TC-967-09: text and binary hits counted, the excluded path not.
+	# TC-967-09: text and binary hits counted, the excluded path not. The
+	# binary hit is the second needle after a NUL (F-967-14).
 	scan scan_tree "$T/tree" "$T/needles" "$T/tree/excluded"
 	check "TC-967-09 [$SH] scan_tree counts the text and binary hits, not the excluded one" \
 		"$(yes_if test "$OUT" = "files=3 files_exact=2")" "$OUT"
@@ -96,6 +106,11 @@ for SH in $TEST_SHELLS; do
 	printf 'boot\nsession %s issued\nend\n' "$n2" >"$T/journal"
 	FAKE_JOURNAL="$T/journal" scan scan_journal "$T/needles"
 	check "TC-967-09 [$SH] scan_journal counts the journal hit" \
+		"$(yes_if test "$RC" = 1 -a "$OUT" = "journal_lines=3 journal_exact=1")" "rc=$RC $OUT"
+	# F-967-14: a journal line with a NUL before the needle.
+	{ printf 'boot\nbin\000'; printf '%s' "$n3"; printf '\nend\n'; } >"$T/journal"
+	FAKE_JOURNAL="$T/journal" scan scan_journal "$T/needles"
+	check "TC-967-09 [$SH] scan_journal counts a hit after a NUL on its line" \
 		"$(yes_if test "$RC" = 1 -a "$OUT" = "journal_lines=3 journal_exact=1")" "rc=$RC $OUT"
 	printf 'boot\nend\n' >"$T/journal"
 	FAKE_JOURNAL="$T/journal" scan scan_journal "$T/needles"

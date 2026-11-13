@@ -4,7 +4,9 @@
 # guest share (geekdojo/geekdojo-brain#967, F-967-02, F-967-03). Sourced,
 # never run. Extracted from store-guest-checks.sh's scan (#804); it reads
 # with grep -a -F -f, so binary files are searched as text and every needle
-# is a fixed string, and it prints counts only, never a needle.
+# is a fixed string, and it prints counts only, never a needle. Every NUL is
+# translated before grep reads it: busybox grep, the image's, with several
+# needles in -f misses a needle that follows a NUL on its line (F-967-14).
 #
 #   scan_tree ROOT NEEDLES [EXCLUDE...]
 #       Every regular file under ROOT on its filesystem, but each EXCLUDE
@@ -21,7 +23,7 @@
 # file, zero files or zero journal lines each print `INCONCLUSIVE <what>=0`.
 # Its scratch files sit beside NEEDLES and are removed before it returns.
 #
-# Needs: find, grep, journalctl (scan_journal).
+# Needs: find, grep, tr, journalctl (scan_journal).
 
 # _scan_needles NEEDLES — 0 when NEEDLES holds a needle, else the line and 2.
 _scan_needles() {
@@ -44,7 +46,7 @@ scan_tree() {
 	_st_files=0 _st_x=0
 	while IFS= read -r _st_f; do
 		_st_files=$((_st_files + 1))
-		grep -a -q -F -f "$_st_needles" "$_st_f" 2>/dev/null && _st_x=$((_st_x + 1))
+		tr '\000' '\n' 2>/dev/null <"$_st_f" | grep -a -q -F -f "$_st_needles" 2>/dev/null && _st_x=$((_st_x + 1))
 	done <"$_st_needles.files"
 	rm -f "$_st_needles.files"
 	echo "files=$_st_files files_exact=$_st_x"
@@ -56,7 +58,7 @@ scan_tree() {
 scan_journal() {
 	_sj_needles=$1
 	_scan_needles "$_sj_needles" || return 2
-	journalctl --no-pager -o cat >"$_sj_needles.journal" 2>/dev/null
+	journalctl --no-pager -o cat 2>/dev/null | tr '\000' ' ' >"$_sj_needles.journal"
 	_sj_lines=$(grep -a -c '' "$_sj_needles.journal")
 	_sj_x=$(grep -a -c -F -f "$_sj_needles" "$_sj_needles.journal")
 	rm -f "$_sj_needles.journal"
