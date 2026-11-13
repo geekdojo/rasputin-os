@@ -23,7 +23,8 @@
 #   OUT          where the tokens and the written value are kept (tmpfs)
 #   PERSIST      the persistent partition the scan reads
 #
-# Needs on the guest: bao, grep, find, ls, cat, od, tr, cut, awk, journalctl.
+# Needs on the guest: bao, grep, find, ls, cat, od, tr, cut, awk, sed, dirname,
+# journalctl, and secret-scan.sh beside this file for scan.
 # Not stat: the image's BusyBox has no stat applet ("stat: not found" on both
 # arches, release run 38337615460), so modes and owners are read with ls -ln.
 set -u
@@ -138,24 +139,35 @@ scan() {
 	echo "needles=$(grep -c '' "$OUT/needles")"
 	# The control: the shapes match the tokens this run holds.
 	echo "control_bao_shape=$(grep -c -E "$B_RE" "$OUT/needles")"
+	# The exact-needle counts are secret-scan.sh's, copied beside this file
+	# (geekdojo/geekdojo-brain#967, F-967-07); the output keys are the ones
+	# test/update-smoke.sh has always asserted, and scan's status is ignored,
+	# as before, because the host asserts the counts.
+	_here=$(dirname "$0")
+	if [ ! -f "$_here/secret-scan.sh" ]; then
+		echo "secret_scan=missing"
+		return
+	fi
+	. "$_here/secret-scan.sh"
 	# Every regular file on the persistent partition, binary files included,
 	# except the container image stores: docker/ and containerd/ hold image
 	# layers baked into the image at build time or pulled by digest, which no
 	# token issued at run time reaches, and their size would dominate the run.
 	find "$PERSIST" -xdev -type f ! -path "$PERSIST/docker/*" ! -path "$PERSIST/containerd/*" >"$OUT/files" 2>/dev/null
 	echo "files=$(grep -c '' "$OUT/files")"
-	_v=0 _bb=0 _x=0
+	_v=0 _bb=0
 	while IFS= read -r f; do
 		grep -a -q -E "$V_RE" "$f" 2>/dev/null && _v=$((_v + 1))
 		grep -a -q -E "$B_RE" "$f" 2>/dev/null && _bb=$((_bb + 1))
-		grep -a -q -F -f "$OUT/needles" "$f" 2>/dev/null && _x=$((_x + 1))
 	done <"$OUT/files"
-	echo "files_vault_shape=$_v files_bao_shape=$_bb files_exact=$_x"
+	_x=$(scan_tree "$PERSIST" "$OUT/needles" "$PERSIST/docker" "$PERSIST/containerd" | sed -n 's/^files=[0-9]* files_exact=//p')
+	echo "files_vault_shape=$_v files_bao_shape=$_bb files_exact=${_x:-inconclusive}"
 	# Every boot's journal, read through journalctl so compressed fields are
 	# searched decompressed.
 	journalctl --no-pager -o cat >"$OUT/journal" 2>/dev/null
 	echo "journal_lines=$(grep -c '' "$OUT/journal")"
-	echo "journal_vault_shape=$(grep -a -c -E "$V_RE" "$OUT/journal") journal_bao_shape=$(grep -a -c -E "$B_RE" "$OUT/journal") journal_exact=$(grep -a -c -F -f "$OUT/needles" "$OUT/journal")"
+	_jx=$(scan_journal "$OUT/needles" | sed -n 's/^journal_lines=[0-9]* journal_exact=//p')
+	echo "journal_vault_shape=$(grep -a -c -E "$V_RE" "$OUT/journal") journal_bao_shape=$(grep -a -c -E "$B_RE" "$OUT/journal") journal_exact=${_jx:-inconclusive}"
 	rm -f "$OUT/journal" "$OUT/files"
 }
 

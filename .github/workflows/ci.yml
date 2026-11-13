@@ -448,14 +448,41 @@ jobs:
       # network.
       - name: rpi kernel watch tests
         run: python3 -I test/rpi-kernel-watch-test.py
+      # The one exact-needle scanner, shared by the host and the guest
+      # (geekdojo/geekdojo-brain#967, TC-967-09, TC-967-10): counts, the
+      # excluded paths and refusing on an empty read; and the store scan's
+      # keys after its exact counts moved there. Under dash, bash and
+      # busybox ash.
+      - name: Secret scan tests
+        env:
+          REQUIRE_BUSYBOX: "1"
+        run: sh test/secret-scan-test.sh
+      # The identity service's guest checks (geekdojo/geekdojo-brain#967,
+      # TC-967-11 to TC-967-15): loopback-only listeners, Keycloak's mutual
+      # TLS on both ports, TLS-only PostgreSQL by refusal reason, the at-rest
+      # verdict and the needle scan, against a fake /proc, curl, psql and
+      # journal. Under dash, bash and busybox ash.
+      - name: Identity guest check tests
+        env:
+          REQUIRE_BUSYBOX: "1"
+        run: sh test/identity-guest-checks-test.sh
       # The live drift check (geekdojo/geekdojo-brain#804, TC-804-11): the
       # pinned api tarball's openbao-policy/ against rasputin-control-plane's
       # storepolicy/ at the same tag, plus its two controls. Red while the api
       # pin predates the policy files, by design: the image would not build
-      # either. release.yml's validate job runs it too. It is the job's last
-      # step, so while it is red every other step still runs and reports.
+      # either. release.yml's validate job runs it too. It and the sign-in
+      # client tests are the job's last steps, so while one is red every
+      # other step still runs and reports.
       - name: Store policy live drift check
         run: sh test/store-policy-live-drift.sh
+      # The headless sign-in client (geekdojo/geekdojo-brain#967, TC-967-01 to
+      # TC-967-07): test/signin-test.py against rasputin-control-plane's
+      # signin-vectors.json and page fixtures, fetched at the api pin's tag,
+      # with the client's line coverage held at 70% and a missing-tag
+      # control. Red while the api pin predates the vector file, by design;
+      # it comes after the live drift check so that check still runs.
+      - name: Sign-in client tests
+        run: sh test/signin-vectors-test.sh
 
   # The /etc/shadow swap is a BUILD-ORDER claim, and nothing here used to test
   # the build. cc74fb4 put the swap in post-build.sh, where Buildroot's mkusers
