@@ -46,14 +46,14 @@
 #
 # WHY THIS VALUE
 #
-# 2026.11.1 is the STABLE firewall of the lockstep 2026.11.1 stable cut
-# (feature geekdojo/geekdojo-brain#945, E14 Identity step 0; the OpenBao v2.7.2
-# pin), built from firewall main ca3ed9e (rasputin-openwrt-firewall PR #136).
-# It carries agent 2026.11.1 -- the control-plane stable v2026.11.1 this OS
-# pins, tagged on the same CP commit (c0fe562) as dev.218, so no functional
-# agent change -- plus the rolling OpenWrt 25.12.6 feed; the Snort rules pin
-# is unchanged at db53371b. Stable bakes stable. The previous pin was dev.206
-# of the 2026.11.1 dev chain.
+# 2026.11.2-dev.211 is the firewall dev release of the 2026.11.2 dev chain
+# for the identity harness (geekdojo/geekdojo-brain#966, control-plane PR
+# #539), built from firewall main bae5317 (release run 43497475897). It
+# carries agent 2026.11.2-dev.220 -- the control-plane dev release this OS
+# pins (CP main 70d8fc2a), with no agent change against the 2026.11.1
+# stable -- plus the Snort rules re-pin to 0a955e35 (Talos republish
+# 2026-11-13, firewall PR #138) and the rolling OpenWrt 25.12.6 feed. Dev
+# bakes dev. The previous pin was the 2026.11.1 stable.
 #
 # History: 2026.09.4-dev.127 was the first pin -- the FIRST firewall release
 # that publishes manifest.json.sig (dev.126 and earlier ship no sig asset).
@@ -85,5 +85,6 @@
 # On the 2026.11.0 dev line: dev.198 (OS dev.363), dev.200 (OS dev.365).
 # 2026.11.0 (stable) was the pin of the 2026.11.0 stable OS.
 # On the 2026.11.1 dev line: dev.204 (OS dev.369), dev.206 (OS dev.371).
+# 2026.11.1 (stable) was the pin of the 2026.11.1 stable OS.
 #
-2026.11.1
+2026.11.2-dev.211
