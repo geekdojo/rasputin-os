@@ -284,6 +284,14 @@ jobs:
       # readelf is a failure, not a skip. The temurin-jre job builds it.
       - name: Temurin JRE package tests
         run: sh test/temurin-jre-package-test.sh
+      # The pinned identity service (geekdojo/geekdojo-brain#971): keycloak.mk's
+      # table per architecture, keycloak.hash covering exactly the dist, the
+      # source archive, the GPL-family jars' sources and LICENSE.txt, the
+      # Config.in and defconfig wiring, SOURCE naming no other version, and
+      # check-build-options.sh on jar fixtures, failing closed. No make,
+      # python3 or unzip is a failure, not a skip.
+      - name: Keycloak package tests
+        run: sh test/keycloak-package-test.sh
       # post-image.sh's root filesystem size check (geekdojo/geekdojo-brain
       # #969, platform.md §2.6): the report against #957's baselines, the 768
       # MiB limit at and one byte over it, every refusal, and a fixture
@@ -547,6 +555,14 @@ jobs:
       # it comes after the live drift check so that check still runs.
       - name: Sign-in client tests
         run: sh test/signin-vectors-test.sh
+      # The identity pin check (geekdojo/geekdojo-brain#971, TC-971-01 to
+      # TC-971-03, TC-971-11): package/keycloak/check-pins.sh against fixtures
+      # made from the real pins, failing closed, then against the pinned api
+      # tarball's identity/pins.json. Red while the api pin predates identity/,
+      # by design: the image would not build either. It is the job's last step,
+      # so every step above still runs and reports.
+      - name: Identity pin tests
+        run: sh test/identity-pin-test.sh
 
   # The /etc/shadow swap is a BUILD-ORDER claim, and nothing here used to test
   # the build. cc74fb4 put the swap in post-build.sh, where Buildroot's mkusers
@@ -778,12 +794,20 @@ jobs:
 
   # The pinned Java runtime (geekdojo/geekdojo-brain#969) built for real by the
   # pinned Buildroot, one leg per target architecture because the binaries
-  # differ per architecture. No defconfig enables the package before Identity
-  # 2.3, so this is the only place its install, its NEEDED-library hook and
-  # its legal-info run before then. Each leg also verifies Adoptium's
-  # signature over every tarball it downloaded against the committed key, and
-  # checks the package's CPE with Buildroot's own CVE matcher against NVD
-  # snapshots. test/temurin-jre-functional.sh says what each case proves.
+  # differ per architecture. Only the release build reaches its install, its
+  # NEEDED-library hook and its legal-info otherwise. Each leg also verifies
+  # Adoptium's signature over every tarball it downloaded against the
+  # committed key, and checks the package's CPE with Buildroot's own CVE
+  # matcher against NVD snapshots. test/temurin-jre-functional.sh says what
+  # each case proves.
+  #
+  # Then the identity service (geekdojo/geekdojo-brain#971) the same way, on
+  # the same legs: kc.sh build on the runner's own JVM with the api tarball's
+  # options, the install layout, the persisted options, legal-info with every
+  # GPL-family jar's source, the signature against the committed key, the CPE,
+  # and an unknown option, a pin mismatch and a missing identity/ each failing
+  # the build. No JVM runs emulated. test/keycloak-functional.sh says what each
+  # case proves. Red while the api pin predates identity/, by design.
   temurin-jre:
     runs-on: ubuntu-latest
     strategy:
@@ -806,3 +830,5 @@ jobs:
         run: ./scripts/init-buildroot.sh
       - name: Temurin JRE built by the pinned Buildroot (${{ matrix.arch }})
         run: sh test/temurin-jre-functional.sh "${{ matrix.arch }}"
+      - name: Keycloak built by the pinned Buildroot (${{ matrix.arch }})
+        run: sh test/keycloak-functional.sh "${{ matrix.arch }}"

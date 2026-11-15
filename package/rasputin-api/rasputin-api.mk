@@ -29,8 +29,9 @@ RASPUTIN_API_STRIP_COMPONENTS = 0
 # tarball contains `rasputin-api` + a `ui/` dir (static export), installed
 # to /usr/share/rasputin/ui — the api's RASPUTIN_UI_DIR default. Real
 # since control-plane v0.3.0; the `if` guard keeps older tarballs working.
-# It also carries openbao-policy/, the secrets store's policy text, which has
-# no such guard (below).
+# It also carries openbao-policy/, the secrets store's policy text, and
+# identity/, the identity service's release directory, neither of which has
+# such a guard (below).
 
 define RASPUTIN_API_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(@D)/rasputin-api \
@@ -48,6 +49,13 @@ define RASPUTIN_API_INSTALL_TARGET_CMDS
 	mkdir -p $(TARGET_DIR)/usr/share/rasputin/openbao-policy
 	$(INSTALL) -m 0644 $(@D)/openbao-policy/*.hcl \
 		$(TARGET_DIR)/usr/share/rasputin/openbao-policy/
+	# The identity service's release directory (geekdojo/geekdojo-brain#971,
+	# #980): keycloak-build.conf, pins.json, realm-baseline.json and theme/,
+	# installed unchanged; package/keycloak builds with it. No `if` guard, on
+	# purpose: a tarball without identity/ fails the cp and so the build,
+	# rather than shipping a service whose first start fails.
+	mkdir -p $(TARGET_DIR)/usr/share/rasputin/identity
+	cp -a $(@D)/identity/. $(TARGET_DIR)/usr/share/rasputin/identity/
 endef
 
 $(eval $(generic-package))

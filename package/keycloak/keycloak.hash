@@ -1,0 +1,30 @@
+# From https://repo1.maven.org/maven2/org/keycloak/keycloak-quarkus-dist/26.8.2/,
+# taken only after its Maven Central .asc verified against the key with
+# fingerprint 861AB50E8CC6611FB6BC01A6B8F12EA26FD6EEBA: the procedure is in
+# keycloak.mk's header, and the transcript is geekdojo-brain
+# projects/rasputin/research/identity-evidence/958/raw/signature-verification-keycloak-26.8.2.txt
+# (sha256 cc00f833b4b19a825be7d800bcfc9b1135a1e3fea97adfee3153a5398e74921a).
+sha256  dd124787283918bc597628887168333465ee2a811a389e0003569e52be7e487f  keycloak-quarkus-dist-26.8.2.tar.gz
+# Locally computed: GitHub's archive of the 26.8.2 tag, which carries no
+# signature (legal-info's source).
+sha256  686c4cf4d9cf5fe0b516fd5c7b8f74cdb980990ee5181e944560df4296e3037f  keycloak-26.8.2.tar.gz
+# Locally computed from Maven Central downloads, each of whose sha1 equals the
+# .sha1 Maven Central publishes beside it: the sources of the GPL-family jars.
+sha256  163697c229756136569fab66ac5fe05b85134b05b674bd2bc507656015a987f7  mysql-connector-j-9.7.0-sources.jar
+sha256  bf02686a016823fbbc3c07eb68560224b02ef974dcd6e7a17d55cdfb1adf72e2  jdk-classfile-backport-26-sources.jar
+sha256  142dfd2343429df2aac3e1cfacfacc21c8393112c0e0280d3628648d9b612470  jakarta.annotation-api-3.0.0-sources.jar
+sha256  fb59ec136656b409244f94e9700c409036b41e5110ee9f72d3a393d08e31d3f8  jakarta.el-api-6.0.1-sources.jar
+sha256  5a62d1258baef7887617391feda9b4de709136a30b706d7bf23d970fb6895052  jakarta.interceptor-api-2.2.0-sources.jar
+sha256  1b1f8585037ae1f34afd052013cc36788853bd4ad4ed566fe5f190b63c5008d2  jakarta.json-api-2.1.3-sources.jar
+sha256  9c5208a3f473d6a61a02617d7f382ae33dcfc7d309ba9ae5f3790a7594606abe  jakarta.mail-api-2.1.1-sources.jar
+sha256  5f0761573be5f70b9d2b6d344f888d7425901f8e177e35497639e7d667ddf07e  jakarta.persistence-api-3.2.0-sources.jar
+sha256  3b010a30da049ab9409b2685547ef6c43f1dc2637fbf3fd7acb9631c89fade89  jakarta.resource-api-2.1.0-sources.jar
+sha256  3dc226f976152a4bf78a2b7ee0c67ba0e61029f1ba6f439767d7c5c7afaeef9d  jakarta.servlet-api-6.0.0-sources.jar
+sha256  fef60299cebc6f83d6ac0d7feb025ba23a0b85cc5908769869cd741f4e482614  jakarta.transaction-api-2.0.1-sources.jar
+sha256  9daf5a26dd3dce53049784a7d5258037f7b3da7df07eaa19a02efb785719052e  jakarta.ws.rs-api-3.1.0-sources.jar
+sha256  4616cf507a47462ea5ec04654778d2e41624e21db7f41188cc553e8dce1123da  jna-5.8.0-sources.jar
+sha256  1b5608273dfc8dd94b2d6b6e8e07c0724987b2544267cd092a51155b2575dd33  angus-mail-2.0.5-sources.jar
+sha256  0fb41743b34bd76c69c4e484180cec42fa9df585deca977e72e29e7e4f3438fe  parsson-1.1.9-sources.jar
+sha256  72f28882a0f60a299c07272d573aebef171380d23ea3ee21860ad76807ee7982  mariadb-java-client-3.5.10-sources.jar
+# Locally computed from the file in the verified dist.
+sha256  cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30  LICENSE.txt

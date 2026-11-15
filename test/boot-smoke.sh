@@ -593,6 +593,21 @@ if [ "$ok" = 1 ] && [ "$fb" = 1 ]; then
   ' > "$PG_FACTS" 2>&1 || echo "identity-db facts: the guest's SSH call returned status $? (asserted below)"
 fi
 
+# The identity service's image facts (geekdojo/geekdojo-brain#971), read the
+# same way. Facts only: nothing here runs kc.sh or java, because this guest is
+# emulated and identity tests never run under emulation. kc.sh under the
+# image's shell and --optimized are proven on the bench (TC-971-26, TC-971-27).
+KC_FACTS="$WORK/keycloak.facts"
+: > "$KC_FACTS"
+if [ "$ok" = 1 ] && [ "$fb" = 1 ]; then
+  SSH_CALL_TIMEOUT=120 ssh_guest '
+    echo "version=$(cat /usr/lib/keycloak/version.txt 2>&1)"
+    echo "data=$(readlink /usr/lib/keycloak/data)"
+    echo "theme=$(readlink /usr/lib/keycloak/themes/rasputin)"
+    echo "sh=$(readlink -f /bin/sh)"
+  ' > "$KC_FACTS" 2>&1 || echo "keycloak facts: the guest's SSH call returned status $? (asserted below)"
+fi
+
 kill "$QPID" 2>/dev/null || true
 echo "----- last 60 lines of console -----"; tail -60 "$CONSOLE_LOG" || true
 echo "----- $ARCH smoke timings (seconds from qemu start) -----"
@@ -772,6 +787,28 @@ echo "identity database facts:"; sed 's/^/  /' "$PG_FACTS"
 [ "$(pg_fact running)" = 0 ] \
   || { echo "::error::$(pg_fact running) process(es) named postgres are running on the image, where nothing should start PostgreSQL yet"; exit 1; }
 echo "PostgreSQL $PG_EXPECT on the image, postgres 992:992, keycloak 991:991, postgresql.service masked and not running"
+
+# The identity service (geekdojo/geekdojo-brain#971), from the facts read over
+# SSH before the kill: the Keycloak the package pins, its two links, and the
+# busybox /bin/sh that kc.sh runs under on the node.
+KC_EXPECT="$(sed -n 's/^KEYCLOAK_VERSION = //p' "$(dirname "$0")/../package/keycloak/keycloak.mk" | tr -d '[:space:]')"
+[ -n "$KC_EXPECT" ] \
+  || { echo "::error::could not read KEYCLOAK_VERSION from package/keycloak/keycloak.mk — this assertion has nothing to compare against"; exit 1; }
+kc_fact() { sed -n "s/^$1=//p" "$KC_FACTS" | tr -d '\r' | head -1; }
+[ -s "$KC_FACTS" ] \
+  || { echo "::error::the guest did not answer the identity service's SSH query before the kill, so nothing checked the Keycloak install"; exit 1; }
+echo "identity service facts:"; sed 's/^/  /' "$KC_FACTS"
+[ "$(kc_fact version)" = "Keycloak - Version $KC_EXPECT" ] \
+  || { echo "::error::/usr/lib/keycloak/version.txt on the image says '$(kc_fact version)', expected 'Keycloak - Version $KC_EXPECT' from package/keycloak"; exit 1; }
+[ "$(kc_fact data)" = /var/lib/rasputin/keycloak/data ] \
+  || { echo "::error::/usr/lib/keycloak/data on the image links to '$(kc_fact data)', expected /var/lib/rasputin/keycloak/data"; exit 1; }
+[ "$(kc_fact theme)" = /usr/share/rasputin/identity/theme ] \
+  || { echo "::error::/usr/lib/keycloak/themes/rasputin on the image links to '$(kc_fact theme)', expected /usr/share/rasputin/identity/theme"; exit 1; }
+case "$(kc_fact sh)" in
+  */busybox) ;;
+  *) echo "::error::/bin/sh on the image resolves to '$(kc_fact sh)', expected busybox, the shell the bench proves kc.sh under"; exit 1 ;;
+esac
+echo "Keycloak $KC_EXPECT on the image, data and themes/rasputin linked, /bin/sh is busybox (facts only; kc.sh is proven on the bench)"
 
 # The booted kernel is one this rootfs was built for (geekdojo/geekdojo-brain#807).
 # A fresh flash boots its own kernel, so this is the baseline: it proves the

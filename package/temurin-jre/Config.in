@@ -9,7 +9,8 @@ config BR2_PACKAGE_TEMURIN_JRE
 	  /usr/share/licenses/temurin-jre/. The host variant, at the same
 	  pin, is in $(HOST_DIR)/lib/temurin-jre.
 
-	  Not enabled in any release until Identity 2.2.
+	  Selected by keycloak (Identity 2.3); no defconfig sets it
+	  directly.
 
 	  The upstream binaries are linked against glibc. A build-time
 	  check (check-needed.sh, a target-finalize hook) fails the build

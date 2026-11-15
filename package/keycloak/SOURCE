@@ -1,0 +1,18 @@
+Keycloak is distributed under the Apache License 2.0. The licence text is
+LICENSE.txt, in this directory.
+
+The Keycloak version in this image is named in /usr/lib/keycloak/version.txt.
+Its source code is the tag of that version in
+  https://github.com/keycloak/keycloak
+and the Rasputin OS source bundle for this release carries the same source
+archive.
+
+The jars under /usr/lib/keycloak/lib each carry their own licence and notice
+files inside them, under META-INF/. Jars offered under the GNU GPL or LGPL
+(alone, with an exception, or as one choice of a dual licence) have their
+-sources.jar from Maven Central in the Rasputin OS source bundle for this
+release.
+
+Rasputin ships the upstream release unmodified, except that kc.sh build has
+been run on it at image build time with the options in
+/usr/share/rasputin/identity/keycloak-build.conf.
