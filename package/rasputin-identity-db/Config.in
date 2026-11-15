@@ -1,0 +1,26 @@
+config BR2_PACKAGE_RASPUTIN_IDENTITY_DB
+	bool "rasputin-identity-db"
+	# The copy's own toolchain dependencies, repeated because this
+	# selects it (Buildroot's rule for select).
+	depends on BR2_USE_MMU # fork()
+	depends on !BR2_sparc # atomic.h
+	depends on BR2_USE_WCHAR
+	depends on BR2_ENABLE_LOCALE # locale_t
+	depends on BR2_TOOLCHAIN_HAS_THREADS_NPTL
+	depends on !BR2_STATIC_LIBS
+	depends on !BR2_OPTIMIZE_FAST
+	# -Dsystemd=enabled, so the identity unit can be Type=notify.
+	depends on BR2_INIT_SYSTEMD
+	select BR2_PACKAGE_RASPUTIN_POSTGRESQL
+	# -Dssl=openssl: the database listens over TLS only. Selected here so
+	# that never depends on another package keeping OpenSSL in the image.
+	select BR2_PACKAGE_OPENSSL
+	help
+	  The identity database (geekdojo/geekdojo-brain#972): the carried
+	  PostgreSQL 18 in package/rasputin-postgresql, built with TLS and
+	  systemd notify support, and the static users of the identity
+	  service (keycloak, 991) and its database (postgres, 992).
+
+	  This package installs nothing itself. Buildroot's own
+	  postgresql.service is masked in the rootfs overlay; the identity
+	  units start the database on the nodes whose role needs it.

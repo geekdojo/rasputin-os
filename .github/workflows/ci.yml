@@ -290,6 +290,14 @@ jobs:
       # post-image.sh run that stops before staging anything when over.
       - name: Root filesystem size check tests
         run: sh test/rootfs-size-check-test.sh
+      # The identity database's packages (geekdojo/geekdojo-brain#972): the
+      # carried PostgreSQL's major tripwire (18 reads, a minor bump reads, any
+      # other major is refused with the guard's sentence), Buildroot's own
+      # POSTGRESQL_* values unable to reach the copy, its hash line and pg_config
+      # placeholders, and the wrapper's two static users. Real GNU make; no
+      # make is a failure, not a skip.
+      - name: Identity database package tests
+        run: sh test/identity-db-package-test.sh
       # The secrets store's unit (geekdojo/geekdojo-brain#755): every directive
       # at its value and in its section, the forbidden ones (a watchdog bao never
       # pets, network-online, MemoryHigh, a rate-limit override, a chosen restart
@@ -534,6 +542,14 @@ jobs:
         run: ./scripts/init-buildroot.sh
       - name: Rootfs /etc/shadow ordering + baked-password guard
         run: sh test/rootfs-shadow-test.sh
+      # The identity database under the same pinned Buildroot
+      # (geekdojo/geekdojo-brain#972): both defconfigs select it with TLS and
+      # systemd notify and leave Buildroot's own postgresql off, the security
+      # watch's CPE matches postgresql:postgresql, Buildroot's own mkusers gives
+      # keycloak 991 and postgres 992 and renumbers nobody, and a carried major
+      # other than 18 stops Buildroot's make.
+      - name: Identity database selection, CPE, static users and major guard
+        run: sh test/identity-db-buildroot-test.sh
 
   # release.yml's sign step runs scripts/verify-bundle.sh on every signed
   # .raucb: rauc info under the system.conf + keyring read out of that SKU's

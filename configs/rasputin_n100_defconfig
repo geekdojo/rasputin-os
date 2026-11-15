@@ -189,6 +189,11 @@ BR2_PACKAGE_CADDY=y
 # The secrets store binary and its static user, at the pin in package/openbao
 # (geekdojo/geekdojo-brain#798). No unit yet: nothing runs it.
 BR2_PACKAGE_OPENBAO=y
+# The identity database: the carried PostgreSQL 18 (package/rasputin-postgresql)
+# with TLS and systemd notify, and the keycloak (991) and postgres (992) static
+# users (geekdojo/geekdojo-brain#972). Every node carries it; the identity units
+# decide where it runs.
+BR2_PACKAGE_RASPUTIN_IDENTITY_DB=y
 
 # --- rootfs: squashfs (read-only, verity-friendly) ---
 BR2_TARGET_ROOTFS_SQUASHFS=y
