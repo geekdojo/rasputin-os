@@ -574,6 +574,25 @@ guest_diag() {
 }
 if guest_diag_needed; then guest_diag; fi
 
+# The identity database's image facts (geekdojo/geekdojo-brain#972), read in
+# one SSH call while the guest still runs, here before the kill, and asserted
+# after it with the rest. Only once firstboot has completed: it is what puts
+# the seed's key where dropbear reads it. A guest that does not answer leaves
+# the file empty, and the assertion says so.
+PG_FACTS="$WORK/identity-db.facts"
+: > "$PG_FACTS"
+if [ "$ok" = 1 ] && [ "$fb" = 1 ]; then
+  SSH_CALL_TIMEOUT=120 ssh_guest '
+    echo "version=$(postgres --version 2>&1)"
+    echo "postgres=$(id -u postgres):$(id -g postgres)"
+    echo "keycloak=$(id -u keycloak):$(id -g keycloak)"
+    echo "enabled=$(systemctl is-enabled postgresql.service 2>/dev/null)"
+    echo "active=$(systemctl show -P ActiveState postgresql.service)"
+    echo "failed=$(systemctl list-units --failed --plain --no-legend postgresql.service | grep -c postgresql)"
+    echo "running=$(cat /proc/[0-9]*/comm 2>/dev/null | grep -cx postgres)"
+  ' > "$PG_FACTS" 2>&1 || echo "identity-db facts: the guest's SSH call returned status $? (asserted below)"
+fi
+
 kill "$QPID" 2>/dev/null || true
 echo "----- last 60 lines of console -----"; tail -60 "$CONSOLE_LOG" || true
 echo "----- $ARCH smoke timings (seconds from qemu start) -----"
@@ -722,6 +741,37 @@ case "$TS_LINE" in
   *) echo "::error::/usr/sbin/tailscaled --version did not report ${TS_EXPECT} (binary=none means the path does not exec — a symlink loop shows up exactly like this): $TS_LINE"; exit 1 ;;
 esac
 echo "tailscaled active, daemon and /usr/sbin/tailscaled both report ${TS_EXPECT}"
+
+# The identity database (geekdojo/geekdojo-brain#972), from the facts read over
+# SSH before the kill. The image carries our own PostgreSQL at the version its
+# package pins, whose major is 18 (a literal here: a different major is a
+# planned upgrade, never a bump), the two static users at their fixed ids, and
+# Buildroot's own postgresql.service masked after the real preset-all, so
+# nothing starts it.
+PG_EXPECT="$(sed -n 's/^RASPUTIN_POSTGRESQL_VERSION = //p' "$(dirname "$0")/../package/rasputin-postgresql/rasputin-postgresql.mk" | tr -d '[:space:]')"
+[ -n "$PG_EXPECT" ] \
+  || { echo "::error::could not read RASPUTIN_POSTGRESQL_VERSION from package/rasputin-postgresql/rasputin-postgresql.mk — this assertion has nothing to compare against"; exit 1; }
+[ "${PG_EXPECT%%.*}" = 18 ] \
+  || { echo "::error::package/rasputin-postgresql pins PostgreSQL $PG_EXPECT, whose major is not 18 — a major change is the planned upgrade item, never a bump"; exit 1; }
+pg_fact() { sed -n "s/^$1=//p" "$PG_FACTS" | tr -d '\r' | head -1; }
+[ -s "$PG_FACTS" ] \
+  || { echo "::error::the guest did not answer the identity database's SSH query before the kill, so nothing checked the PostgreSQL binary, its users or its masked unit"; exit 1; }
+echo "identity database facts:"; sed 's/^/  /' "$PG_FACTS"
+[ "$(pg_fact version)" = "postgres (PostgreSQL) $PG_EXPECT" ] \
+  || { echo "::error::postgres --version on the image is '$(pg_fact version)', expected 'postgres (PostgreSQL) $PG_EXPECT' from package/rasputin-postgresql"; exit 1; }
+[ "$(pg_fact postgres)" = "992:992" ] \
+  || { echo "::error::the postgres user is uid:gid '$(pg_fact postgres)' on the image, expected 992:992 from package/rasputin-identity-db"; exit 1; }
+[ "$(pg_fact keycloak)" = "991:991" ] \
+  || { echo "::error::the keycloak user is uid:gid '$(pg_fact keycloak)' on the image, expected 991:991 from package/rasputin-identity-db"; exit 1; }
+[ "$(pg_fact enabled)" = masked ] \
+  || { echo "::error::systemctl is-enabled postgresql.service says '$(pg_fact enabled)', expected masked — the /dev/null symlink in the rootfs overlay is gone, or preset-all overrode it, and Buildroot's own unit would start a database on every node"; exit 1; }
+[ "$(pg_fact active)" = inactive ] \
+  || { echo "::error::postgresql.service is '$(pg_fact active)' on the image, expected inactive: something started Buildroot's masked unit"; exit 1; }
+[ "$(pg_fact failed)" = 0 ] \
+  || { echo "::error::postgresql.service is listed by systemctl --failed on the image"; exit 1; }
+[ "$(pg_fact running)" = 0 ] \
+  || { echo "::error::$(pg_fact running) process(es) named postgres are running on the image, where nothing should start PostgreSQL yet"; exit 1; }
+echo "PostgreSQL $PG_EXPECT on the image, postgres 992:992, keycloak 991:991, postgresql.service masked and not running"
 
 # The booted kernel is one this rootfs was built for (geekdojo/geekdojo-brain#807).
 # A fresh flash boots its own kernel, so this is the baseline: it proves the

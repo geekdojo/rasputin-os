@@ -9,6 +9,8 @@ source "$BR2_EXTERNAL_RASPUTIN_PATH/package/caddy/Config.in"
 source "$BR2_EXTERNAL_RASPUTIN_PATH/package/openbao/Config.in"
 source "$BR2_EXTERNAL_RASPUTIN_PATH/package/rasputin-agent/Config.in"
 source "$BR2_EXTERNAL_RASPUTIN_PATH/package/rasputin-api/Config.in"
+source "$BR2_EXTERNAL_RASPUTIN_PATH/package/rasputin-identity-db/Config.in"
+source "$BR2_EXTERNAL_RASPUTIN_PATH/package/rasputin-postgresql/Config.in"
 source "$BR2_EXTERNAL_RASPUTIN_PATH/package/tailscale-bin/Config.in"
 source "$BR2_EXTERNAL_RASPUTIN_PATH/package/temurin-jre/Config.in"
 
