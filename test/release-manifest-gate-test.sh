@@ -4,7 +4,8 @@
 #
 # Run:  bash test/release-manifest-gate-test.sh
 #
-# Builds a throwaway release-out/ with two SKUs (a .raucb and an .img.xz each),
+# Builds a throwaway release-out/ with two SKUs (a .raucb, an .img.xz and a
+# -source.tar each, the last since geekdojo/geekdojo-brain#970),
 # a manifest.json in the schema release.yml's sign step writes, and a stand-in
 # manifest.json.sig, then checks every exit status of the gate against copies of
 # it: intact, truncated, altered, missing, extra, pin mismatches, malformed
@@ -30,14 +31,18 @@ mkdir -p "$fix"
 for sku in n100 rpi; do
 	raucb="rasputin-os-$sku-$ver.raucb"
 	image="rasputin-os-$sku-$ver.img.xz"
+	source="rasputin-os-$sku-$ver-source.tar"
 	for i in $(seq 1 200); do printf 'bundle %s line %d\n' "$sku" "$i"; done >"$fix/$raucb"
 	for i in $(seq 1 400); do printf 'image %s line %d\n' "$sku" "$i"; done >"$fix/$image"
+	for i in $(seq 1 300); do printf 'source %s line %d\n' "$sku" "$i"; done >"$fix/$source"
 	jq -nc --arg sku "$sku" \
 		--arg raucb "$raucb" --arg raucb_sha "$(sha_of "$fix/$raucb")" --argjson raucb_sz "$(size_of "$fix/$raucb")" \
 		--arg image "$image" --arg imgxz_sha "$(sha_of "$fix/$image")" --argjson imgxz_sz "$(size_of "$fix/$image")" \
+		--arg source "$source" --arg src_sha "$(sha_of "$fix/$source")" --argjson src_sz "$(size_of "$fix/$source")" \
 		'{sku:$sku, architecture:"x", compatible:"x",
 		  raucb:$raucb, sha256:$raucb_sha, sizeBytes:$raucb_sz,
 		  image:$image, imageSha256:$imgxz_sha, imageSizeBytes:$imgxz_sz,
+		  source:$source, sourceSha256:$src_sha, sourceSizeBytes:$src_sz,
 		  signedBy:"test", buildDate:"2026-10-31T00:00:00Z"}' >>"$tmp/artifacts.jsonl"
 done
 jq -n --arg version "$ver" --slurpfile artifacts "$tmp/artifacts.jsonl" \
@@ -50,6 +55,8 @@ n100_raucb="rasputin-os-n100-$ver.raucb"
 n100_img="rasputin-os-n100-$ver.img.xz"
 rpi_raucb="rasputin-os-rpi-$ver.raucb"
 rpi_img="rasputin-os-rpi-$ver.img.xz"
+n100_src="rasputin-os-n100-$ver-source.tar"
+rpi_src="rasputin-os-rpi-$ver-source.tar"
 
 # fresh NAME — a new copy of the fixture at $tmp/NAME; prints its path.
 fresh() {
@@ -106,14 +113,14 @@ d="$(fresh intact)"
 check "intact release passes" 0 "$d" "$pin" "$sigpin" || true
 ok_names="$(awk '$1 == "ok" {print $2}' <<<"$out" | sort)"
 ls_names="$(for f in "$d"/*; do basename -- "$f"; done | sort)"
-if [ "$ok_names" = "$ls_names" ] && [ "$(wc -l <<<"$ok_names" | tr -d ' ')" = 6 ]; then
-	printf 'ok   %s\n' "intact release: the ok names are exactly the 6 files in the directory"
+if [ "$ok_names" = "$ls_names" ] && [ "$(wc -l <<<"$ok_names" | tr -d ' ')" = 8 ]; then
+	printf 'ok   %s\n' "intact release: the ok names are exactly the 8 files in the directory"
 else
 	printf 'FAIL %s\nok names:\n%s\nls:\n%s\n' "intact release: ok names differ from the directory" "$ok_names" "$ls_names"
 	failures=$((failures + 1))
 fi
 has "intact release: ok line carries bytes and sha256" "ok $rpi_img $(size_of "$d/$rpi_img") $(sha_of "$d/$rpi_img")"
-has "intact release: summary line" "all 6 files in $d match the signed manifest"
+has "intact release: summary line" "all 8 files in $d match the signed manifest"
 
 # TC-902-02: an image truncated under the same name (the dev.351 shape).
 d="$(fresh truncated)"
@@ -199,6 +206,42 @@ check "an empty manifest pin refuses" 2 "$d" "" "$sigpin" || true
 check "a 63-character pin refuses" 2 "$d" "${pin:0:63}" "$sigpin" || true
 check "a non-hex pin refuses" 2 "$d" "$pin" "$(printf 'g%.0s' $(seq 1 64))" || true
 check "a missing directory refuses" 2 "$tmp/no-such-dir" "$pin" "$sigpin" || true
+
+# TC-970-17: the source bundle is gated like every other asset.
+# (a) intact: an ok line for each source tar.
+d="$(fresh src-intact)"
+check "TC-970-17 (a) intact release with source bundles passes" 0 "$d" "$pin" "$sigpin" || true
+has "TC-970-17 (a) ok line for the n100 source tar" "ok $n100_src $(size_of "$d/$n100_src") $(sha_of "$d/$n100_src")"
+has "TC-970-17 (a) ok line for the rpi source tar" "ok $rpi_src $(size_of "$d/$rpi_src") $(sha_of "$d/$rpi_src")"
+# (b) truncated source tar.
+d="$(fresh src-truncated)"
+want_bytes="$(size_of "$d/$rpi_src")"
+head -c 100 "$fix/$rpi_src" >"$d/$rpi_src"
+check "TC-970-17 (b) truncated source tar fails" 1 "$d" "$pin" "$sigpin" || true
+has "TC-970-17 (b) names the source tar and both sizes" "$rpi_src is 100 bytes, but the signed manifest gives $want_bytes."
+# (c) same size, one byte changed.
+d="$(fresh src-altered)"
+want_sha="$(sha_of "$d/$n100_src")"
+{ printf 'X'; tail -c +2 "$fix/$n100_src"; } >"$d/$n100_src"
+check "TC-970-17 (c) altered source tar (same size) fails" 1 "$d" "$pin" "$sigpin" || true
+has "TC-970-17 (c) names the source tar and both sha256 values" "$n100_src has sha256 $(sha_of "$d/$n100_src"), but the signed manifest gives $want_sha."
+# (d) a source tar missing from the directory.
+d="$(fresh src-missing)"
+rm "$d/$n100_src"
+check "TC-970-17 (d) missing source tar fails" 1 "$d" "$pin" "$sigpin" || true
+has "TC-970-17 (d) names the missing source tar" "$n100_src is in the signed manifest but missing"
+# (e) a manifest artifact with no source field: the check cannot pass.
+d="$(fresh src-unlisted)"
+p="$(set_manifest "$d" 'del(.artifacts[1].source, .artifacts[1].sourceSha256, .artifacts[1].sourceSizeBytes)')"
+rm "$d/$rpi_src"
+check "TC-970-17 (e) an artifact with no source bundle refuses" 2 "$d" "$p" "$sigpin" || true
+has "TC-970-17 (e) says the source bundle is missing" "has an artifact with no source bundle"
+lacks "TC-970-17 (e) prints no summary" "match the signed manifest"
+# (f) an extra unlisted source tar.
+d="$(fresh src-extra)"
+printf 'stray source\n' >"$d/rasputin-os-n100-2026.01.1-source.tar"
+check "TC-970-17 (f) extra unlisted source tar fails" 1 "$d" "$pin" "$sigpin" || true
+has "TC-970-17 (f) names the extra source tar" "rasputin-os-n100-2026.01.1-source.tar would be published but is not in the signed manifest"
 
 if [ "$failures" -ne 0 ]; then
 	echo "$failures release-manifest-gate test(s) failed"

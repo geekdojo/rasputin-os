@@ -440,6 +440,21 @@ jobs:
       # Python; nothing here touches the network.
       - name: OpenBao watch tests
         run: python3 -I test/openbao-watch-test.py
+      # release.yml's source-bundle job (geekdojo/geekdojo-brain#970): the
+      # legal-info check (GPL-family sources saved, unknown licences, the JRE's
+      # JDK source) and the baked-image check (reviewed entries, the dpkg
+      # reader on the pinned Headscale image's own package data, the fetch
+      # plan), every status, against fixture trees. CI-side Python; nothing
+      # here touches the network.
+      - name: GPL source check tests
+        run: python3 -I test/gpl-sources-test.py
+      # The rest of that job and its sign and publish halves: the snapshot
+      # fetch's sha1 check against a fake curl, the bundle's contents and its
+      # checksum list, the 2 GiB limit, the release notes' source links, the
+      # per-SKU manifest merge, and release-version.sh against the inline
+      # copies it replaced. CI-side bash; nothing here touches the network.
+      - name: Source bundle tests
+        run: bash test/source-bundle-test.sh
       # cve-watch's rpi kernel pin watch (geekdojo/geekdojo-brain#1062): the
       # pin parse against the real defconfig, the Buildroot relation (equal,
       # behind by ancestry or by version across a divergence, newer, diverged),
