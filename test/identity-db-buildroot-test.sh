@@ -214,7 +214,7 @@ check "TC-972-05 major 19: stderr carries the guard's sentence and make's Stop" 
 	"$(cat "$TMP/m19.err")"
 br "$ROOT" "$TMP/out-n100" printvars VARS=RASPUTIN_POSTGRESQL_VERSION > "$TMP/ctl.out" 2> "$TMP/ctl.err"; rc=$?
 check "TC-972-05 control: the real tree exits 0 and prints $V" \
-	"$(yes_if [ "$rc" -eq 0 ] && [ "$(cat "$TMP/ctl.out")" = "RASPUTIN_POSTGRESQL_VERSION=$V" ])" \
+	"$(yes_if eval '[ "$rc" -eq 0 ] && [ "$(cat "$TMP/ctl.out")" = "RASPUTIN_POSTGRESQL_VERSION=$V" ]')" \
 	"exit $rc, stdout: $(cat "$TMP/ctl.out"), stderr: $(cat "$TMP/ctl.err")"
 
 echo

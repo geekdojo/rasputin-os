@@ -119,7 +119,7 @@ for var in VERSION SOURCE SITE; do
 	forced=$(mk_var "$MK" "RASPUTIN_POSTGRESQL_$var" POSTGRESQL_VERSION=19.1 \
 		POSTGRESQL_SOURCE=postgresql-19.1.tar.bz2 POSTGRESQL_SITE=https://example.invalid/v19.1)
 	check "TC-972-04 RASPUTIN_POSTGRESQL_$var is unchanged by Buildroot's POSTGRESQL_*" \
-		"$(yes_if [ -n "$plain" ] && [ "$plain" = "$forced" ])" "plain '$plain', forced '$forced'"
+		"$(yes_if eval '[ -n "$plain" ] && [ "$plain" = "$forced" ]')" "plain '$plain', forced '$forced'"
 done
 # Comments are left out: the header names Buildroot's directory as the source.
 check "TC-972-04 the .mk's make text names no package/postgresql/ path" \
