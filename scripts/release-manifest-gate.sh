@@ -12,8 +12,12 @@
 # and the publish, over exactly the files DIR/* expands to:
 #
 #   - every file other than manifest.json and manifest.json.sig must be named in
-#     manifest.json's artifacts[] (as .raucb or .image), with the size and
-#     sha256 the manifest gives (sizeBytes/sha256, imageSizeBytes/imageSha256);
+#     manifest.json's artifacts[] (as .raucb, .image or .source), with the size
+#     and sha256 the manifest gives (sizeBytes/sha256,
+#     imageSizeBytes/imageSha256, sourceSizeBytes/sourceSha256);
+#   - every artifact must name its source bundle, the GPL source of that SKU's
+#     images (geekdojo/geekdojo-brain#970): a manifest without one cannot
+#     publish;
 #     size is checked first, so a truncation reads as "N bytes, but ... gives M";
 #   - every file the manifest names must be present;
 #   - manifest.json and manifest.json.sig are not in the manifest, so each must
@@ -31,7 +35,8 @@
 #   2  the check cannot run: wrong argument count, a pin that is not 64
 #      lower-case hex characters, an unreadable DIR or file, or a manifest that
 #      does not parse, has no artifacts, or has an entry with a missing name,
-#      sha256 or size, a duplicate name, or a name containing "/"
+#      sha256 or size (a missing source bundle included), a duplicate name, or
+#      a name containing "/"
 #
 # Needs jq and sha256sum on PATH. test/release-manifest-gate-test.sh covers
 # every status.
@@ -81,10 +86,14 @@ seen="$tmp/seen"
 jq -e . "$dir/$MANIFEST" >/dev/null 2>&1 || refuse "$MANIFEST is not valid JSON."
 jq -e '(.artifacts | type) == "array" and (.artifacts | length) > 0' "$dir/$MANIFEST" >/dev/null 2>&1 ||
 	refuse "$MANIFEST has no artifacts."
-# Each artifact names two files: the RAUC bundle and the compressed image. A
-# missing or null field becomes an empty column and is refused below.
+# Each artifact names three files: the RAUC bundle, the compressed image and
+# the source bundle. A missing or null field becomes an empty column and is
+# refused below; a missing source bundle is named as such first.
+jq -e 'all(.artifacts[]; (.source // "") != "")' "$dir/$MANIFEST" >/dev/null 2>&1 ||
+	refuse "$MANIFEST has an artifact with no source bundle, so its GPL source would not ship."
 jq -r '.artifacts[]
-	| ([.raucb, .sha256, .sizeBytes], [.image, .imageSha256, .imageSizeBytes])
+	| ([.raucb, .sha256, .sizeBytes], [.image, .imageSha256, .imageSizeBytes],
+	   [.source, .sourceSha256, .sourceSizeBytes])
 	| map(if . == null then "" else tostring end)
 	| @tsv' "$dir/$MANIFEST" >"$expected" ||
 	refuse "$MANIFEST artifacts could not be read."

@@ -30,8 +30,10 @@ name: release
 #       it before anything builds.
 #
 # Pipeline: build → boot smokes (fresh image) → sign → UPDATE SMOKE (a published
-# image updated to this build's signed bundle) → publish. Publishing needs every
-# one of them green; see each job for why. The update smoke exists because
+# image updated to this build's signed bundle) → publish, with source-bundle
+# (each SKU's GPL source, geekdojo/geekdojo-brain#970) running beside the build
+# and feeding sign. Publishing needs every one of them green; see each job for
+# why. The update smoke exists because
 # nothing tested the update path and dev.276 shipped a bundle that left the old
 # kernel under its rootfs (geekdojo/geekdojo-brain#807).
 
@@ -199,28 +201,14 @@ jobs:
         id: ver
         # TARGET_VERSION = the org var RASPUTIN_VERSION (current dev target,
         # YYYY.MM.MICRO), shared across the three Rasputin repos for lockstep.
-        # Only the dispatch (dev) path reads it; tagged releases use the tag.
+        # Only the dispatch (dev) path reads it; tagged releases use the tag
+        # (`-dev` in the tag → dev channel, plain CalVer → stable). A dispatch's
+        # dev.N is this workflow's run number. One script decides it for the
+        # build, source-bundle and sign jobs, so the artifact names they agree
+        # on cannot drift apart.
         env:
           TARGET_VERSION: ${{ vars.RASPUTIN_VERSION }}
-        run: |
-          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-            echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-            # `-dev` suffix in the tag → dev channel (e.g. 2026.07.1-dev.1).
-            # Plain CalVer (e.g. 2026.07.1) → stable.
-            case "${GITHUB_REF_NAME}" in
-              *-dev*) echo "channel=dev"    >> "$GITHUB_OUTPUT" ;;
-              *)      echo "channel=stable" >> "$GITHUB_OUTPUT" ;;
-            esac
-          else
-            # Dev build: base from the org var, dev.N = this workflow's run
-            # number (monotonic per repo; gaps from skipped/failed runs are fine).
-            if [ -z "${TARGET_VERSION}" ]; then
-              echo "::error::org var RASPUTIN_VERSION is unset — set it to the current dev target (e.g. 2026.07.1): gh variable set RASPUTIN_VERSION --org geekdojo --body 2026.07.1 --visibility all"
-              exit 1
-            fi
-            echo "version=${TARGET_VERSION}-dev.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
-            echo "channel=dev" >> "$GITHUB_OUTPUT"
-          fi
+        run: ./scripts/release-version.sh >> "$GITHUB_OUTPUT"
 
       - name: Init Buildroot (pinned release)
         run: ./scripts/init-buildroot.sh
@@ -604,6 +592,175 @@ jobs:
           path: /tmp/console.log
 
 
+  # Each SKU's GPL source bundle, rasputin-os-<sku>-<version>-source.tar
+  # (geekdojo/geekdojo-brain#970). A release publishes it beside the SKU's
+  # .img.xz and .raucb, signed into that SKU's manifest.json entry and linked
+  # from the release notes, so every GPL component in the image ships with its
+  # complete corresponding source.
+  #
+  # WHAT IT CHECKS, and stops the release on (sign needs this job green):
+  #   - every GPL-family target package has its source saved by Buildroot's
+  #     `make legal-info`, no package's licence is unknown (our own api and
+  #     agent excepted; the bundle README links their source), and the JRE
+  #     saves Adoptium's JDK source rather than its binary
+  #     (scripts/gpl-sources.py legal-info);
+  #   - every baked container image has a reviewed entry in
+  #     scripts/baked-image-sources.json that agrees with its package database,
+  #     and each Debian source package in it is fetched from
+  #     snapshot.debian.org with its sha1 checked (gpl-sources.py baked-images,
+  #     scripts/source-bundle.sh fetch);
+  #   - the staged legal-info verifies against its own legal-info.sha256, and
+  #     the bundle is under GitHub's 2 GiB per-asset limit
+  #     (source-bundle.sh pack).
+  #
+  # WHY HERE, AND NOT IN THE BUILD JOB. legal-info needs each package
+  # downloaded, extracted and patched, not built (pkg-generic.mk:
+  # <pkg>-legal-info depends on -patch and -source), so it runs on a free
+  # ubuntu-latest runner beside the metered 16-core build instead of adding to
+  # it. It still builds the cross toolchain, host-cmake, ccache and the Go
+  # bootstrap: -source waits on each package's download dependencies, and
+  # every Go package adds host-go, which needs the toolchain. That is why it
+  # restores the newest br-<sku>- cache: read only, never saved, so the build
+  # job's rolling entry stays the one that is kept. Anything the cache lacks,
+  # Buildroot downloads and checks against the package's .hash.
+  #
+  # THIS JOB IS ALSO THE FUNCTIONAL TEST of that code against real Buildroot
+  # output and the real baked image. Run it on a branch with
+  #   gh workflow run release.yml --ref <branch> -f full_build=true
+  # (publish=false; sign, update-smoke and publish skip off main). What a green
+  # run proves: the checks above pass on this tree, and source-<sku>-<version>
+  # plus source-meta-<sku>-<version> are uploaded for both SKUs, with the
+  # release notes in the n100 leg's step summary. What it does not prove: the
+  # attach to a GitHub release, which only a publishing run from main does.
+  source-bundle:
+    needs: validate
+    # The build job's condition: every run that builds images bundles their
+    # source.
+    if: ${{ startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && (inputs.full_build == true || inputs.full_build == 'true' || inputs.publish == true || inputs.publish == 'true')) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - sku: rpi
+            defconfig: rasputin_rpi_defconfig
+            arch: arm64
+          - sku: n100
+            defconfig: rasputin_n100_defconfig
+            arch: amd64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false   # Buildroot is added by the init script (pinned)
+
+      - name: Compute version (CalVer, the build job's script)
+        id: ver
+        env:
+          TARGET_VERSION: ${{ vars.RASPUTIN_VERSION }}
+        run: ./scripts/release-version.sh >> "$GITHUB_OUTPUT"
+
+      # The stock runner's disk is too small for a Buildroot tree, its cache
+      # and a 1 GB bundle side by side. The preinstalled dotnet, android, ghc
+      # and CodeQL trees are about 25-30 GB and nothing here uses them (the
+      # recipe the build job dropped when it moved to the 600 GB runner).
+      - name: Reclaim disk
+        run: |
+          set -eu
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Init Buildroot (pinned release)
+        run: ./scripts/init-buildroot.sh
+
+      - name: Restore Buildroot dl + ccache (read only)
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            dl
+            ~/.buildroot-ccache
+          # No entry is ever saved under this key, so the restore always falls
+          # to the prefix: the newest br-<sku>- entry the build job saved.
+          key: br-${{ matrix.sku }}-source-bundle-${{ github.run_id }}
+          restore-keys: |
+            br-${{ matrix.sku }}-
+
+      - name: Collect legal info
+        env:
+          BR2_DL_DIR: ${{ github.workspace }}/dl
+          SKU: ${{ matrix.sku }}
+          DEFCONFIG: ${{ matrix.defconfig }}
+        run: |
+          set -eu
+          make -C buildroot BR2_EXTERNAL="$GITHUB_WORKSPACE" O="$GITHUB_WORKSPACE/output/$SKU" "$DEFCONFIG"
+          make -C buildroot BR2_EXTERNAL="$GITHUB_WORKSPACE" O="$GITHUB_WORKSPACE/output/$SKU" legal-info
+          du -sh "output/$SKU/legal-info" "output/$SKU/legal-info/sources" "output/$SKU/legal-info/host-sources"
+          df -h /
+
+      - name: Every GPL package's source is saved
+        env:
+          SKU: ${{ matrix.sku }}
+        run: python3 -I scripts/gpl-sources.py legal-info "output/$SKU/legal-info"
+
+      - name: Bake mesh container images
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARCH: ${{ matrix.arch }}
+        run: scripts/bake-mesh-images.sh "$ARCH" "$GITHUB_WORKSPACE/mesh-images"
+
+      - name: Every baked image has a reviewed source entry
+        run: |
+          set -eu
+          python3 -I scripts/gpl-sources.py baked-images \
+            --images mesh-images --entries scripts/baked-image-sources.json > baked-plan.tsv
+          cat baked-plan.tsv
+
+      - name: Fetch the baked images' Debian sources
+        run: scripts/source-bundle.sh fetch baked-plan.tsv baked-sources
+
+      - name: Pack the source bundle
+        env:
+          SKU: ${{ matrix.sku }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -eu
+          scripts/source-bundle.sh pack "$SKU" "$VERSION" "output/$SKU/legal-info" baked-sources buildroot source-out
+          ls -l source-out
+          cat "source-out/source-$SKU.json"
+          df -h /
+
+      # The bundle is already compressed archives, so compressing it again
+      # would only cost time. One day, as release-bundles: long enough for
+      # publish.
+      - name: Upload the source bundle
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: source-${{ matrix.sku }}-${{ steps.ver.outputs.version }}
+          path: source-out/rasputin-os-${{ matrix.sku }}-${{ steps.ver.outputs.version }}-source.tar
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+      - name: Upload the source bundle's meta
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: source-meta-${{ matrix.sku }}-${{ steps.ver.outputs.version }}
+          path: source-out/source-${{ matrix.sku }}.json
+          retention-days: 1
+          if-no-files-found: error
+
+      # The notes publish will write, shown on every run so a branch dispatch
+      # shows them too. Once, from the n100 leg.
+      - name: Release notes
+        if: matrix.sku == 'n100'
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          CHANNEL: ${{ steps.ver.outputs.channel }}
+        run: |
+          set -eu
+          scripts/release-notes.sh "$VERSION" "$CHANNEL" "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" n100 rpi >> "$GITHUB_STEP_SUMMARY"
+
   # Discrete signing job — the leaf key is scoped to HERE and nowhere else. It
   # comes from the organisation's RASPUTIN_LEAF_* secrets, is staged and
   # preflighted by the organisation's shared rasputin-sign action onto an
@@ -624,7 +781,7 @@ jobs:
   # this run's `release-bundles` artifact, kept for one day (retention-days
   # below), long enough for the update smoke and the publish job and no longer.
   sign:
-    needs: [build, smoke-amd64, smoke-arm64]
+    needs: [build, smoke-amd64, smoke-arm64, source-bundle]
     # A failing smoke must BLOCK publication. It did not: `!cancelled()` in the
     # condition below meant the job ran on any non-cancelled outcome, so
     # 2026.07.9-dev.136 published to the dev channel with a red smoke
@@ -645,7 +802,10 @@ jobs:
     # is blocked if either SKU fails to boot. If the rpi image is red and an
     # amd64-only publish is genuinely wanted, that is a decision to make
     # explicitly, not a default.
-    if: ${{ !cancelled() && needs.smoke-amd64.result == 'success' && needs.smoke-arm64.result == 'success' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && (inputs.full_build == true || inputs.full_build == 'true' || inputs.publish == true || inputs.publish == 'true'))) }}
+    #
+    # Both source bundles must be green too: an image whose GPL source failed
+    # to collect is not signed, so it cannot publish (geekdojo/geekdojo-brain#970).
+    if: ${{ !cancelled() && needs.smoke-amd64.result == 'success' && needs.smoke-arm64.result == 'success' && needs.source-bundle.result == 'success' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && (inputs.full_build == true || inputs.full_build == 'true' || inputs.publish == true || inputs.publish == 'true'))) }}
     runs-on: ubuntu-latest
     # The leaf comes from the org secrets RASPUTIN_LEAF_* (selected repos: this
     # one and the firewall). Only main dispatches and CalVer tag pushes reach
@@ -665,26 +825,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Compute version (CalVer, same logic as build)
+      - name: Compute version (CalVer, the build job's script)
         id: ver
         env:
           TARGET_VERSION: ${{ vars.RASPUTIN_VERSION }}
-        run: |
-          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-            VERSION="${GITHUB_REF_NAME}"
-          else
-            if [ -z "${TARGET_VERSION}" ]; then
-              echo "::error::org var RASPUTIN_VERSION is unset — cannot version a dev build"; exit 1
-            fi
-            VERSION="${TARGET_VERSION}-dev.${GITHUB_RUN_NUMBER}"
-          fi
-          case "$VERSION" in
-            *-dev*) CHANNEL=dev    ; PRERELEASE=true  ;;
-            *)      CHANNEL=stable ; PRERELEASE=false ;;
-          esac
-          echo "version=$VERSION"       >> "$GITHUB_OUTPUT"
-          echo "channel=$CHANNEL"       >> "$GITHUB_OUTPUT"
-          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
+        run: ./scripts/release-version.sh >> "$GITHUB_OUTPUT"
 
       # squashfs-tools: scripts/verify-bundle.sh reads the device RAUC config
       # out of each SKU's rootfs.img with unsquashfs. Through the package
@@ -713,6 +858,20 @@ jobs:
         with:
           name: rpi-${{ steps.ver.outputs.version }}
           path: artifacts/rpi-${{ steps.ver.outputs.version }}
+          digest-mismatch: error
+      # Each SKU's source-bundle meta (name, sha256, size of its -source.tar),
+      # by name like the images above. The bundles themselves are not needed
+      # here: their hashes were taken where they were made, and the publish
+      # gate checks the downloaded tars against what this job signs.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: source-meta-n100-${{ steps.ver.outputs.version }}
+          path: source-meta
+          digest-mismatch: error
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: source-meta-rpi-${{ steps.ver.outputs.version }}
+          path: source-meta
           digest-mismatch: error
 
       - name: Layout artifacts (one dir per SKU)
@@ -840,11 +999,17 @@ jobs:
           # empty file, so the field is added only when there is a floor and
           # is never "".
           floor=$(sh scripts/security-floor.sh security-floor.txt "${{ steps.ver.outputs.version }}")
+          # Each SKU's entry gains its own source bundle (source, sourceSha256,
+          # sourceSizeBytes), selected by the meta's sku field; a SKU with no
+          # meta, two metas or a misnamed one stops the job here, before
+          # anything is signed (geekdojo/geekdojo-brain#970).
+          ./scripts/manifest-sources.sh /tmp/manifest-artifacts.jsonl source-meta \
+            > /tmp/manifest-artifacts-sources.jsonl
           jq -n \
             --arg version "${{ steps.ver.outputs.version }}" \
             --arg channel "${{ steps.ver.outputs.channel }}" \
             --arg floor "$floor" \
-            --slurpfile artifacts /tmp/manifest-artifacts.jsonl \
+            --slurpfile artifacts /tmp/manifest-artifacts-sources.jsonl \
             '{version:$version, channel:$channel, artifacts:$artifacts}
               + (if $floor == "" then {} else {securityFloor:$floor} end)' \
             > release-out/manifest.json
@@ -1066,6 +1231,18 @@ jobs:
           name: release-rest
           path: release-out
           digest-mismatch: error
+      # Each SKU's GPL source bundle, published beside its images and checked
+      # by the gate below like every other asset (geekdojo/geekdojo-brain#970).
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: source-n100-${{ needs.sign.outputs.version }}
+          path: release-out
+          digest-mismatch: error
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: source-rpi-${{ needs.sign.outputs.version }}
+          path: release-out
+          digest-mismatch: error
 
       # Every file `gh release create ... release-out/*` would upload must be
       # the file the sign job signed for: in the signed manifest with its size
@@ -1090,9 +1267,12 @@ jobs:
           # tagged commit anyway.
           TARGET_SHA: ${{ steps.src.outputs.sha }}
           REPO_URL: ${{ github.server_url }}/${{ github.repository }}.git
+          REPO_WEB_URL: ${{ github.server_url }}/${{ github.repository }}
         run: |
           set -eu
           ls -lh release-out/
+          # The verify sentence and one link per SKU to its source bundle.
+          ./scripts/release-notes.sh "$TAG" "$CHANNEL" "$REPO_WEB_URL" n100 rpi > release-notes.md
           PRERELEASE_FLAG=""
           if [ "$PRERELEASE" = "true" ]; then
             PRERELEASE_FLAG="--prerelease"
@@ -1115,7 +1295,7 @@ jobs:
           gh release create "$TAG" \
             --target "$TARGET_SHA" \
             --title "Rasputin OS ${TAG}" \
-            --notes "Channel: \`${CHANNEL}\`. Verify the chain with the public root CA (https://rasputin.geekdojo.com/rasputin-root-ca.pem): \`manifest.json.sig\` is a detached DER CMS signature over \`manifest.json\`, which carries per-asset SHA-256. Verify commands: https://rasputin.geekdojo.com/docs/agents/." \
+            --notes-file release-notes.md \
             $PRERELEASE_FLAG \
             release-out/*
 
