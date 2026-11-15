@@ -1084,6 +1084,14 @@ jobs:
           # empty file, so the field is added only when there is a floor and
           # is never "".
           floor=$(sh scripts/security-floor.sh security-floor.txt "${{ steps.ver.outputs.version }}")
+          # The control plane's memory floor (geekdojo/geekdojo-brain#1011),
+          # read from memory-floor-mib.txt and emitted in bytes, plus
+          # identityService:true when any SKU's rootfs carries a
+          # keycloak.service unit. A control plane refuses a fleet update its
+          # memory is below, and refuses an identity release with no floor, so
+          # an absent or invalid floor, or a rootfs that cannot be listed,
+          # stops the job here, before anything is signed.
+          cp=$(sh scripts/memory-floor.sh memory-floor-mib.txt artifacts/*-"${{ steps.ver.outputs.version }}"/bundle/rootfs.img)
           # Each SKU's entry gains its own source bundle (source, sourceSha256,
           # sourceSizeBytes), selected by the meta's sku field; a SKU with no
           # meta, two metas or a misnamed one stops the job here, before
@@ -1094,9 +1102,11 @@ jobs:
             --arg version "${{ steps.ver.outputs.version }}" \
             --arg channel "${{ steps.ver.outputs.channel }}" \
             --arg floor "$floor" \
+            --argjson cp "$cp" \
             --slurpfile artifacts /tmp/manifest-artifacts-sources.jsonl \
             '{version:$version, channel:$channel, artifacts:$artifacts}
-              + (if $floor == "" then {} else {securityFloor:$floor} end)' \
+              + (if $floor == "" then {} else {securityFloor:$floor} end)
+              + $cp' \
             > release-out/manifest.json
 
           # Detached DER CMS signature over the manifest — the trust anchor
