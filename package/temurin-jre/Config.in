@@ -1,0 +1,24 @@
+config BR2_PACKAGE_TEMURIN_JRE
+	bool "temurin-jre"
+	depends on BR2_TOOLCHAIN_USES_GLIBC
+	help
+	  Eclipse Temurin JRE, the Java runtime for the identity service
+	  (geekdojo/geekdojo-brain#969). Installs Adoptium's pinned,
+	  signature-verified release JRE to /usr/lib/temurin-jre, with an
+	  empty PKCS-12 lib/security/jssecacerts and its licences under
+	  /usr/share/licenses/temurin-jre/. The host variant, at the same
+	  pin, is in $(HOST_DIR)/lib/temurin-jre.
+
+	  Not enabled in any release until Identity 2.2.
+
+	  The upstream binaries are linked against glibc. A build-time
+	  check (check-needed.sh, a target-finalize hook) fails the build
+	  when any ELF file in the installed JRE names a NEEDED library the
+	  image does not carry.
+
+	  There is deliberately no architecture "depends on": a target
+	  architecture the tarball map in temurin-jre.mk does not know
+	  fails the build instead of silently dropping the runtime.
+
+	  https://adoptium.net
+

@@ -10,5 +10,6 @@ source "$BR2_EXTERNAL_RASPUTIN_PATH/package/openbao/Config.in"
 source "$BR2_EXTERNAL_RASPUTIN_PATH/package/rasputin-agent/Config.in"
 source "$BR2_EXTERNAL_RASPUTIN_PATH/package/rasputin-api/Config.in"
 source "$BR2_EXTERNAL_RASPUTIN_PATH/package/tailscale-bin/Config.in"
+source "$BR2_EXTERNAL_RASPUTIN_PATH/package/temurin-jre/Config.in"
 
 endmenu

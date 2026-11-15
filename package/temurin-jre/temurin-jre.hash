@@ -1,0 +1,15 @@
+# From https://github.com/adoptium/temurin25-binaries/releases/tag/jdk-25.0.5%2B8,
+# each taken only after its Adoptium signature verified against the key with
+# fingerprint 3B04D753C9050D9A5D343F39843C48A565F8F04B: the procedure is in
+# temurin-jre.mk's header, and the transcripts are geekdojo-brain
+# projects/rasputin/research/identity-evidence/958/raw/signature-verification-jre-25.0.5+8.txt
+# (sha256 937b042db1d2c509369577b3fbf82b533fb3e60410ed5442373b0683788c400b) and
+# projects/rasputin/research/identity-evidence/958/raw/signature-verification-jre-src-25.0.5+8.txt
+# (sha256 39070a8c763b3db55077b823212a48fccb171689b47dc7f5d3f4ccab018e9d65).
+sha256  963931723891302ebb2687178532c3d793d71e2577cd058061c7efb396140a86  OpenJDK25U-jre_aarch64_linux_hotspot_25.0.5_8.tar.gz
+sha256  6fac98f0c8202efc3135a9e9e42aa61963ec42d1c5cbb40caf231e7b14a24ef6  OpenJDK25U-jre_x64_linux_hotspot_25.0.5_8.tar.gz
+sha256  f331d870d998f9c144c361c220960f8ad2de169dc1b1c4dc4145291c501c2341  OpenJDK25U-jdk-sources_25.0.5_8.tar.gz
+# Locally computed from the files in the verified x64 tarball.
+sha256  4b9abebc4338048a7c2dc184e9f800deb349366bdf28eb23c2677a77b4c87726  legal/java.base/LICENSE
+sha256  75292f03bf23d3db7c985aecc191029b93883200721ed23ed34a2e601463df33  legal/java.base/ASSEMBLY_EXCEPTION
+sha256  a69bce275ba7a3570af6579cb0f55682cd75fedfcd49e0e8e9022270c447c916  legal/java.base/ADDITIONAL_LICENSE_INFO
