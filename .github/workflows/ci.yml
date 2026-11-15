@@ -455,6 +455,20 @@ jobs:
           TEST_SHELLS: "dash busybox_sh"
           REQUIRE_BUSYBOX: "1"
         run: sh test/security-floor-test.sh
+      # release.yml's sign step runs scripts/memory-floor.sh to put the
+      # control plane's memory floor, and identityService when the rootfs
+      # carries keycloak.service, in manifest.json
+      # (geekdojo/geekdojo-brain#1011). A control plane refuses an identity
+      # release with no floor, so every invalid floor file and every rootfs
+      # unsquashfs cannot list is refused, and the marker is read from real
+      # squashfs images (squashfs-tools installed above), including the
+      # keycloak-db.service and drop-in look-alikes. Under dash and busybox
+      # ash.
+      - name: Memory floor tests
+        env:
+          TEST_SHELLS: "dash busybox_sh"
+          REQUIRE_BUSYBOX: "1"
+        run: sh test/memory-floor-test.sh
       # release.yml's compress job runs scripts/compress-image.sh to make each
       # .img.xz one xz stream with a 1536 MiB dictionary, so slot B's copy of
       # slot A costs no download (geekdojo/geekdojo-brain#969). A shrunk
