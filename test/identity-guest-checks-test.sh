@@ -146,7 +146,7 @@ for SH in $TEST_SHELLS; do
 		eval "export CURL_LEAF_$p=000"
 		checks
 		check "TC-967-12 [$SH] port $p: the control failing (no status with the leaf) is FAIL, never PASS" \
-			"$(yes_if test "$RC" = 1 && has "FAIL kc-tls port=$p: control")" "$RES"
+			"$(yes_if eval 'test "$RC" = 1 && has "FAIL kc-tls port=$p: control"')" "$RES"
 		baseline
 		checks
 		check "TC-967-12 [$SH] port $p: no status bare, a status with the leaf is PASS" \
@@ -161,29 +161,29 @@ for SH in $TEST_SHELLS; do
 	baseline
 	export PSQL_PLAIN_RC=0 PSQL_PLAIN_ERR=''
 	checks
-	check "TC-967-13 [$SH] sslmode=disable connecting is FAIL" "$(yes_if test "$RC" = 1 && has "FAIL pg-tls: sslmode=disable connected")" "$RES"
+	check "TC-967-13 [$SH] sslmode=disable connecting is FAIL" "$(yes_if eval 'test "$RC" = 1 && has "FAIL pg-tls: sslmode=disable connected"')" "$RES"
 	for why in 'FATAL:  password authentication failed for user "keycloak"' 'fe_sendauth: no password supplied'; do
 		baseline
 		export PSQL_PLAIN_ERR="$why"
 		checks
 		check "TC-967-13 [$SH] a password refusal ($why) is FAIL, never PASS" \
-			"$(yes_if test "$RC" = 1 && has "FAIL pg-tls: sslmode=disable reached a password line")" "$RES"
+			"$(yes_if eval 'test "$RC" = 1 && has "FAIL pg-tls: sslmode=disable reached a password line"')" "$RES"
 	done
 	baseline
 	export PSQL_PLAIN_ERR='psql: error: connection to server at "127.0.0.1", port 5432 failed: Connection refused'
 	checks
 	check "TC-967-13 [$SH] another failure (connection refused) is INCONCLUSIVE, exit 2" \
-		"$(yes_if test "$RC" = 2 && has "INCONCLUSIVE pg-tls: sslmode=disable failed for another reason")" "$RES"
+		"$(yes_if eval 'test "$RC" = 2 && has "INCONCLUSIVE pg-tls: sslmode=disable failed for another reason"')" "$RES"
 	baseline
 	export PSQL_CTL_RC=2
 	checks
 	check "TC-967-13 [$SH] the verify-ca control refused is FAIL" \
-		"$(yes_if test "$RC" = 1 && has "FAIL pg-tls: control: sslmode=verify-ca")" "$RES"
+		"$(yes_if eval 'test "$RC" = 1 && has "FAIL pg-tls: control: sslmode=verify-ca"')" "$RES"
 	baseline
 	printf '%s\n' 'p 1 0 0 0 0 0 /run/postgresql/.s.PGSQL.5432' >>"$TMP/proc/net/unix"
 	checks
 	check "TC-967-13 [$SH] a PostgreSQL Unix socket is FAIL" \
-		"$(yes_if test "$RC" = 1 && has "FAIL pg-socket: a PostgreSQL Unix socket exists: /run/postgresql/.s.PGSQL.5432")" "$RES"
+		"$(yes_if eval 'test "$RC" = 1 && has "FAIL pg-socket: a PostgreSQL Unix socket exists: /run/postgresql/.s.PGSQL.5432"')" "$RES"
 
 	# TC-967-14: the at-rest verdict, N > 0 (F-967-04).
 	for c in "rasputin-atrest: PASS checked=3|PASS" "rasputin-atrest: PASS checked=0|FAIL" \
@@ -205,21 +205,21 @@ for SH in $TEST_SHELLS; do
 	scan_with() { RES=$(printf '%s' "$1" | shell_run "$G/identity-guest-checks.sh" scan 2>&1); RC=$?; }
 	scan_with "$(printf '%s\n%s\n' "$n1" "$n2")"
 	check "TC-967-15 [$SH] a needle only under DB_DATA is PASS, exit 0" \
-		"$(yes_if test "$RC" = 0 && has "PASS scan tree: files=1 files_exact=0" && has "PASS scan journal: journal_lines=2 journal_exact=0")" "rc=$RC $RES"
+		"$(yes_if eval 'test "$RC" = 0 && has "PASS scan tree: files=1 files_exact=0" && has "PASS scan journal: journal_lines=2 journal_exact=0"')" "rc=$RC $RES"
 	check "TC-967-15 [$SH] the needles file is gone after the scan" "$(yes_if test ! -e "$TMP/out/identity-needles" -a -z "$(ls -A "$TMP/out")")" "$(ls -A "$TMP/out")"
 	check "TC-967-15 [$SH] the scan prints no needle" "$(yes_if test "$(printf '%s\n' "$RES" | grep -c -e "$n1" -e "$n2")" = 0)"
 	printf 'leak %s\n' "$n2" >"$PERSIST/other/g"
 	scan_with "$(printf '%s\n%s\n' "$n1" "$n2")"
 	check "TC-967-15 [$SH] a needle outside DB_DATA is FAIL, exit 1" \
-		"$(yes_if test "$RC" = 1 && has "FAIL scan tree: a needle was found: files=2 files_exact=1")" "rc=$RC $RES"
+		"$(yes_if eval 'test "$RC" = 1 && has "FAIL scan tree: a needle was found: files=2 files_exact=1"')" "rc=$RC $RES"
 	rm "$PERSIST/other/g"
 	printf 'boot\nsession %s\n' "$n2" >"$FAKE_JOURNAL"
 	scan_with "$(printf '%s\n' "$n2")"
 	check "TC-967-15 [$SH] a needle in the journal is FAIL, exit 1" \
-		"$(yes_if test "$RC" = 1 && has "FAIL scan journal: a needle was found: journal_lines=2 journal_exact=1")" "rc=$RC $RES"
+		"$(yes_if eval 'test "$RC" = 1 && has "FAIL scan journal: a needle was found: journal_lines=2 journal_exact=1"')" "rc=$RC $RES"
 	scan_with ""
 	check "TC-967-15 [$SH] an empty needles file is INCONCLUSIVE, exit 2" \
-		"$(yes_if test "$RC" = 2 && has "INCONCLUSIVE scan tree: INCONCLUSIVE needles=0")" "rc=$RC $RES"
+		"$(yes_if eval 'test "$RC" = 2 && has "INCONCLUSIVE scan tree: INCONCLUSIVE needles=0"')" "rc=$RC $RES"
 	check "TC-967-15 [$SH] the needles file is gone after an empty scan" "$(yes_if test -z "$(ls -A "$TMP/out")")"
 	for v in KC_HTTPS_PORT KC_MGMT_PORT DB_PORT DB_NAME DB_USER CA CLIENT_LEAF DB_CA DB_CLIENT_LEAF \
 		PSQL ATREST_CMD PERSIST DB_DATA OUT; do
