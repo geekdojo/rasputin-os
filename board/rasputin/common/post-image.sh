@@ -41,6 +41,10 @@ case "$SOC" in
 	*) echo "post-image: unknown SoC '$SOC'" >&2; exit 1 ;;
 esac
 
+# The root filesystem's size against the 768 MiB limit (platform.md §2.6),
+# before anything is staged: an over-limit image stops the build here.
+"$COMMON_DIR/rootfs-size-check.sh" "$BINARIES_DIR/rootfs.squashfs" "$SOC"
+
 # --- stage boot artifacts into BINARIES_DIR so genimage can pack them ---
 # genimage reads its `file`/`files` entries from --inputpath ($BINARIES_DIR).
 # The provisioning seed ships on every image's boot FAT (provisioning.md §1).

@@ -275,6 +275,21 @@ jobs:
       # failure, not a skip. No REQUIRE_BUSYBOX: nothing here runs on the node.
       - name: OpenBao package tests
         run: sh test/openbao-package-test.sh
+      # The pinned Java runtime (geekdojo/geekdojo-brain#969): the target and
+      # host tarball maps fail the build on an unmapped architecture only when
+      # the runtime is on, temurin-jre.hash covers exactly the three tarballs
+      # and the licence files, legal-info is pointed at the source tarball,
+      # no defconfig enables it yet, and check-needed.sh on ELFs compiled here
+      # passes, names a missing library and fails closed. No make, cc or
+      # readelf is a failure, not a skip. The temurin-jre job builds it.
+      - name: Temurin JRE package tests
+        run: sh test/temurin-jre-package-test.sh
+      # post-image.sh's root filesystem size check (geekdojo/geekdojo-brain
+      # #969, platform.md §2.6): the report against #957's baselines, the 768
+      # MiB limit at and one byte over it, every refusal, and a fixture
+      # post-image.sh run that stops before staging anything when over.
+      - name: Root filesystem size check tests
+        run: sh test/rootfs-size-check-test.sh
       # The secrets store's unit (geekdojo/geekdojo-brain#755): every directive
       # at its value and in its section, the forbidden ones (a watchdog bao never
       # pets, network-online, MemoryHigh, a rate-limit override, a chosen restart
@@ -703,3 +718,34 @@ jobs:
       # the seal-key and api-wiring steps above still run and report.
       - name: Store unit against real systemd and the pinned bao (config, conditions, sandbox, credentials, crash loop)
         run: sh test/store-unit-functional.sh
+
+  # The pinned Java runtime (geekdojo/geekdojo-brain#969) built for real by the
+  # pinned Buildroot, one leg per target architecture because the binaries
+  # differ per architecture. No defconfig enables the package before Identity
+  # 2.3, so this is the only place its install, its NEEDED-library hook and
+  # its legal-info run before then. Each leg also verifies Adoptium's
+  # signature over every tarball it downloaded against the committed key, and
+  # checks the package's CPE with Buildroot's own CVE matcher against NVD
+  # snapshots. test/temurin-jre-functional.sh says what each case proves.
+  temurin-jre:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [aarch64, x86_64]
+    steps:
+      - uses: actions/checkout@v4
+      # gpg for the signatures, jq for show-info, setuptools for the distutils
+      # Buildroot's cve.py imports. Through the package cache, bounded.
+      - name: Install gnupg + jq + python3-setuptools
+        timeout-minutes: 10
+        uses: geekdojo/.github/.github/actions/ci-debs@d7072ebcd16ca3569f19669550e384db8208d4eb
+        with:
+          label: temurin-jre
+          packages: gnupg jq python3-setuptools
+          require: gpg jq
+      # The same pinned checkout release.yml uses.
+      - name: Check out the pinned Buildroot
+        run: ./scripts/init-buildroot.sh
+      - name: Temurin JRE built by the pinned Buildroot (${{ matrix.arch }})
+        run: sh test/temurin-jre-functional.sh "${{ matrix.arch }}"
