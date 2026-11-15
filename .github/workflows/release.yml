@@ -591,6 +591,71 @@ jobs:
           name: smoke-arm64-console
           path: /tmp/console.log
 
+  # Each SKU's flashable .img.xz, made here and not in sign
+  # (geekdojo/geekdojo-brain#969). scripts/compress-image.sh writes it as one
+  # xz stream with a 1536 MiB dictionary, so slot B, a copy of slot A, is
+  # matched against it and costs no download: about half the size of the old
+  # multi-threaded file. It checks the round trip against the built .img and
+  # reads the layout back, and fails the leg rather than let a different file
+  # through. sign takes the file as it is and only hashes it.
+  #
+  # WHY ITS OWN JOB. One-stream compression is single-threaded and needs
+  # about 11 GB of memory: on the free ubuntu-latest runner beside the smokes
+  # it costs nothing and holds nothing up, where in build it would run on the
+  # metered 16-core runner, and in sign it would keep the leaf key staged for
+  # minutes longer and could not be tested off main.
+  #
+  # THIS JOB IS ALSO THE FUNCTIONAL TEST of the script on full-size images.
+  # Run it on a branch with
+  #   gh workflow run release.yml --ref <branch> -f full_build=true
+  # (publish=false; sign, update-smoke and publish skip off main). What a green
+  # run proves, for both SKUs: the script's summary line reads one block with
+  # --lzma2=dict=1536MiB, its round-trip sha256 is that of the .img the smokes
+  # boot, /usr/bin/time -v logs the peak memory, and image-<sku> is uploaded.
+  # What it does not prove: sign's copy of the file into a release, which only
+  # a run from main does, and that any flashing app other than the xz command
+  # line can open it (Rufus cannot; balenaEtcher needs about 8 GB of RAM).
+  compress:
+    needs: build
+    # The smokes' condition: every run that builds images compresses them.
+    if: ${{ !cancelled() && (startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && (inputs.full_build == true || inputs.full_build == 'true' || inputs.publish == true || inputs.publish == 'true'))) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        sku: [n100, rpi]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: ${{ matrix.sku }}-*
+          merge-multiple: true
+          path: img
+          digest-mismatch: error
+      - name: Compress the image as one xz stream
+        env:
+          SKU: ${{ matrix.sku }}
+        run: |
+          set -eu
+          IMG=$(ls img/*.img | head -1)
+          test -n "$IMG" || { echo "::error::no $SKU .img artifact"; exit 1; }
+          sha256sum "$IMG"
+          mkdir -p out
+          /usr/bin/time -v scripts/compress-image.sh "$IMG" "out/$(basename "$IMG").xz"
+          ls -l out
+      # Already compressed, so the upload does not compress it again. One day:
+      # long enough for sign in this run.
+      - name: Upload the compressed image
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: image-${{ matrix.sku }}
+          path: out/*.img.xz
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+
 
   # Each SKU's GPL source bundle, rasputin-os-<sku>-<version>-source.tar
   # (geekdojo/geekdojo-brain#970). A release publishes it beside the SKU's
@@ -781,7 +846,7 @@ jobs:
   # this run's `release-bundles` artifact, kept for one day (retention-days
   # below), long enough for the update smoke and the publish job and no longer.
   sign:
-    needs: [build, smoke-amd64, smoke-arm64, source-bundle]
+    needs: [build, smoke-amd64, smoke-arm64, compress, source-bundle]
     # A failing smoke must BLOCK publication. It did not: `!cancelled()` in the
     # condition below meant the job ran on any non-cancelled outcome, so
     # 2026.07.9-dev.136 published to the dev channel with a red smoke
@@ -805,7 +870,10 @@ jobs:
     #
     # Both source bundles must be green too: an image whose GPL source failed
     # to collect is not signed, so it cannot publish (geekdojo/geekdojo-brain#970).
-    if: ${{ !cancelled() && needs.smoke-amd64.result == 'success' && needs.smoke-arm64.result == 'success' && needs.source-bundle.result == 'success' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && (inputs.full_build == true || inputs.full_build == 'true' || inputs.publish == true || inputs.publish == 'true'))) }}
+    #
+    # And both compressed images: sign publishes compress's .img.xz as it is,
+    # so a failed compress leg leaves nothing to sign (geekdojo/geekdojo-brain#969).
+    if: ${{ !cancelled() && needs.smoke-amd64.result == 'success' && needs.smoke-arm64.result == 'success' && needs.compress.result == 'success' && needs.source-bundle.result == 'success' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && (inputs.full_build == true || inputs.full_build == 'true' || inputs.publish == true || inputs.publish == 'true'))) }}
     runs-on: ubuntu-latest
     # The leaf comes from the org secrets RASPUTIN_LEAF_* (selected repos: this
     # one and the firewall). Only main dispatches and CalVer tag pushes reach
@@ -859,6 +927,18 @@ jobs:
           name: rpi-${{ steps.ver.outputs.version }}
           path: artifacts/rpi-${{ steps.ver.outputs.version }}
           digest-mismatch: error
+      # Each SKU's flashable .img.xz from the compress job, by name like the
+      # images above, so a missing SKU is an "Artifact not found" error.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: image-n100
+          path: images
+          digest-mismatch: error
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: image-rpi
+          path: images
+          digest-mismatch: error
       # Each SKU's source-bundle meta (name, sha256, size of its -source.tar),
       # by name like the images above. The bundles themselves are not needed
       # here: their hashes were taken where they were made, and the publish
@@ -909,7 +989,7 @@ jobs:
           leaf-cert: ${{ secrets.RASPUTIN_LEAF_CERT }}
           root-ca:   ${{ vars.RASPUTIN_ROOT_CA_PEM }}
 
-      - name: Sign .raucb bundles + compress .img + emit signed manifest
+      - name: Sign .raucb bundles + take the compressed .img + emit signed manifest
         id: sign
         env:
           # Through the environment, not expanded into the script text: a
@@ -962,15 +1042,20 @@ jobs:
               "release-out/rasputin-os-${sku}-${ver}.raucb" \
               "$d/bundle/rootfs.img"
 
-            # Compress the flashable .img (GH release asset limit is 2 GB;
-            # our raw .img is ~3 GB so this is mandatory, not just an
-            # optimization).
-            img_src=$(ls "$d"/*.img | head -1)
-            xz --keep --threads=0 -T0 -c "$img_src" > "release-out/$(basename "$img_src").xz"
+            # The flashable .img.xz, as the compress job made and checked it
+            # (one xz stream; geekdojo/geekdojo-brain#969). Nothing is
+            # compressed here: the file is copied and hashed as it is. A
+            # missing file stops the job before manifest.json is written.
+            imgxz_in="images/rasputin-os-${sku}-${ver}.img.xz"
+            if [ ! -f "$imgxz_in" ]; then
+              echo "::error::The compressed image $imgxz_in is missing, so the $sku release cannot be signed."
+              exit 1
+            fi
+            cp "$imgxz_in" "release-out/"
+            imgxz="release-out/rasputin-os-${sku}-${ver}.img.xz"
             echo "::endgroup::"
 
             raucb="release-out/rasputin-os-${sku}-${ver}.raucb"
-            imgxz="release-out/$(basename "$img_src").xz"
             raucb_sha=$(sha256sum "$raucb"  | awk '{print $1}')
             imgxz_sha=$(sha256sum "$imgxz"  | awk '{print $1}')
             raucb_sz=$(stat -c%s "$raucb")

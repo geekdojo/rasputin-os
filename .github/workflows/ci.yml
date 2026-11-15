@@ -455,6 +455,18 @@ jobs:
           TEST_SHELLS: "dash busybox_sh"
           REQUIRE_BUSYBOX: "1"
         run: sh test/security-floor-test.sh
+      # release.yml's compress job runs scripts/compress-image.sh to make each
+      # .img.xz one xz stream with a 1536 MiB dictionary, so slot B's copy of
+      # slot A costs no download (geekdojo/geekdojo-brain#969). A shrunk
+      # dictionary or a second block still decodes and only doubles the
+      # asset, so the real xz on this runner is checked for the round trip and
+      # the layout it reads back, every refusal leaves nothing to upload, and
+      # both genimage.cfg slots are pinned inside the dictionary. Under sh and
+      # dash.
+      - name: Image compression tests
+        env:
+          TEST_SHELLS: "sh dash"
+        run: sh test/compress-image-test.sh
       # cve-watch's OpenBao advisory and release watch
       # (geekdojo/geekdojo-brain#768): which advisories affect the pin, decided
       # from patched_versions and failing closed, the release classes, the
