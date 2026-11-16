@@ -46,14 +46,13 @@
 #
 # WHY THIS VALUE
 #
-# 2026.11.2-dev.211 is the firewall dev release of the 2026.11.2 dev chain
-# for the identity harness (geekdojo/geekdojo-brain#966, control-plane PR
-# #539), built from firewall main bae5317 (release run 43497475897). It
-# carries agent 2026.11.2-dev.220 -- the control-plane dev release this OS
-# pins (CP main 70d8fc2a), with no agent change against the 2026.11.1
-# stable -- plus the Snort rules re-pin to 0a955e35 (Talos republish
-# 2026-11-13, firewall PR #138) and the rolling OpenWrt 25.12.6 feed. Dev
-# bakes dev. The previous pin was the 2026.11.1 stable.
+# 2026.11.2-dev.212 is the firewall dev release of the 2026.11.2 dev chain
+# for the identity work (control-plane PRs #542, #546 and #547), built from
+# firewall main 9ede04a (release run 43807807258). It carries agent
+# 2026.11.2-dev.229 -- the control-plane dev release this OS pins (CP main
+# 0ba301f7), whose agent change against dev.220 is a TLS relay socket per
+# granted app (firewall PR #139) -- plus the rolling OpenWrt 25.12.6 feed.
+# Dev bakes dev. The previous pin was 2026.11.2-dev.211.
 #
 # History: 2026.09.4-dev.127 was the first pin -- the FIRST firewall release
 # that publishes manifest.json.sig (dev.126 and earlier ship no sig asset).
@@ -86,5 +85,6 @@
 # 2026.11.0 (stable) was the pin of the 2026.11.0 stable OS.
 # On the 2026.11.1 dev line: dev.204 (OS dev.369), dev.206 (OS dev.371).
 # 2026.11.1 (stable) was the pin of the 2026.11.1 stable OS.
+# On the 2026.11.2 dev line: dev.211 (OS dev.376).
 #
-2026.11.2-dev.211
+2026.11.2-dev.212
