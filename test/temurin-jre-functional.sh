@@ -4,8 +4,9 @@
 # CI runs it in the temurin-jre job, one leg per architecture (aarch64 and
 # x86_64), because the binaries differ per architecture (SEC-PLATFORM).
 #
-# No defconfig enables the package before Identity 2.3, so nothing else
-# exercises its install, its NEEDED hook or legal-info. This builds a minimal
+# Both defconfigs carry the package since Identity 2.3 (keycloak selects it),
+# but only the release build reaches its install, its NEEDED hook and
+# legal-info. This builds a minimal
 # config with the Bootlin glibc stable external toolchain (no toolchain build),
 # no init, no /bin/sh, no busybox and no rootfs image, plus the package, then:
 #
@@ -68,6 +69,8 @@ KEY="$PKG/adoptium-signing-key.asc"
 NVD="$ROOT/test/fixtures/nvd"
 OUT="${TEMURIN_JRE_FUNC_OUT:-$ROOT/output/temurin-jre-$ARCH}"
 T="$OUT/target"
+
+. "$ROOT/test/lib/cve-verdict.sh"
 
 [ -f "$BR/Makefile" ] || { echo "FAIL — The pinned Buildroot is not checked out at $BR. Run ./scripts/init-buildroot.sh first."; exit 1; }
 for t in make gpg jq curl sha256sum python3 cmp; do
@@ -211,16 +214,8 @@ check "TC-969-12 show-info's cpe-id" "$CPE" 'cpe:2.3:a:oracle:jre:25.0.5:-:*:*:*
 # cpe_at VERSION [PRODUCT] — the show-info id with the version (and product)
 # replaced, so every case below is Buildroot's own id but for that field.
 cpe_at() { printf '%s\n' "$CPE" | awk -F: -v OFS=: -v v="$1" -v p="${2:-}" '{ $6 = v; if (p != "") $5 = p; print }'; }
-verdict() { # verdict CVE CPEID — prints AFFECTS, DOESNT_AFFECT or UNKNOWN
-	python3 - "$BR/support/scripts" "$NVD/$1.json" "$2" <<'EOF'
-import json, sys
-sys.path.insert(0, sys.argv[1])
-import cve
-c = cve.CVE(json.load(open(sys.argv[2])))
-r = c.affects("temurin-jre", None, sys.argv[3])
-print({cve.CVE.CVE_AFFECTS: "AFFECTS", cve.CVE.CVE_DOESNT_AFFECT: "DOESNT_AFFECT"}.get(r, "UNKNOWN"))
-EOF
-}
+# verdict CVE CPEID — prints AFFECTS, DOESNT_AFFECT or UNKNOWN
+verdict() { cve_verdict "$BR" "$NVD/$1.json" temurin-jre "$2"; }
 case_row() { # case_row CVE CPEID WANT
 	got=$(verdict "$1" "$2") || got="matcher failed"
 	check "TC-969-12 $1 at $2" "$got" "$3"

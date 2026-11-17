@@ -1,21 +1,26 @@
 #!/bin/sh
 #
 # api-tarball.sh — fetch the pinned rasputin-api release tarball the way the
-# image build does, and take the secrets store's policy text out of it.
-# Sourced, never run (geekdojo/geekdojo-brain#804). test/store-unit-functional.sh
-# and test/store-policy-live-drift.sh share it.
+# image build does, and take one of its directories out of it. Sourced, never
+# run (geekdojo/geekdojo-brain#804, #971). test/store-unit-functional.sh,
+# test/store-policy-live-drift.sh and test/identity-pin-test.sh share it.
 #
-#   api_policy_fetch ROOT BR_ARCH WORK
+#   api_dir_fetch ROOT BR_ARCH WORK DIR [WHAT]
 #       Reads RASPUTIN_API_SITE and RASPUTIN_API_SOURCE from ROOT's
 #       package/rasputin-api/rasputin-api.mk with real GNU make (mk-var.sh,
 #       which the caller sources), BR_ARCH being BR2_x86_64 or BR2_aarch64;
 #       downloads the tarball into WORK; checks its sha256 against the line for
-#       it in package/rasputin-api/rasputin-api.hash; and extracts its
-#       openbao-policy/ to WORK/openbao-policy. Sets API_VERSION
-#       (RASPUTIN_API_VERSION) and API_POLICY (that directory). Returns 0, or
+#       it in package/rasputin-api/rasputin-api.hash; and extracts its DIR/
+#       (identity or openbao-policy) to WORK/DIR. Sets API_VERSION
+#       (RASPUTIN_API_VERSION) and API_DIR (that directory). Returns 0, or
 #       non-zero with a sentence on stdout naming what failed: a pin it cannot
 #       read, a failed download, a hash that does not match, or a tarball with
-#       no openbao-policy/.
+#       no DIR/. WHAT names DIR's contents in the download failure's
+#       sentence; it defaults to "DIR/".
+#
+#   api_policy_fetch ROOT BR_ARCH WORK
+#       api_dir_fetch for openbao-policy, the secrets store's policy text.
+#       Also sets API_POLICY to the extracted directory.
 #
 # TEST-ONLY OVERRIDE. RASPUTIN_API_TARBALL=<path> takes that local tarball
 # instead of downloading the pinned one, and skips the hash check, because a
@@ -26,8 +31,8 @@
 #
 # Needs: GNU make, curl, openssl, tar.
 
-api_policy_fetch() {
-	_af_root=$1 _af_arch=$2 _af_work=$3
+api_dir_fetch() {
+	_af_root=$1 _af_arch=$2 _af_work=$3 _af_dir=$4 _af_what=${5:-$4/}
 	_af_mk="$_af_root/package/rasputin-api/rasputin-api.mk"
 	_af_hash="$_af_root/package/rasputin-api/rasputin-api.hash"
 	API_VERSION=$(mk_var "$_af_mk" RASPUTIN_API_VERSION) \
@@ -46,16 +51,22 @@ api_policy_fetch() {
 		[ -n "$_af_want" ] || { echo "FAILED: $_af_hash has no sha256 line for $_af_src."; return 1; }
 		echo "downloading $_af_site/$_af_src"
 		curl -fsSL -o "$_af_work/$_af_src" "$_af_site/$_af_src" \
-			|| { echo "FAILED: the download of $_af_site/$_af_src failed, so there is no api tarball to take the policy text from."; return 1; }
+			|| { echo "FAILED: the download of $_af_site/$_af_src failed, so there is no api tarball to take $_af_what from."; return 1; }
 		_af_got=$(openssl dgst -sha256 -r "$_af_work/$_af_src" | cut -d' ' -f1)
 		[ "$_af_got" = "$_af_want" ] \
 			|| { echo "FAILED: $_af_src does not match rasputin-api.hash (got $_af_got, want $_af_want)."; return 1; }
 		echo "  $_af_src matches rasputin-api.hash"
 	fi
-	rm -rf "$_af_work/openbao-policy"
-	tar -xzf "$_af_work/$_af_src" -C "$_af_work" openbao-policy >/dev/null 2>&1 \
-		|| { echo "FAILED: $_af_src (api $API_VERSION) holds no openbao-policy/, so it carries no policy text for the store."; return 1; }
+	rm -rf "${_af_work:?}/$_af_dir"
+	tar -xzf "$_af_work/$_af_src" -C "$_af_work" "$_af_dir" >/dev/null 2>&1 \
+		|| { echo "FAILED: $_af_src (api $API_VERSION) holds no $_af_dir/."; return 1; }
 	# shellcheck disable=SC2034 # read by the caller
-	API_POLICY="$_af_work/openbao-policy"
+	API_DIR="$_af_work/$_af_dir"
 	return 0
+}
+
+api_policy_fetch() {
+	api_dir_fetch "$1" "$2" "$3" openbao-policy "the policy text" || return 1
+	# shellcheck disable=SC2034 # read by the caller
+	API_POLICY="$API_DIR"
 }

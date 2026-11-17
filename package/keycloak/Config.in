@@ -1,0 +1,24 @@
+config BR2_PACKAGE_KEYCLOAK
+	bool "keycloak"
+	# The JRE's own dependency, repeated because this selects it
+	# (Buildroot's rule for select).
+	depends on BR2_TOOLCHAIN_USES_GLIBC
+	# The build options, the pins and the theme come from the api
+	# tarball's identity/ directory.
+	depends on BR2_PACKAGE_RASPUTIN_API
+	select BR2_PACKAGE_TEMURIN_JRE
+	help
+	  Keycloak, the identity service (geekdojo/geekdojo-brain#971,
+	  Identity 2.3). Installs the pinned, signature-verified Keycloak
+	  release from Maven Central to /usr/lib/keycloak, built at image
+	  build time (kc.sh build, on the build host's JVM) with the options
+	  in the api tarball's identity/keycloak-build.conf.
+
+	  The build fails when that tarball's identity/pins.json names a
+	  different Keycloak or JRE than this tree pins (check-pins.sh), and
+	  when the options Keycloak persisted differ from the conf, an
+	  unknown or misspelt option included (check-build-options.sh).
+
+	  No unit: nothing starts the service until Identity 2.5.
+
+	  https://www.keycloak.org

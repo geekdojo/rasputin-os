@@ -214,6 +214,10 @@ BR2_PACKAGE_OPENBAO=y
 # users (geekdojo/geekdojo-brain#972). Every node carries it; the identity units
 # decide where it runs.
 BR2_PACKAGE_RASPUTIN_IDENTITY_DB=y
+# The identity service: the pinned Keycloak, built at image build with the
+# api tarball's identity/keycloak-build.conf, and the Java runtime it selects
+# (geekdojo/geekdojo-brain#971). No unit yet: nothing starts it.
+BR2_PACKAGE_KEYCLOAK=y
 
 # --- rootfs: squashfs (read-only, verity-friendly) ---
 BR2_TARGET_ROOTFS_SQUASHFS=y
