@@ -334,6 +334,17 @@ jobs:
         env:
           REQUIRE_BUSYBOX: "1"
         run: sh test/identity-hooks-test.sh
+      # Identity 2.7's first-boot scripts (geekdojo/geekdojo-brain#975): the
+      # database gate's pre and post rows, its outcome record and the rule
+      # for overwriting it, the operator-facing reasons, the init step's
+      # initdb flags and bootstrap checks against a fake initdb and postgres,
+      # the realm stage step, refusals of planted links and unexpected file
+      # types, and armed.sh, under dash, bash, busybox ash and busybox's own
+      # applets.
+      - name: Identity first-boot script tests
+        env:
+          REQUIRE_BUSYBOX: "1"
+        run: sh test/identity-db-init-test.sh
       # The secrets store's main config, openbao.hcl, and its enablement
       # (geekdojo/geekdojo-brain#756): the exact keys of each scope, the
       # listener on 127.0.0.1:8200 with a required client certificate and the
@@ -791,8 +802,11 @@ jobs:
       # uid's own credentials, writes confined, the IP firewall with a
       # control, the live at-rest audit, orderly stops in start-post, a JVM
       # killed in start-post, the three-start hold and its re-arm, no secret
-      # in the journal or curl's argv, and the database's start limit. Same
-      # job: it builds the same image. Before the store unit's step, so it
+      # in the journal or curl's argv, and the database's start limit; and
+      # Identity 2.7's first boot (geekdojo/geekdojo-brain#975): created,
+      # imported once with no administrator, untouched, armed refusals held
+      # stopped, and each reboot point re-run on its own facts. Same job: it
+      # builds the same image. Before the store unit's step, so it
       # runs and reports whatever that step does.
       - name: Identity units against real systemd and the pinned Keycloak (conditions, start wait, sandbox, hold, exit records)
         run: sh test/identity-unit-functional.sh

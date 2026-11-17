@@ -66,7 +66,11 @@ Environment="JAVA_OPTS_APPEND=-XX:-UsePerfData -XX:ErrorFile=/dev/null -XX:-Crea
 # that never reached /health/started. `+` runs it as root outside this
 # sandbox; no `-`, so a refusal fails the start.
 ExecStartPre=+/usr/lib/rasputin/identity/rasputin-keycloak-hooks.sh hold
-# ExecStartPre= slot for Identity 2.7's identity-stage-import.sh.
+# Identity 2.7 (geekdojo/geekdojo-brain#975): stages the realm baseline for
+# --import-realm only while sign-in is not set up, and removes it once it is.
+# `+` runs it as root; it refuses a link or an unexpected file type in this
+# unit's data directory. No `-`: a refusal fails the start.
+ExecStartPre=+/usr/lib/rasputin/identity/identity-stage-import.sh
 ExecStart=/usr/lib/keycloak/bin/kc.sh --config-file=/etc/rasputin/identity/keycloak.conf start --optimized --import-realm
 # The start wait (#979 contract §1): `active` only once /health/started
 # answers UP over mutual TLS. No `-`: a JVM that dies first fails the start.
