@@ -43,6 +43,11 @@ mkdir -p "$WORK"
 . "$(dirname "$0")/lib/store-ready.sh"
 # shellcheck source=test/lib/api-session.sh
 . "$(dirname "$0")/lib/api-session.sh"
+# The identity service's readiness (geekdojo/geekdojo-brain#974): the realm
+# wait and the verdict on the api's identity report.
+# shellcheck source=test/lib/identity-ready.sh
+. "$(dirname "$0")/lib/identity-ready.sh"
+LIBDIR="$(dirname "$0")/lib"
 SOFT_PASSKEY="$(dirname "$0")/lib/soft-passkey.py"
 
 # Host-side forwards into the guest. The same numbers serve both arches: the two
@@ -103,6 +108,9 @@ SSH_PORT=12222
 # failed. The poll ends the moment HTTPS answers, normally on its first read;
 # its worst case adds 120s to the ceilings above, still inside the qemu
 # timeout for the reason given there.
+# The arm64 identity masks (prepare_arm64 says why); the growpart leg's boot
+# carries them too.
+ARM64_ID_MASKS="systemd.mask=keycloak.service systemd.mask=keycloak-db.service"
 BOOT_BUDGET=900 ; MU_TRIES=120 ; FB_TRIES=60 ; API_TRIES=48 ; HS_TRIES=60 ; ATREST_TRIES=60 ; TS_TRIES=30 ; KM_TRIES=30 ; SI_TRIES=30 ; SR_TRIES=30
 case "$ARCH" in
   amd64|arm64) ;;
@@ -205,7 +213,7 @@ prepare_arm64() {
   MTOOLS_SKIP_CHECK=1 mcopy -o -i "$IMG"@@"$BOOT_OFF" ::kernel_2712.img ::cmdline.txt "$WORK/" \
     || { echo "::error::could not read kernel_2712.img + cmdline.txt out of boot slot A"; exit 1; }
 
-  # The SHIPPED cmdline, verbatim, plus exactly two harness additions — so a
+  # The SHIPPED cmdline, verbatim, plus exactly three harness additions — so a
   # regression in root= / rootfstype= / rauc.slot / cgroup_enable fails here.
   #
   #   console=ttyAMA0 — `virt`'s only serial is a PL011. The image's own
@@ -222,7 +230,11 @@ prepare_arm64() {
   #     (Measured on the bench VM: systemd.journald.forward_to_console=1 does
   #     NOT do this — it forwards journal entries, not PID 1's transitions.)
   SHIPPED_CMDLINE="$(tr -d '\n' < "$WORK/cmdline.txt")"
-  CMDLINE="$SHIPPED_CMDLINE systemd.log_target=kmsg console=ttyAMA0,115200"
+  #   $ARM64_ID_MASKS — the identity service and its database, masked: arm64
+  #     runs under TCG here, and identity never runs emulated (testing.md,
+  #     Bryce 2026-11-08; geekdojo/geekdojo-brain#974). The arm64 identity
+  #     runtime is proved on the bench. Each cmdline echo line shows both.
+  CMDLINE="$SHIPPED_CMDLINE systemd.log_target=kmsg console=ttyAMA0,115200 $ARM64_ID_MASKS"
   echo "kernel cmdline: $CMDLINE"
   QEMU_KERNEL="$WORK/kernel_2712.img"
   QEMU_APPEND="$CMDLINE"
@@ -251,8 +263,10 @@ qemu_boot() {
   # is built with BR2_x86_corei7 (Nehalem baseline → SSE4.2); the default qemu64
   # CPU model lacks SSE4.2 so glibc's dynamic linker hits "invalid opcode" the
   # moment init runs. Real N100 hardware has SSE4.2+ so the build target is
-  # correct — this only affects emulation. (max works without KVM, which not
-  # all GH runners expose at /dev/kvm.)
+  # correct — this only affects emulation. amd64 runs under KVM only
+  # (qemu_exec refuses to start without a usable /dev/kvm; release.yml's udev
+  # step opens it on the runner): the identity service's JVM crashes under
+  # amd64 TCG (geekdojo/geekdojo-brain#974).
   # user-mode NIC with a host forward so the runner can curl the api/UI;
   # virtio-net matches the virtio-blk the image already boots from. The api
   # listens on :80 (HTTP bootstrap surface; RASPUTIN_HTTP_ADDR=:80 in
@@ -533,6 +547,28 @@ if [ "$sirep" = 1 ]; then
 fi
 SR_AT=$(( $(date +%s) - START ))
 
+# The identity service is ready (geekdojo/geekdojo-brain#974, amd64 only: the
+# arm64 smoke masks both identity units, see prepare_arm64). After the store
+# check, in this order, each read before the kill and asserted after it:
+#   (a) the realm wait (test/lib/identity-ready.sh): realm rasputin's
+#       discovery document answering 200 over mutual TLS with the api's
+#       identity client leaf, stopped early by a failed unit or the start-hold
+#       record, and bounded only by QEMU's budget through die_if_qemu_gone;
+#   (b) one GET /api/alerts on the store check's session: no identity: id.
+#       One read is enough, because the api's monitor computes on each read.
+# The image facts (c), the guest checks (d), the memory record (e) and the
+# role gate (f) follow below, after the facts reads.
+IR_RC="" IR_LAST="" IR_SECONDS="" ID_REPORT=""
+if [ "$ARCH" = amd64 ] && [ "$ok" = 1 ] && [ "$fb" = 1 ]; then
+  identity_realm_wait 2 ssh_guest die_if_qemu_gone
+  IR_RC=$?
+  if [ "$IR_RC" = 0 ] && [ "$SR_STAGE" = wait ]; then
+    _f=$(smoke_fetch)
+    ID_REPORT=$(identity_report_verdict "${_f%% *}" "${_f#* }")
+  fi
+fi
+ID_AT=$(( $(date +%s) - START ))
+
 TOTAL=$(( $(date +%s) - START ))
 
 # The failure diagnostic. The store's and the api's own logs go to the guest's
@@ -590,13 +626,15 @@ if [ "$ok" = 1 ] && [ "$fb" = 1 ]; then
     echo "active=$(systemctl show -P ActiveState postgresql.service)"
     echo "failed=$(systemctl list-units --failed --plain --no-legend postgresql.service | grep -c postgresql)"
     echo "running=$(cat /proc/[0-9]*/comm 2>/dev/null | grep -cx postgres)"
+    echo "java=$(cat /proc/[0-9]*/comm 2>/dev/null | grep -cx java)"
+    echo "pg_cgroups=$(for p in $(pidof postgres); do sed -n "s/^0:://p" /proc/$p/cgroup; done | sort -u | tr "\n" " ")"
   ' > "$PG_FACTS" 2>&1 || echo "identity-db facts: the guest's SSH call returned status $? (asserted below)"
 fi
 
 # The identity service's image facts (geekdojo/geekdojo-brain#971), read the
-# same way. Facts only: nothing here runs kc.sh or java, because this guest is
-# emulated and identity tests never run under emulation. kc.sh under the
-# image's shell and --optimized are proven on the bench (TC-971-26, TC-971-27).
+# same way. Facts only: nothing here runs kc.sh. On amd64 the units run it
+# under KVM (#974); on arm64 they are masked, and kc.sh under the image's
+# shell and --optimized are proven on the bench (TC-971-26, TC-971-27).
 KC_FACTS="$WORK/keycloak.facts"
 : > "$KC_FACTS"
 if [ "$ok" = 1 ] && [ "$fb" = 1 ]; then
@@ -608,16 +646,11 @@ if [ "$ok" = 1 ] && [ "$fb" = 1 ]; then
   ' > "$KC_FACTS" 2>&1 || echo "keycloak facts: the guest's SSH call returned status $? (asserted below)"
 fi
 
-# The identity units' image facts (geekdojo/geekdojo-brain#973, TC-973-29),
-# read the same way, on each SKU's smoke. Facts only, and no JVM: the units
-# ship with no [Install] and the image carries no identity config yet
-# (Identity 2.6), so nothing here starts Keycloak. leaves= says whether the
-# api minted the identity leaves on this boot. When it did, the api's reload
-# runs `systemctl reset-failed` on both units before it restarts them, and
-# systemd 258.7 refuses that for a unit nothing has loaded, so the restart is
-# not run either (test/identity-unit-functional.sh scenario 28 pins it): the
-# units are left never started, and ConditionResult=no below is the value a
-# unit that has not run reads.
+# The identity units' image facts (geekdojo/geekdojo-brain#973; #974,
+# TC-974-23 and TC-974-26), read the same way, on each SKU's smoke. On amd64
+# they are read after the realm wait above (F-974-05), so both units are
+# enabled by post-build.sh's links and active. On arm64 both are masked on the
+# kernel cmdline, so they read LoadState=masked.
 ID_FACTS="$WORK/identity-units.facts"
 : > "$ID_FACTS"
 if [ "$ok" = 1 ] && [ "$fb" = 1 ]; then
@@ -629,21 +662,79 @@ if [ "$ok" = 1 ] && [ "$fb" = 1 ]; then
     for u in keycloak keycloak-db; do
       echo "${u}_load=$(systemctl show -P LoadState $u.service)"
       echo "${u}_state=$(systemctl show -P ActiveState $u.service)"
-      echo "${u}_cond=$(systemctl show -P ConditionResult $u.service)"
+      echo "${u}_enabled=$(systemctl is-enabled $u.service 2>/dev/null)"
     done
     echo "failed=$(systemctl list-units --failed --plain --no-legend keycloak.service keycloak-db.service | grep -c keycloak)"
-    l=yes; for f in tls/identity-db-server/leaf.pem tls/identity-server/leaf.pem tls/identity-db-client/leaf.pk8; do
-      [ -e /var/lib/rasputin/$f ] || l=no; done
-    echo "leaves=$l"
     [ -x /usr/lib/rasputin/identity/rasputin-keycloak-hooks.sh ] && echo hook=executable || echo hook=not-executable
   ' > "$ID_FACTS" 2>&1 || echo "identity units facts: the guest's SSH call returned status $? (asserted below)"
+fi
+
+# (d) The identity guest checks (geekdojo/geekdojo-brain#967, #974),
+# test/lib/identity-guest-checks.sh with its two libraries, copied over SSH
+# stdin into a guest tmpfs directory and run as root with the image's values:
+# listen and listen-only (uids 991 and 992 on exactly 127.0.0.1:8543, :8544
+# and :5432), kc-tls on both Keycloak ports with the api's client leaf,
+# pg-tls with the db-client leaf (so the LoadCredential= key serves TLS on
+# the real image), pg-socket and at-rest. Every line must be PASS.
+# (e) keycloak.service's memory, recorded per build (F-974-04): memory.peak,
+# the running unit's MemoryMax, memory.events max and oom_kill, and
+# memory.stat anon.
+# (f) The role gate: role.controlplane moved aside and both units restarted,
+# each must be skipped (ConditionResult=no, inactive, not failed), and the
+# api's report must then hold an identity: id, which shows the api runs in
+# keycloak mode. The marker is restored. Last, because it stops both units.
+GC_OUT="$WORK/identity-guest-checks.out" MEM_FACTS="$WORK/identity-memory.facts" RG_FACTS="$WORK/identity-role-gate.facts"
+GC_RC="" RG_REPORT=""
+: > "$GC_OUT"; : > "$MEM_FACTS"; : > "$RG_FACTS"
+if [ "$ARCH" = amd64 ] && [ "$IR_RC" = 0 ]; then
+  GD=/run/boot-smoke-identity
+  if ssh_guest "umask 077 && mkdir -p $GD" </dev/null \
+    && ssh_guest "cat >$GD/identity-guest-checks.sh" <"$LIBDIR/identity-guest-checks.sh" \
+    && ssh_guest "cat >$GD/listen-sockets.sh" <"$LIBDIR/listen-sockets.sh" \
+    && ssh_guest "cat >$GD/secret-scan.sh" <"$LIBDIR/secret-scan.sh"; then
+    V=/var/lib/rasputin
+    SSH_CALL_TIMEOUT=120 ssh_guest "KC_HTTPS_PORT=8543 KC_MGMT_PORT=8544 DB_PORT=5432 DB_NAME=keycloak DB_USER=keycloak \
+      CA=$V/trust/identity-ca.pem CLIENT_LEAF=$V/tls/identity-api-client/leaf \
+      DB_CA=$V/trust/identity-ca.pem DB_CLIENT_LEAF=$V/tls/identity-db-client/leaf PSQL=/usr/bin/psql \
+      ATREST_CMD='/usr/lib/rasputin/atrest/rasputin-atrest-audit.sh -q' PERSIST=$V DB_DATA=$V/identity-db/data \
+      OUT=$GD/out ID_UIDS='991 992' sh $GD/identity-guest-checks.sh checks" </dev/null > "$GC_OUT" 2>&1
+    GC_RC=$?
+    ssh_guest "rm -rf $GD" </dev/null >/dev/null 2>&1
+  else
+    echo "identity guest checks: the scripts could not be copied to the guest" > "$GC_OUT"
+    GC_RC=copy
+  fi
+  SSH_CALL_TIMEOUT=120 ssh_guest '
+    cg=/sys/fs/cgroup$(systemctl show -P ControlGroup keycloak.service)
+    echo "state=$(systemctl show -P ActiveState keycloak.service)"
+    echo "peak=$(cat $cg/memory.peak 2>&1)"
+    echo "memory_max=$(systemctl show -P MemoryMax keycloak.service)"
+    echo "events_max=$(awk "\$1 == \"max\" { print \$2 }" $cg/memory.events 2>&1)"
+    echo "oom_kill=$(awk "\$1 == \"oom_kill\" { print \$2 }" $cg/memory.events 2>&1)"
+    echo "anon=$(awk "\$1 == \"anon\" { print \$2 }" $cg/memory.stat 2>&1)"
+  ' </dev/null > "$MEM_FACTS" 2>&1 || echo "identity memory: the guest's SSH call returned status $? (asserted below)"
+  R=/var/lib/rasputin/role.controlplane
+  SSH_CALL_TIMEOUT=120 ssh_guest "
+    mv $R $R.smoke-aside && echo moved=yes || echo moved=no
+    systemctl restart keycloak-db.service keycloak.service
+    for u in keycloak keycloak-db; do
+      echo \"\${u}=\$(systemctl show -P ConditionResult \$u.service) \$(systemctl show -P ActiveState \$u.service)\"
+    done
+    echo \"failed=\$(systemctl list-units --failed --plain --no-legend keycloak.service keycloak-db.service | grep -c keycloak)\"
+    true
+  " </dev/null > "$RG_FACTS" 2>&1 || echo "identity role gate: the guest's SSH call returned status $? (asserted below)"
+  if [ "$SR_STAGE" = wait ]; then
+    _f=$(smoke_fetch)
+    RG_REPORT=$(identity_report_verdict "${_f%% *}" "${_f#* }")
+  fi
+  ssh_guest "mv $R.smoke-aside $R && echo restored=yes || echo restored=no" </dev/null >> "$RG_FACTS" 2>&1
 fi
 
 kill "$QPID" 2>/dev/null || true
 echo "----- last 60 lines of console -----"; tail -60 "$CONSOLE_LOG" || true
 echo "----- $ARCH smoke timings (seconds from qemu start) -----"
 echo "https /healthz on its first read after :80 answered: HTTP ${HS_FIRST:-not asked}"
-echo "multi-user=${MU_AT}s firstboot=${FB_AT}s api+ui+dns=${API_AT}s atrest-verdict=${ATREST_AT}s tailscale-report=${TS_AT}s kernel-match=${KM_AT}s store-init=${SI_AT}s store-ready=${SR_AT}s total(incl. 70s soak)=${TOTAL}s"
+echo "multi-user=${MU_AT}s firstboot=${FB_AT}s api+ui+dns=${API_AT}s atrest-verdict=${ATREST_AT}s tailscale-report=${TS_AT}s kernel-match=${KM_AT}s store-init=${SI_AT}s store-ready=${SR_AT}s identity-ready=${ID_AT}s total(incl. 70s soak)=${TOTAL}s"
 
 # ------------------------------------------------------------ assertions ------
 [ "$ok" = 1 ] || { echo "::error::$ARCH image did not reach multi-user in QEMU"; exit 1; }
@@ -815,9 +906,22 @@ echo "identity database facts:"; sed 's/^/  /' "$PG_FACTS"
   || { echo "::error::postgresql.service is '$(pg_fact active)' on the image, expected inactive: something started Buildroot's masked unit"; exit 1; }
 [ "$(pg_fact failed)" = 0 ] \
   || { echo "::error::postgresql.service is listed by systemctl --failed on the image"; exit 1; }
-[ "$(pg_fact running)" = 0 ] \
-  || { echo "::error::$(pg_fact running) process(es) named postgres are running on the image, where nothing should start PostgreSQL yet"; exit 1; }
-echo "PostgreSQL $PG_EXPECT on the image, postgres 992:992, keycloak 991:991, postgresql.service masked and not running"
+if [ "$ARCH" = amd64 ]; then
+  # Every postgres process is the identity database's (#974): none from
+  # Buildroot's masked unit or anything else.
+  [ "$(pg_fact running)" -gt 0 ] 2>/dev/null \
+    || { echo "::error::no process named postgres runs on the amd64 image, where keycloak-db.service must be running the identity database"; exit 1; }
+  [ "$(pg_fact pg_cgroups)" = "/system.slice/keycloak-db.service " ] \
+    || { echo "::error::the postgres processes on the image are in the cgroups '$(pg_fact pg_cgroups)', expected only /system.slice/keycloak-db.service"; exit 1; }
+  echo "PostgreSQL $PG_EXPECT on the image, postgres 992:992, keycloak 991:991, postgresql.service masked and inactive, $(pg_fact running) postgres process(es), all in keycloak-db.service"
+else
+  # arm64: both identity units are masked on the cmdline (TC-974-26).
+  [ "$(pg_fact running)" = 0 ] \
+    || { echo "::error::$(pg_fact running) process(es) named postgres are running on the arm64 image, where the identity database is masked"; exit 1; }
+  [ "$(pg_fact java)" = 0 ] \
+    || { echo "::error::$(pg_fact java) process(es) named java are running on the arm64 image, where the identity service is masked"; exit 1; }
+  echo "PostgreSQL $PG_EXPECT on the image, postgres 992:992, keycloak 991:991, postgresql.service masked, no postgres or java running (identity masked on arm64)"
+fi
 
 # The identity service (geekdojo/geekdojo-brain#971), from the facts read over
 # SSH before the kill: the Keycloak the package pins, its two links, and the
@@ -864,26 +968,61 @@ esac
   || { echo "::error::rasputin-api's oom_score_adj is '$(id_fact api_oom)', expected -950 (store -999, api and agent -950, identity -900)"; exit 1; }
 [ "$(id_fact agent_oom)" = -950 ] \
   || { echo "::error::rasputin-agent's oom_score_adj is '$(id_fact agent_oom)', expected -950 (store -999, api and agent -950, identity -900)"; exit 1; }
-for u in keycloak keycloak-db; do
-  [ "$(id_fact "${u}_load")" = loaded ] \
-    || { echo "::error::$u.service is '$(id_fact "${u}_load")' on the image, expected loaded"; exit 1; }
-  [ "$(id_fact "${u}_state")" = inactive ] \
-    || { echo "::error::$u.service is '$(id_fact "${u}_state")' on the image, expected inactive: nothing enables it before Identity 2.6"; exit 1; }
-done
-[ "$(id_fact failed)" = 0 ] \
-  || { echo "::error::an identity unit is listed by systemctl --failed on the image"; exit 1; }
-if [ "$(id_fact leaves)" = yes ]; then
-  for u in keycloak keycloak-db; do
-    [ "$(id_fact "${u}_cond")" = no ] \
-      || { echo "::error::the api minted the identity leaves, and $u.service's ConditionResult is '$(id_fact "${u}_cond")', expected no: with no identity config on the image it must never have started"; exit 1; }
-  done
-  ID_LEAVES="minted, neither unit started (ConditionResult=no)"
-else
-  ID_LEAVES="not minted on this boot, so neither unit was started"
-fi
 [ "$(id_fact hook)" = executable ] \
   || { echo "::error::/usr/lib/rasputin/identity/rasputin-keycloak-hooks.sh is not executable on the image"; exit 1; }
-echo "identity units loaded and not failed (leaves $ID_LEAVES), curl with OpenSSL and https, api and agent at -950, hook executable"
+[ "$(id_fact failed)" = 0 ] \
+  || { echo "::error::an identity unit is listed by systemctl --failed on the image"; exit 1; }
+if [ "$ARCH" = amd64 ]; then
+  # (a) The realm wait, before the facts (TC-974-20).
+  [ "$IR_RC" = 0 ] \
+    || { echo "::error::realm rasputin never answered 200 on its discovery document over mutual TLS on the amd64 control plane; the realm wait ended after ${IR_SECONDS:-?} seconds on: ${IR_LAST:-the wait never ran, because the boot or firstboot did not complete}"; exit 1; }
+  echo "realm rasputin answered 200 on its discovery document after $IR_SECONDS seconds"
+  # (b) The api's identity report (TC-974-21).
+  [ "$ID_REPORT" = ready ] \
+    || { echo "::error::the api does not report the identity service ready after realm rasputin answered: GET /api/alerts said '${ID_REPORT:-nothing, because the store check had no session to read it with}'"; exit 1; }
+  echo "the api reports the identity service ready: GET /api/alerts holds no identity: alert"
+  # (c) Both units enabled by post-build.sh's links, and active (TC-974-23).
+  for u in keycloak keycloak-db; do
+    [ "$(id_fact "${u}_enabled")" = enabled ] \
+      || { echo "::error::systemctl is-enabled $u.service says '$(id_fact "${u}_enabled")' on the amd64 image, expected enabled by post-build.sh's link"; exit 1; }
+    [ "$(id_fact "${u}_state")" = active ] \
+      || { echo "::error::$u.service is '$(id_fact "${u}_state")' on the amd64 image after the realm answered, expected active"; exit 1; }
+  done
+  echo "identity units enabled and active, none failed; curl with OpenSSL and https, api and agent at -950, hook executable"
+  # (d) The guest checks (TC-974-22).
+  echo "identity guest checks:"; sed 's/^/  /' "$GC_OUT"
+  [ "$GC_RC" = 0 ] && [ -s "$GC_OUT" ] && ! grep -qv '^PASS ' "$GC_OUT" \
+    || { echo "::error::the identity guest checks did not all pass on the amd64 image (exit ${GC_RC:-not run}): $(grep -v '^PASS ' "$GC_OUT" | head -1)"; exit 1; }
+  echo "identity guest checks: every line PASS"
+  # (e) Memory, recorded; only an OOM kill or an inactive unit fails (TC-974-24).
+  mem_fact() { sed -n "s/^$1=//p" "$MEM_FACTS" | tr -d '\r' | head -1; }
+  echo "keycloak.service memory: memory.peak=$(mem_fact peak) MemoryMax=$(mem_fact memory_max) memory.events max=$(mem_fact events_max) oom_kill=$(mem_fact oom_kill) memory.stat anon=$(mem_fact anon) state=$(mem_fact state)"
+  [ "$(mem_fact oom_kill)" = 0 ] && [ "$(mem_fact state)" = active ] \
+    || { echo "::error::keycloak.service was OOM-killed or is not active: oom_kill=$(mem_fact oom_kill) state=$(mem_fact state) memory.peak=$(mem_fact peak) MemoryMax=$(mem_fact memory_max) memory.events max=$(mem_fact events_max) anon=$(mem_fact anon)"; exit 1; }
+  # (f) The role gate (TC-974-25).
+  echo "identity role gate:"; sed 's/^/  /' "$RG_FACTS"
+  rg_fact() { sed -n "s/^$1=//p" "$RG_FACTS" | tr -d '\r' | head -1; }
+  for u in keycloak keycloak-db; do
+    [ "$(rg_fact "$u")" = "no inactive" ] \
+      || { echo "::error::with role.controlplane moved aside, $u.service reads '$(rg_fact "$u")', expected ConditionResult=no and inactive"; exit 1; }
+  done
+  [ "$(rg_fact failed)" = 0 ] \
+    || { echo "::error::with role.controlplane moved aside, an identity unit is listed by systemctl --failed"; exit 1; }
+  case "$RG_REPORT" in
+    "not-ready: "*identity:*) ;;
+    *) echo "::error::with both identity units skipped, GET /api/alerts holds no identity: alert ('${RG_REPORT:-not read}'), so the api is not running in keycloak mode"; exit 1 ;;
+  esac
+  [ "$(rg_fact restored)" = yes ] \
+    || { echo "::error::role.controlplane could not be restored after the role gate"; exit 1; }
+  echo "role gate: both identity units skipped without the marker, the api reported '${RG_REPORT#not-ready: }', marker restored"
+else
+  # arm64 (TC-974-26): both identity units masked on the cmdline.
+  for u in keycloak keycloak-db; do
+    [ "$(id_fact "${u}_load")" = masked ] \
+      || { echo "::error::$u.service is LoadState '$(id_fact "${u}_load")' on the arm64 image, expected masked by the cmdline's systemd.mask"; exit 1; }
+  done
+  echo "identity units masked on arm64 (identity never runs emulated); curl with OpenSSL and https, api and agent at -950, hook executable"
+fi
 
 # The booted kernel is one this rootfs was built for (geekdojo/geekdojo-brain#807).
 # A fresh flash boots its own kernel, so this is the baseline: it proves the
@@ -1101,7 +1240,7 @@ else
   # PID 1 logging to kmsg its unit messages reach the journal as kernel lines
   # without UNIT= or MESSAGE_ID=, which assertion (i) reads. A Pi logs them to
   # the journal, as this boot now does.
-  QEMU_APPEND="$SHIPPED_CMDLINE console=ttyAMA0,115200"
+  QEMU_APPEND="$SHIPPED_CMDLINE console=ttyAMA0,115200 $ARM64_ID_MASKS"
   echo "growpart leg kernel cmdline: $QEMU_APPEND"
 fi
 # die_if_qemu_gone reads QPID and CONSOLE_LOG: from here on they are the leg's.

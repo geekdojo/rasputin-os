@@ -13,18 +13,22 @@
 #   listening_sockets
 #       The same, for every LISTEN row in the tables, owned by any process.
 #       For "nothing listens on this port" when there is no process to ask.
+#   listening_sockets_of_uids UIDS
+#       The same, for the LISTEN rows whose uid column is one of UIDS
+#       (space-separated numbers): the sockets those users' processes hold,
+#       read without an fd listing (geekdojo/geekdojo-brain#974).
 #
 # Why the fd listing. /proc/<pid>/net/tcp is the whole network namespace's
 # table, not the process's; a row belongs to the process only if one of its
 # fds is that row's socket inode.
 #
-# A table row is "sl: LOCAL REMOTE STATE ... INODE ...", LOCAL being HEX:PORT
+# A table row is "sl: LOCAL REMOTE STATE ... UID TIMEOUT INODE ...", LOCAL being HEX:PORT
 # with 8 hex digits for IPv4 and 32 for IPv6, each 32-bit word in host (little
 # endian) byte order. State 0A is LISTEN. Header lines and anything else are
 # skipped. Empty input prints nothing and returns 0.
 
 _listen_parse() {
-	awk -v owned="$1" '
+	awk -v owned="$1" -v uids="${2:-}" '
 		function hex(s,    i, n, c) {
 			n = 0
 			s = toupper(s)
@@ -79,10 +83,14 @@ _listen_parse() {
 			n++
 			row[n] = addr ":" hex(a[2])
 			ino[n] = $10
+			uid[n] = $8
 		}
 		END {
+			nu = split(uids, u, " ")
+			for (i = 1; i <= nu; i++) want[u[i]] = 1
 			for (i = 1; i <= n; i++) {
 				if (owned == "yes" && !(ino[i] in fd)) continue
+				if (nu > 0 && !(uid[i] in want)) continue
 				if (row[i] in seen) continue
 				seen[row[i]] = 1
 				print row[i]
@@ -93,3 +101,4 @@ _listen_parse() {
 
 bao_listeners() { _listen_parse yes; }
 listening_sockets() { _listen_parse no; }
+listening_sockets_of_uids() { _listen_parse no "$1"; }

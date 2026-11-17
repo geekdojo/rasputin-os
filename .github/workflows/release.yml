@@ -519,6 +519,16 @@ jobs:
           label: smoke-amd64
           packages: qemu-system-x86 ovmf mtools bind9-dnsutils e2fsprogs
           require: qemu-system-x86_64 mcopy dig debugfs
+      # KVM for the amd64 guest (geekdojo/geekdojo-brain#974): the identity
+      # service's JVM crashes under amd64 TCG, so qemu_exec refuses to start
+      # without a usable /dev/kvm. The hosted runner has the device but not
+      # the permission; this udev rule opens it to the runner user.
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: n100-*
@@ -1250,6 +1260,17 @@ jobs:
           label: update-smoke-${{ matrix.arch }}
           packages: ${{ matrix.arch == 'amd64' && 'qemu-system-x86 ovmf' || 'qemu-system-arm' }} mtools dosfstools
           require: ${{ matrix.arch == 'amd64' && 'qemu-system-x86_64' || 'qemu-system-aarch64' }} mcopy mkfs.vfat
+      # KVM for the amd64 guest (geekdojo/geekdojo-brain#974): the identity
+      # service's JVM crashes under amd64 TCG, so qemu_exec refuses to start
+      # without a usable /dev/kvm. The hosted runner has the device but not
+      # the permission; this udev rule opens it to the runner user.
+      - name: Enable KVM
+        if: matrix.arch == 'amd64'
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ${{ matrix.sku }}-${{ needs.sign.outputs.version }}

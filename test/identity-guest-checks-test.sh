@@ -2,7 +2,8 @@
 #
 # Tests for test/lib/identity-guest-checks.sh, the identity service's facts
 # checked on the guest (geekdojo/geekdojo-brain#967, TC-967-11 to TC-967-15;
-# F-967-01, F-967-02, F-967-04, F-967-05).
+# F-967-01, F-967-02, F-967-04, F-967-05), and its listen-only fact
+# (geekdojo/geekdojo-brain#974, TC-974-10).
 #
 # How. The real script runs with listen-sockets.sh and secret-scan.sh beside
 # it, as on the guest, against a fake /proc (PROC_ROOT), and with a fake curl,
@@ -72,8 +73,13 @@ chmod +x "$TMP/bin/curl" "$TMP/bin/psql" "$TMP/bin/journalctl"
 PATH="$TMP/bin:$PATH"
 export PATH
 
-# row HEXADDR PORT — one LISTEN row of /proc/net/tcp{,6}.
-row() { printf '   0: %s:%04X 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 1 1\n' "$1" "$2"; }
+# row HEXADDR PORT [UID] — one LISTEN row of /proc/net/tcp{,6}, owned by UID
+# (default: the port's identity user, 992 for 5432 and 991 otherwise).
+row() {
+	_uid=${3:-}
+	[ -n "$_uid" ] || { [ "$2" = 5432 ] && _uid=992 || _uid=991; }
+	printf '   0: %s:%04X 00000000:0000 0A 00000000:00000000 00:00000000 00000000 %5s        0 1 1\n' "$1" "$2" "$_uid"
+}
 V4_LO=0100007F V4_ANY=00000000
 V6_LO=00000000000000000000000001000000 V6_ANY=00000000000000000000000000000000
 HDR='  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode'
@@ -82,13 +88,13 @@ tables() {
 	{ echo "$HDR"; printf '%s' "$1"; } >"$TMP/proc/net/tcp"
 	{ echo "$HDR"; printf '%s' "$2"; } >"$TMP/proc/net/tcp6"
 }
-good_tables() { tables "$(row $V4_LO 8543; row $V4_LO 8544)" "$(row $V6_LO 8543; row $V6_LO 5432)"; }
+good_tables() { tables "$(row $V4_LO 8543; row $V4_LO 8544; row $V4_LO 5432)" ""; }
 
 baseline() {
 	export KC_HTTPS_PORT=8543 KC_MGMT_PORT=8544 DB_PORT=5432 DB_NAME=keycloak DB_USER=keycloak
 	export CA="$TMP/ca.pem" CLIENT_LEAF="$TMP/kc-client" DB_CA="$TMP/db-ca.pem" DB_CLIENT_LEAF="$TMP/db-client"
 	export PSQL="$TMP/bin/psql" PERSIST="$TMP/persist" DB_DATA="$TMP/persist/postgresql" OUT="$TMP/out"
-	export PROC_ROOT="$TMP/proc" FAKE_JOURNAL="$TMP/journal"
+	export PROC_ROOT="$TMP/proc" FAKE_JOURNAL="$TMP/journal" ID_UIDS="991 992"
 	export ATREST_CMD='printf "%s\n" "rasputin-atrest: starting" "$ATREST_LINE"'
 	export ATREST_LINE="rasputin-atrest: PASS checked=3"
 	export CURL_BARE_8543=000 CURL_LEAF_8543=200 CURL_BARE_8544=000 CURL_LEAF_8544=404
@@ -130,10 +136,31 @@ for SH in $TEST_SHELLS; do
 	checks
 	check "TC-967-11 [$SH] no row for 8544 is FAIL naming the port, exit 1" \
 		"$(yes_if test "$RC" = 1 -a "$(line 'listen port=8544')" = "FAIL listen port=8544: nothing listens on it")" "rc=$RC $RES"
-	good_tables
+	tables "$(row $V4_LO 8543; row $V4_LO 8544)" "$(row $V6_LO 8543 0; row $V6_LO 5432 0)"
 	checks
-	check "TC-967-11 [$SH] every port only on 127.0.0.1 or [::1] is PASS for each, exit 0" \
-		"$(yes_if test "$RC" = 0 -a "$(line ' listen port=' | grep -c '^PASS ')" = 3)" "rc=$RC $RES"
+	check "TC-967-11 [$SH] every port only on 127.0.0.1 or [::1] is PASS for each" \
+		"$(yes_if test "$(line ' listen port=' | grep -c '^PASS ')" = 3)" "rc=$RC $RES"
+
+	# TC-974-10: the rows the identity uids own are exactly the three.
+	# lo_case LABEL WANT TCP4 TCP6 — listen-only's verdict word is WANT.
+	lo_case() {
+		tables "$3" "$4"
+		checks
+		check "TC-974-10 [$SH] $1 is $2" "$(yes_if test "$(line 'listen-only' | cut -d' ' -f1)" = "$2")" "rc=$RC $RES"
+	}
+	lo_case "991 and 992 on exactly 127.0.0.1:8543, :8544 and :5432" PASS \
+		"$(row $V4_LO 8543; row $V4_LO 8544; row $V4_LO 5432)" ""
+	lo_case "a fourth 991 socket, 127.0.0.1:43421," FAIL \
+		"$(row $V4_LO 8543; row $V4_LO 8544; row $V4_LO 5432; row $V4_LO 43421)" ""
+	check "TC-974-10 [$SH] the fourth socket is named" "$(yes_if has 'FAIL listen-only uids=991 992: listens beyond the three on 127.0.0.1:43421')" "$RES"
+	lo_case "a 991 0.0.0.0:8543" FAIL "$(row $V4_ANY 8543; row $V4_LO 8544; row $V4_LO 5432)" ""
+	lo_case "a 991 tcp6 row" FAIL "$(row $V4_LO 8543; row $V4_LO 8544; row $V4_LO 5432)" "$(row $V6_LO 8543)"
+	lo_case "5432 missing" FAIL "$(row $V4_LO 8543; row $V4_LO 8544)" ""
+	check "TC-974-10 [$SH] the missing 5432 is named" "$(yes_if has 'nothing listens on 127.0.0.1:5432')" "$RES"
+	lo_case "a uid 0 socket on 9999 beside the three (ignored)" PASS \
+		"$(row $V4_LO 8543; row $V4_LO 8544; row $V4_LO 5432; row $V4_ANY 9999 0)" ""
+	lo_case "an empty table" FAIL "" ""
+	good_tables
 
 	# TC-967-12: Keycloak TLS on both ports (F-967-05).
 	for p in 8543 8544; do
@@ -222,10 +249,11 @@ for SH in $TEST_SHELLS; do
 		"$(yes_if eval 'test "$RC" = 2 && has "INCONCLUSIVE scan tree: INCONCLUSIVE needles=0"')" "rc=$RC $RES"
 	check "TC-967-15 [$SH] the needles file is gone after an empty scan" "$(yes_if test -z "$(ls -A "$TMP/out")")"
 	for v in KC_HTTPS_PORT KC_MGMT_PORT DB_PORT DB_NAME DB_USER CA CLIENT_LEAF DB_CA DB_CLIENT_LEAF \
-		PSQL ATREST_CMD PERSIST DB_DATA OUT; do
+		PSQL ATREST_CMD PERSIST DB_DATA OUT ID_UIDS; do
 		baseline
 		RES=$(unset "$v"; shell_run "$G/identity-guest-checks.sh" checks 2>&1); RC=$?
-		check "TC-967-15 [$SH] $v unset is INCONCLUSIVE missing=$v, exit 2" \
+		_tc=TC-967-15; [ "$v" = ID_UIDS ] && _tc=TC-974-10
+		check "$_tc [$SH] $v unset is INCONCLUSIVE missing=$v, exit 2" \
 			"$(yes_if test "$RC" = 2 -a "$RES" = "INCONCLUSIVE missing=$v")" "rc=$RC $RES"
 	done
 	rm -rf "$PERSIST" "$TMP/out"
