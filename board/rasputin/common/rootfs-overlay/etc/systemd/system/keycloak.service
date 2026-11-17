@@ -1,0 +1,121 @@
+# The identity service (geekdojo/geekdojo-brain#973, Identity 2.5;
+# platform.md §3.2): the pinned Keycloak (#971) on the pinned JRE (#969),
+# sandboxed, its own uid, loopback only. There is no [Install] section and no
+# wants link here: Identity 2.6 enables it.
+# test/identity-unit-test.sh asserts every line here;
+# test/identity-unit-functional.sh runs it under real systemd 258.7 with the
+# real pinned Keycloak and JRE.
+[Unit]
+Description=Rasputin identity service
+# The data and every credential source are on the persistent partition.
+RequiresMountsFor=/var/lib/rasputin
+# firstboot writes the role marker; the database answers before Keycloak
+# opens its pool.
+After=rasputin-firstboot.service keycloak-db.service
+# Starting the identity service starts its database, and stopping or
+# restarting the database stops or restarts the identity service.
+Requires=keycloak-db.service
+# No ordering on rasputin-api.service in either direction: the api restarts
+# this unit from inside its own start on a fresh leaf, and an order would
+# deadlock that. The api's readiness is #979's monitor, not an order.
+# Role gate: only a control plane runs the identity service.
+ConditionPathExists=/var/lib/rasputin/role.controlplane
+# Until the api mints the identity CA and these leaves, the service is skipped
+# cleanly (inactive, not failed); the api restarts it once it has written
+# them. mesh-ca.pem has NO condition on purpose: a control plane without it is
+# broken, so the credential step fails the unit loudly instead of skipping.
+ConditionPathExists=/var/lib/rasputin/trust/identity-ca.pem
+ConditionPathExists=/var/lib/rasputin/tls/identity-server/leaf.pem
+ConditionPathExists=/var/lib/rasputin/tls/identity-server/leaf.key
+ConditionPathExists=/var/lib/rasputin/tls/identity-db-client/leaf.pem
+ConditionPathExists=/var/lib/rasputin/tls/identity-db-client/leaf.pk8
+# The configuration Identity 2.6 bakes into the image. Until then the unit
+# skips rather than failing on every control plane whose api has minted the
+# leaves. A deviation from platform.md §3.2, recorded in #973.
+ConditionPathExists=/etc/rasputin/identity/keycloak.conf
+
+[Service]
+# kc.sh is the main process and runs the JVM as its child. Readiness is the
+# start wait below, not a notify.
+Type=exec
+# The static keycloak user and group, 991:991
+# (package/rasputin-identity-db, RASPUTIN_IDENTITY_DB_USERS).
+User=keycloak
+Group=keycloak
+# kc.sh exits 143 on SIGTERM. For the main process that is an orderly stop;
+# for the start wait's control process it is the TERM of a stop during
+# start-post (systemd counts SuccessExitStatus= for control commands too).
+SuccessExitStatus=143
+# A bound far outside a normal start, never infinity (F-979-11; ARCH-FACTS,
+# clarified 2026-11-14). It covers each start phase, the start wait included.
+# Twice Keycloak's own 30-minute migration bound, and about 45 times the
+# slowest first start #957 measured (80 s).
+TimeoutStartSec=1h
+Environment=JAVA_HOME=/usr/lib/temurin-jre
+# glibc's per-thread arenas would grow native memory past the reserve.
+Environment=MALLOC_ARENA_MAX=2
+# #957's measured heap; -Xms128m is platform §7.2's planning value.
+Environment="JAVA_OPTS_KC_HEAP=-Xms128m -Xmx384m"
+# No perf data file, no error or core file, no heap dump (each would write
+# outside data/ or copy memory to disk); IPv4 only, as the listener is
+# 127.0.0.1; a process id Narayana takes from a UUID, not a socket (#958's
+# K-P3 finding); and #957's measured metaspace, code cache and direct memory
+# caps, so the JVM stays inside MemoryMax.
+Environment="JAVA_OPTS_APPEND=-XX:-UsePerfData -XX:ErrorFile=/dev/null -XX:-CreateCoredumpOnCrash -Djava.awt.headless=true -Djava.net.preferIPv4Stack=true -Dcom.arjuna.ats.internal.arjuna.utils.processImplementation=com.arjuna.ats.internal.arjuna.utils.UuidProcessId -XX:MaxMetaspaceSize=192m -XX:ReservedCodeCacheSize=64m -XX:MaxDirectMemorySize=16m"
+# The start-failure hold (#979 contract §2): refuses the fourth start in a row
+# that never reached /health/started. `+` runs it as root outside this
+# sandbox; no `-`, so a refusal fails the start.
+ExecStartPre=+/usr/lib/rasputin/identity/rasputin-keycloak-hooks.sh hold
+# ExecStartPre= slot for Identity 2.7's identity-stage-import.sh.
+ExecStart=/usr/lib/keycloak/bin/kc.sh --config-file=/etc/rasputin/identity/keycloak.conf start --optimized --import-realm
+# The start wait (#979 contract §1): `active` only once /health/started
+# answers UP over mutual TLS. No `-`: a JVM that dies first fails the start.
+ExecStartPost=+/usr/lib/rasputin/identity/rasputin-keycloak-hooks.sh wait
+# The exit record of every invocation (#979 contract §3). `-`: it reports, it
+# never fails the unit.
+ExecStopPost=-+/usr/lib/rasputin/identity/rasputin-keycloak-hooks.sh exit
+# Everything root writes for the service reaches it here: the keycloak uid can
+# read none of these source directories. A renewed leaf needs a restart; the
+# api does that.
+LoadCredential=server.pem:/var/lib/rasputin/tls/identity-server/leaf.pem
+LoadCredential=server.key:/var/lib/rasputin/tls/identity-server/leaf.key
+LoadCredential=identity-ca.pem:/var/lib/rasputin/trust/identity-ca.pem
+LoadCredential=mesh-ca.pem:/var/lib/rasputin/trust/mesh-ca.pem
+LoadCredential=db-client.pem:/var/lib/rasputin/tls/identity-db-client/leaf.pem
+LoadCredential=db-client.pk8:/var/lib/rasputin/tls/identity-db-client/leaf.pk8
+# A process exit is a fact, so the service restarts on it. systemd's own
+# restart delay and start limit apply; this unit chooses no duration. The
+# hold above is what stops a JVM that never starts.
+Restart=always
+# The filesystem is read-only to the service except its own directory.
+ProtectSystem=strict
+ReadWritePaths=/var/lib/rasputin/keycloak
+PrivateTmp=yes
+PrivateDevices=yes
+# PrivateDevices= closes the unit's device policy, a cgroup property no `+`
+# lifts, so without this the hooks above could not open /dev/kmsg. It grants
+# the JVM nothing: its private /dev has no kmsg node.
+DeviceAllow=/dev/kmsg w
+NoNewPrivileges=yes
+# No capabilities at all.
+CapabilityBoundingSet=
+# Soft and hard: a core is a copy of the service's memory.
+LimitCORE=0
+# Loopback TCP for its listeners and its database, nothing else.
+RestrictAddressFamilies=AF_INET AF_UNIX
+IPAddressDeny=any
+IPAddressAllow=localhost
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+# #957's measured reserve (s4c-cp1 reserves.env; peak 812 MiB). No
+# MemoryHigh: below the working set it stalls with no kill and no restart.
+MemoryMax=832M
+MemorySwapMax=0
+# The OOM order: store -999, api and agent -950, identity -900, all else 0.
+OOMScoreAdjust=-900

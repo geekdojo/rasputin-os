@@ -216,8 +216,17 @@ BR2_PACKAGE_OPENBAO=y
 BR2_PACKAGE_RASPUTIN_IDENTITY_DB=y
 # The identity service: the pinned Keycloak, built at image build with the
 # api tarball's identity/keycloak-build.conf, and the Java runtime it selects
-# (geekdojo/geekdojo-brain#971). No unit yet: nothing starts it.
+# (geekdojo/geekdojo-brain#971). keycloak.service runs it (#973).
 BR2_PACKAGE_KEYCLOAK=y
+# The identity service's start wait, keycloak.service's ExecStartPost=
+# (geekdojo/geekdojo-brain#973): curl asks /health/started over TLS 1.3 with a
+# client certificate. The image has no other HTTPS client. OpenSSL is already
+# selected by the identity database; curl's extra protocols (FTP, SMTP,
+# telnet and the rest) stay out, as nothing here uses them.
+BR2_PACKAGE_LIBCURL=y
+BR2_PACKAGE_LIBCURL_CURL=y
+BR2_PACKAGE_LIBCURL_OPENSSL=y
+# BR2_PACKAGE_LIBCURL_EXTRA_PROTOCOLS_FEATURES is not set
 
 # --- rootfs: squashfs (read-only, verity-friendly) ---
 BR2_TARGET_ROOTFS_SQUASHFS=y

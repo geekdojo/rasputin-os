@@ -608,6 +608,37 @@ if [ "$ok" = 1 ] && [ "$fb" = 1 ]; then
   ' > "$KC_FACTS" 2>&1 || echo "keycloak facts: the guest's SSH call returned status $? (asserted below)"
 fi
 
+# The identity units' image facts (geekdojo/geekdojo-brain#973, TC-973-29),
+# read the same way, on each SKU's smoke. Facts only, and no JVM: the units
+# ship with no [Install] and the image carries no identity config yet
+# (Identity 2.6), so nothing here starts Keycloak. leaves= says whether the
+# api minted the identity leaves on this boot. When it did, the api's reload
+# runs `systemctl reset-failed` on both units before it restarts them, and
+# systemd 258.7 refuses that for a unit nothing has loaded, so the restart is
+# not run either (test/identity-unit-functional.sh scenario 28 pins it): the
+# units are left never started, and ConditionResult=no below is the value a
+# unit that has not run reads.
+ID_FACTS="$WORK/identity-units.facts"
+: > "$ID_FACTS"
+if [ "$ok" = 1 ] && [ "$fb" = 1 ]; then
+  SSH_CALL_TIMEOUT=120 ssh_guest '
+    echo "curl=$(curl --version 2>&1 | head -1)"
+    echo "protocols=$(curl --version 2>&1 | sed -n "s/^Protocols: //p")"
+    echo "api_oom=$(cat /proc/$(systemctl show -P MainPID rasputin-api.service)/oom_score_adj 2>&1)"
+    echo "agent_oom=$(cat /proc/$(systemctl show -P MainPID rasputin-agent.service)/oom_score_adj 2>&1)"
+    for u in keycloak keycloak-db; do
+      echo "${u}_load=$(systemctl show -P LoadState $u.service)"
+      echo "${u}_state=$(systemctl show -P ActiveState $u.service)"
+      echo "${u}_cond=$(systemctl show -P ConditionResult $u.service)"
+    done
+    echo "failed=$(systemctl list-units --failed --plain --no-legend keycloak.service keycloak-db.service | grep -c keycloak)"
+    l=yes; for f in tls/identity-db-server/leaf.pem tls/identity-server/leaf.pem tls/identity-db-client/leaf.pk8; do
+      [ -e /var/lib/rasputin/$f ] || l=no; done
+    echo "leaves=$l"
+    [ -x /usr/lib/rasputin/identity/rasputin-keycloak-hooks.sh ] && echo hook=executable || echo hook=not-executable
+  ' > "$ID_FACTS" 2>&1 || echo "identity units facts: the guest's SSH call returned status $? (asserted below)"
+fi
+
 kill "$QPID" 2>/dev/null || true
 echo "----- last 60 lines of console -----"; tail -60 "$CONSOLE_LOG" || true
 echo "----- $ARCH smoke timings (seconds from qemu start) -----"
@@ -809,6 +840,50 @@ case "$(kc_fact sh)" in
   *) echo "::error::/bin/sh on the image resolves to '$(kc_fact sh)', expected busybox, the shell the bench proves kc.sh under"; exit 1 ;;
 esac
 echo "Keycloak $KC_EXPECT on the image, data and themes/rasputin linked, /bin/sh is busybox (facts only; kc.sh is proven on the bench)"
+
+# The identity units (geekdojo/geekdojo-brain#973, TC-973-29), from the facts
+# read over SSH before the kill, on each SKU: the start wait's curl with
+# OpenSSL and HTTPS, the api and the agent at -950 in the OOM order, both
+# identity units loaded and never failed, skipped by their conditions once the
+# api has minted the leaves (never started: see the facts above), and the hook
+# executable. The at-rest verdict
+# asserted above covers the identity rows.
+id_fact() { sed -n "s/^$1=//p" "$ID_FACTS" | tr -d '\r' | head -1; }
+[ -s "$ID_FACTS" ] \
+  || { echo "::error::the guest did not answer the identity units' SSH query before the kill, so nothing checked curl, the OOM order or the identity units"; exit 1; }
+echo "identity units facts:"; sed 's/^/  /' "$ID_FACTS"
+case "$(id_fact curl)" in
+  *OpenSSL/*) ;;
+  *) echo "::error::curl --version on the image says '$(id_fact curl)', expected a libcurl built with OpenSSL for the start wait"; exit 1 ;;
+esac
+case " $(id_fact protocols) " in
+  *" https "*) ;;
+  *) echo "::error::curl on the image lists the protocols '$(id_fact protocols)', which do not include https, so the start wait cannot ask /health/started"; exit 1 ;;
+esac
+[ "$(id_fact api_oom)" = -950 ] \
+  || { echo "::error::rasputin-api's oom_score_adj is '$(id_fact api_oom)', expected -950 (store -999, api and agent -950, identity -900)"; exit 1; }
+[ "$(id_fact agent_oom)" = -950 ] \
+  || { echo "::error::rasputin-agent's oom_score_adj is '$(id_fact agent_oom)', expected -950 (store -999, api and agent -950, identity -900)"; exit 1; }
+for u in keycloak keycloak-db; do
+  [ "$(id_fact "${u}_load")" = loaded ] \
+    || { echo "::error::$u.service is '$(id_fact "${u}_load")' on the image, expected loaded"; exit 1; }
+  [ "$(id_fact "${u}_state")" = inactive ] \
+    || { echo "::error::$u.service is '$(id_fact "${u}_state")' on the image, expected inactive: nothing enables it before Identity 2.6"; exit 1; }
+done
+[ "$(id_fact failed)" = 0 ] \
+  || { echo "::error::an identity unit is listed by systemctl --failed on the image"; exit 1; }
+if [ "$(id_fact leaves)" = yes ]; then
+  for u in keycloak keycloak-db; do
+    [ "$(id_fact "${u}_cond")" = no ] \
+      || { echo "::error::the api minted the identity leaves, and $u.service's ConditionResult is '$(id_fact "${u}_cond")', expected no: with no identity config on the image it must never have started"; exit 1; }
+  done
+  ID_LEAVES="minted, neither unit started (ConditionResult=no)"
+else
+  ID_LEAVES="not minted on this boot, so neither unit was started"
+fi
+[ "$(id_fact hook)" = executable ] \
+  || { echo "::error::/usr/lib/rasputin/identity/rasputin-keycloak-hooks.sh is not executable on the image"; exit 1; }
+echo "identity units loaded and not failed (leaves $ID_LEAVES), curl with OpenSSL and https, api and agent at -950, hook executable"
 
 # The booted kernel is one this rootfs was built for (geekdojo/geekdojo-brain#807).
 # A fresh flash boots its own kernel, so this is the baseline: it proves the

@@ -102,12 +102,15 @@ check "the container has no openbao user, so 990 works as a number or not at all
 	"$(yes_if inside '! getent passwd 990 >/dev/null && ! getent group 990 >/dev/null')"
 
 # The image's tmpfiles.d, whole, as a node runs it. The audit and the store
-# rows of the shipped inventory: every row naming openbao* or tls, the sweep
-# line included, so the file under test is the input and nothing is retyped.
+# rows of the shipped inventory: every row naming openbao*, tls itself or a
+# tls/openbao-* leaf directory, the sweep line included, so the file under
+# test is the input and nothing is retyped. The identity service's
+# tls/identity-* rows (geekdojo/geekdojo-brain#973) are not the store's, so
+# the filter leaves them out and the count stays the store's.
 inside 'mkdir -p /usr/lib/tmpfiles.d /usr/lib/rasputin/atrest && \
 	cp /overlay/usr/lib/tmpfiles.d/rasputin.conf /usr/lib/tmpfiles.d/rasputin.conf && \
 	cp /overlay/usr/lib/rasputin/atrest/rasputin-atrest-audit.sh /usr/lib/rasputin/atrest/audit.sh && \
-	grep -E "^[^#]*[[:space:]]/var/lib/rasputin/(openbao|tls)" /overlay/usr/lib/rasputin/atrest/inventory \
+	grep -E "^[^#]*[[:space:]]/var/lib/rasputin/(openbao|tls([[:space:]]|$)|tls/openbao)" /overlay/usr/lib/rasputin/atrest/inventory \
 		> /usr/lib/rasputin/atrest/store-inventory' >/dev/null
 echo "store rows under test:"
 inside 'sed "s/^/    /" /usr/lib/rasputin/atrest/store-inventory'
@@ -119,9 +122,9 @@ tmpfiles() { inside 'systemd-tmpfiles --create /usr/lib/tmpfiles.d/rasputin.conf
 # tmpfiles names a line it rejects by file and line number ("rasputin.conf:112:
 # Failed to resolve user ...") and a path it fails on by path, so both are
 # matched: the store lines' numbers, taken from the shipped file, and the paths.
-STORE_LINES=$(awk '$1 !~ /^#/ && $2 ~ /^\/var\/lib\/rasputin\/(openbao|tls)/ { printf "%s%d", sep, NR; sep = "|" }' "$TMPFILES")
+STORE_LINES=$(awk '$1 !~ /^#/ && $2 ~ /^\/var\/lib\/rasputin\/(openbao|tls$|tls\/openbao)/ { printf "%s%d", sep, NR; sep = "|" }' "$TMPFILES")
 [ -n "$STORE_LINES" ] || { echo "FAILED: $TMPFILES has no store lines."; exit 1; }
-store_errors() { printf '%s\n' "$1" | grep -E "rasputin\.conf:($STORE_LINES):|/var/lib/rasputin/(openbao|tls)" || true; }
+store_errors() { printf '%s\n' "$1" | grep -E "rasputin\.conf:($STORE_LINES):|/var/lib/rasputin/(openbao|tls([^/]|$)|tls/openbao)" || true; }
 # audit — the real script, as root, with no -u or -g: the production defaults.
 # -q because a container has no kernel log of its own to write the verdict to.
 audit() { inside 'sh /usr/lib/rasputin/atrest/audit.sh -i /usr/lib/rasputin/atrest/store-inventory -q; echo "rc=$?"'; }
@@ -161,7 +164,7 @@ done
 n=$(inside "find $V/openbao-seal/rotation -mindepth 1 | wc -l")
 check "openbao-seal/rotation holds nothing: tmpfiles stages no key" "$(yes_if [ "$n" -eq 0 ])" "$(inside "ls -la $V/openbao-seal/rotation")"
 out=$(audit)
-check "the real audit over the shipped store rows says PASS checked=8 (openbao-seal/rotation, #830; TC-805-26: the provisioner's directory)" \
+check "the real audit over the shipped store rows says PASS checked=8 (openbao-seal/rotation, #830; TC-805-26: the provisioner's directory; TC-973-06: the identity rows left out)" \
 	"$(yes_if contains 'rasputin-atrest: PASS checked=8' "$out")" "$out"
 
 echo

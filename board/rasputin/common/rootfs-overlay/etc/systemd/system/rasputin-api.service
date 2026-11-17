@@ -111,6 +111,10 @@ RestartSec=2
 Type=notify
 WatchdogSec=30
 NotifyAccess=main
+# The OOM order (geekdojo/geekdojo-brain#973): store -999, api and agent -950,
+# identity -900, everything else 0. The control plane's own processes outlive
+# the identity service under memory pressure.
+OOMScoreAdjust=-950
 
 [Install]
 WantedBy=multi-user.target
