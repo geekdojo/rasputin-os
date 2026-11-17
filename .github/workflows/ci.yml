@@ -762,6 +762,13 @@ jobs:
       # image.
       - name: API store wiring against real systemd (pulled in, skipped, stopped, restarted)
         run: sh test/api-store-wiring-functional.sh
+      # The identity service's units (geekdojo/geekdojo-brain#973) under real
+      # systemd 258.7 as PID 1: the sandbox's IPAddressDeny= with a control
+      # that proves the container enforces systemd's BPF firewall. Same job: it
+      # builds the same image. Before the store unit's step, so it runs and
+      # reports whatever that step does.
+      - name: Identity units against real systemd (sandbox firewall)
+        run: sh test/identity-unit-functional.sh
       # The store's unit (geekdojo/geekdojo-brain#755) under real systemd 258.7
       # as PID 1 with the real pinned bao, downloaded and checked against
       # openbao.hash, on the overlay's openbao.hcl byte for byte (#756): wanted
