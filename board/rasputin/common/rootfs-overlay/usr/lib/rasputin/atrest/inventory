@@ -180,6 +180,51 @@
 0700  required  /var/lib/rasputin/tls/openbao-provisioner
 0600  optional  /var/lib/rasputin/tls/openbao-provisioner/leaf.key
 
+# ── the identity service and its database ────────────────────────────────
+# geekdojo/geekdojo-brain#973; platform.md §3.1. usr/lib/tmpfiles.d/rasputin.conf
+# creates each directory below with the same mode, uid and gid. 992 is the
+# postgres user and group and 991 the keycloak user and group
+# (package/rasputin-identity-db, RASPUTIN_IDENTITY_DB_USERS).
+#
+# The directories are required: tmpfiles creates them on every boot. The
+# files are optional: their writers put them there (the api for the leaves
+# and the CA key, keycloak.service's hold for the start count, the backup and
+# the update copy for the two tars), and a node without them yet is not
+# wrong. identity-db/ and keycloak/ are NOT swept, for the reason the store's
+# data directory is not: the database and the service set the modes of their
+# own contents, and the directory mode is what keeps them unreachable.
+0700  required  /var/lib/rasputin/identity-db                     992  992
+0700  required  /var/lib/rasputin/identity-db/data                992  992
+0700  required  /var/lib/rasputin/keycloak                        991  991
+0700  required  /var/lib/rasputin/keycloak/data                   991  991
+# identity/ is root's and holds only the hold's start count: swept, below.
+0700  required  /var/lib/rasputin/identity
+0600  optional  /var/lib/rasputin/identity/start-failures
+# The identity CA's key, beside the public identity-ca.pem in trust/.
+0600  optional  /var/lib/rasputin/trust/identity-ca.key
+# The pre-update copy and a rollback's aside copy of the identity data, root's,
+# beside the data directories and not in them.
+0600  optional  /var/lib/rasputin/identity-preupdate.tar
+0600  optional  /var/lib/rasputin/identity-rolled-back.tar
+# The six identity leaf directories are root's, written by the api. As for the
+# store's leaves, leaf.pem (and identity-ca.pem in trust/) is NOT declared: the
+# api writes a certificate at 0644, public by construction, and every entry
+# here refuses world access. The 0700 directory keeps the key unreachable, and
+# each key is declared by name; the db-client leaf's key also as DER PKCS-8.
+0700  required  /var/lib/rasputin/tls/identity-server
+0600  optional  /var/lib/rasputin/tls/identity-server/leaf.key
+0700  required  /var/lib/rasputin/tls/identity-db-server
+0600  optional  /var/lib/rasputin/tls/identity-db-server/leaf.key
+0700  required  /var/lib/rasputin/tls/identity-api-client
+0600  optional  /var/lib/rasputin/tls/identity-api-client/leaf.key
+0700  required  /var/lib/rasputin/tls/identity-door-client
+0600  optional  /var/lib/rasputin/tls/identity-door-client/leaf.key
+0700  required  /var/lib/rasputin/tls/identity-db-client
+0600  optional  /var/lib/rasputin/tls/identity-db-client/leaf.key
+0600  optional  /var/lib/rasputin/tls/identity-db-client/leaf.pk8
+0700  required  /var/lib/rasputin/tls/identity-repair-code
+0600  optional  /var/lib/rasputin/tls/identity-repair-code/leaf.key
+
 # ── NOT declared, and deliberately ─────────────────────────────────────────
 # /var/lib/rasputin/clock — the last-known-good time, written by
 # rasputin-clock-save.service and read by the PID 1 shim to floor the next boot
@@ -197,11 +242,13 @@
 # belong to those daemons and carry their own modes. bus/ is not swept either
 # — see the exemption above it: it is a certificate and a pin next to the keys,
 # and the keys are declared by name. openbao-seal/ holds nothing but the seal's
-# secrets, and openbao-audit/ nothing but the audit log, so both are swept; the
-# store's data directory and the leaf directories are not (see the store
-# section).
+# secrets, openbao-audit/ nothing but the audit log and identity/ nothing but
+# the identity service's start count, so all three are swept; the store's and
+# the identity service's data directories and the leaf directories are not
+# (see their sections).
 sweep  /var/lib/rasputin/console
 sweep  /var/lib/rasputin/agent-state
 sweep  /var/lib/rasputin/coredump
 sweep  /var/lib/rasputin/openbao-seal
 sweep  /var/lib/rasputin/openbao-audit
+sweep  /var/lib/rasputin/identity

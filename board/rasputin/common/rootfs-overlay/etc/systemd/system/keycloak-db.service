@@ -1,0 +1,91 @@
+# The identity service's database (geekdojo/geekdojo-brain#973, Identity 2.5;
+# platform.md §3.2): the carried PostgreSQL 18 (#972), sandboxed, its own uid,
+# loopback only. There is no [Install] section and no wants link here:
+# Identity 2.6 enables it. keycloak.service Requires= it, so starting the
+# identity service starts this first, and stopping this stops the identity
+# service.
+# test/identity-unit-test.sh asserts every line here;
+# test/identity-unit-functional.sh runs it under real systemd 258.7.
+[Unit]
+Description=Rasputin identity database
+# The data and every credential source are on the persistent partition.
+RequiresMountsFor=/var/lib/rasputin
+# firstboot writes the role marker below. Ordering only: the condition is the
+# gate.
+After=rasputin-firstboot.service
+# No ordering on rasputin-api.service in either direction: the api restarts
+# this unit from inside its own start on a fresh leaf, and an order would
+# deadlock that.
+# Role gate: only a control plane runs the identity database.
+ConditionPathExists=/var/lib/rasputin/role.controlplane
+# Until the api mints the identity CA and this listener's leaf, the database is
+# skipped cleanly (inactive, not failed), which spends none of the start
+# limit; the api restarts it once it has written the leaf.
+ConditionPathExists=/var/lib/rasputin/trust/identity-ca.pem
+ConditionPathExists=/var/lib/rasputin/tls/identity-db-server/leaf.pem
+ConditionPathExists=/var/lib/rasputin/tls/identity-db-server/leaf.key
+# The configuration Identity 2.6 bakes into the image. Without it postgres
+# would crash-loop into failed on every control plane whose api has minted the
+# leaves, so until then the unit skips. On an image that carries the config,
+# this is always true. A deviation from platform.md §3.2, recorded in #973.
+ConditionPathExists=/etc/rasputin/identity/postgresql.conf
+
+[Service]
+# postgres built with systemd support sends READY once it accepts connections.
+Type=notify
+NotifyAccess=main
+# The static postgres user and group, 992:992
+# (package/rasputin-identity-db, RASPUTIN_IDENTITY_DB_USERS).
+User=postgres
+Group=postgres
+# A bound far outside a normal start, never infinity (ARCH-FACTS, clarified
+# 2026-11-14): its only job is to mark a start that never finishes as dead.
+# The database's start time is not measured; 1 h is a chosen bound, the same
+# as the identity service's.
+TimeoutStartSec=1h
+# ExecStartPre= slots, in this order, for later items. None ships here.
+#   Identity 5.4: identity-restore.sh (a staged restore)
+#   Identity 5.6: identity-rollback.sh (the version gate)
+#   Identity 2.7: identity-db-init-gate.sh, then identity-db-init.sh (initdb
+#                 and the bootstrap SQL)
+ExecStart=/usr/bin/postgres -D /var/lib/rasputin/identity-db/data -c config_file=/etc/rasputin/identity/postgresql.conf
+# Everything root writes for the database reaches it here: the postgres uid
+# can read none of these source directories, and only it and root can read the
+# copies under /run/credentials/keycloak-db.service/. A renewed leaf needs a
+# restart, because credentials are copied at start; the api does that.
+LoadCredential=server.pem:/var/lib/rasputin/tls/identity-db-server/leaf.pem
+LoadCredential=server.key:/var/lib/rasputin/tls/identity-db-server/leaf.key
+LoadCredential=identity-ca.pem:/var/lib/rasputin/trust/identity-ca.pem
+# SIGINT is postgres's fast shutdown: it rolls back open transactions and
+# exits cleanly. Mixed: the signal to postgres alone, so it stops its own
+# children, then SIGKILL to anything left.
+KillSignal=SIGINT
+KillMode=mixed
+# A process exit is a fact, so the database restarts on it. systemd's own
+# restart delay and start limit apply; this unit chooses no duration.
+Restart=always
+# The filesystem is read-only to the database except its own directory.
+ProtectSystem=strict
+ReadWritePaths=/var/lib/rasputin/identity-db
+PrivateTmp=yes
+PrivateDevices=yes
+# PrivateDevices= closes the unit's device policy, a cgroup property no `+`
+# lifts; Identity 2.7's hooks log to /dev/kmsg, as openbao.service's do. It
+# grants postgres nothing: its private /dev has no kmsg node.
+DeviceAllow=/dev/kmsg w
+NoNewPrivileges=yes
+# No capabilities at all.
+CapabilityBoundingSet=
+# Soft and hard: a core is a copy of the database's memory.
+LimitCORE=0
+# Loopback TCP for its one listener and a Unix socket for sd_notify; nothing
+# else, and no address but loopback (platform.md §3.2).
+RestrictAddressFamilies=AF_INET AF_UNIX
+IPAddressDeny=any
+IPAddressAllow=localhost
+# #957's measured reserve (s4c-cp1 reserves.env). No MemoryHigh: below the
+# working set it stalls with no kill and no restart.
+MemoryMax=96M
+MemorySwapMax=0
+# The OOM order: store -999, api and agent -950, identity -900, all else 0.
+OOMScoreAdjust=-900

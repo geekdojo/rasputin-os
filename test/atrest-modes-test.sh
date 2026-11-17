@@ -105,6 +105,14 @@ STORE_FILES="$VAR_RASPUTIN/openbao-seal/seal-key $VAR_RASPUTIN/openbao-seal/seal
 STORE_OWNED="$VAR_RASPUTIN/openbao $VAR_RASPUTIN/openbao-audit"
 STORE_ROOT_OWNED="$VAR_RASPUTIN/openbao-seal $VAR_RASPUTIN/openbao-seal/rotation $VAR_RASPUTIN/openbao-seal/seal-key $VAR_RASPUTIN/openbao-seal/seal.hcl $VAR_RASPUTIN/tls $VAR_RASPUTIN/tls/openbao-server $VAR_RASPUTIN/tls/openbao-server/leaf.key $VAR_RASPUTIN/tls/openbao-client $VAR_RASPUTIN/tls/openbao-client/leaf.key $VAR_RASPUTIN/tls/openbao-provisioner $VAR_RASPUTIN/tls/openbao-provisioner/leaf.key"
 OPENBAO_ID=990
+# The identity service's paths (geekdojo/geekdojo-brain#973, TC-973-06), as
+# literals. 992 is the postgres user, 991 the keycloak user.
+IDENTITY_TLS="$VAR_RASPUTIN/tls/identity-server $VAR_RASPUTIN/tls/identity-db-server $VAR_RASPUTIN/tls/identity-api-client $VAR_RASPUTIN/tls/identity-door-client $VAR_RASPUTIN/tls/identity-db-client $VAR_RASPUTIN/tls/identity-repair-code"
+IDENTITY_DIRS="$VAR_RASPUTIN/identity-db $VAR_RASPUTIN/identity-db/data $VAR_RASPUTIN/keycloak $VAR_RASPUTIN/keycloak/data $VAR_RASPUTIN/identity $IDENTITY_TLS"
+IDENTITY_FILES="$VAR_RASPUTIN/identity/start-failures $VAR_RASPUTIN/trust/identity-ca.key $VAR_RASPUTIN/identity-preupdate.tar $VAR_RASPUTIN/identity-rolled-back.tar $VAR_RASPUTIN/tls/identity-db-client/leaf.pk8"
+for d in $IDENTITY_TLS; do IDENTITY_FILES="$IDENTITY_FILES $d/leaf.key"; done
+POSTGRES_ID=992
+KEYCLOAK_ID=991
 
 run_audit() {
 	d="$1"; shift
@@ -182,6 +190,11 @@ world() {
 	done
 	for f in $STORE_FILES; do
 		: >"$R$f"; chmod 0600 "$R$f"
+	done
+	# The identity service's eleven required directories (#973), at 0700;
+	# its files are optional, so a correct tree needs none of them.
+	for d in $IDENTITY_DIRS; do
+		mkdir -p "$R$d"; chmod 0700 "$R$d"
 	done
 	umask 022
 	# On BSD and macOS a new file takes its DIRECTORY's group, not the
@@ -488,10 +501,12 @@ store_cases() {
 	# sweep of openbao-seal/, which visits seal-key and seal.hcl again, so 28.
 	# TC-830-24: #830 adds openbao-seal/rotation, one declared path, so 29.
 	# #805 adds the provisioner's directory and key (TC-805-26), so 31.
+	# #973 adds the identity service's eleven required directories, and the
+	# sweep of identity/, which world() leaves empty (TC-973-06), so 42.
 	out=$(run_audit "$R"); rc=$?
 	ok "TC-754-05 TC-805-26 a correct tree with the store's paths passes" "$(yes_if [ "$rc" -eq 0 ])" "$out"
-	ok "TC-830-24 TC-805-26 the verdict is exactly 'PASS checked=31'" \
-		"$(yes_if last_line_matches '^rasputin-atrest: PASS checked=31$' "$out")" "$out"
+	ok "TC-830-24 TC-805-26 TC-973-06 the verdict is exactly 'PASS checked=42'" \
+		"$(yes_if last_line_matches '^rasputin-atrest: PASS checked=42$' "$out")" "$out"
 
 	# TC-830-24: the rotation directory at 0755 fails naming it; a 0644 file
 	# inside it fails openbao-seal's sweep; a 0600 staged key passes; the
@@ -701,6 +716,63 @@ rollback_cases() {
 	done
 }
 
+# identity_cases — TC-973-06: the identity service's rows
+# (geekdojo/geekdojo-brain#973), over the shipped inventory's own rows.
+identity_cases() {
+	R=$(world)
+	umask 077
+	for f in $IDENTITY_FILES; do : >"$R$f"; chmod 0600 "$R$f"; done
+	umask 022
+	chgrp -R "$MYGID" "$R"
+	# 42 for the world, plus the eleven optional files, plus the sweep of
+	# identity/ visiting start-failures again: 54.
+	out=$(run_audit "$R"); rc=$?
+	ok "TC-973-06 a correct tree with every identity row passes" "$(yes_if passed "$rc" "$out")" "$out"
+	ok "TC-973-06 the verdict is exactly 'PASS checked=54'" \
+		"$(yes_if last_line_matches '^rasputin-atrest: PASS checked=54$' "$out")" "$out"
+	# The shipped inventory, unrewritten: the database's directories are held
+	# to 992 and the service's to 991, not to each other's or this user's.
+	out=$(audit_with "$INVENTORY" "$R" -u "$ME" -g "$MYGID"); rc=$?
+	ok "TC-973-06 the shipped inventory refuses identity paths not owned as declared" "$(yes_if [ "$rc" -ne 0 ])" "$out"
+	for p in identity-db identity-db/data; do
+		ok "TC-973-06 $VAR_RASPUTIN/$p is held to uid $POSTGRES_ID" \
+			"$(yes_if says "$VAR_RASPUTIN/$p is owned by uid $ME, not $POSTGRES_ID" "$out")" "$out"
+	done
+	for p in keycloak keycloak/data; do
+		ok "TC-973-06 $VAR_RASPUTIN/$p is held to uid $KEYCLOAK_ID" \
+			"$(yes_if says "$VAR_RASPUTIN/$p is owned by uid $ME, not $KEYCLOAK_ID" "$out")" "$out"
+	done
+	# A 0644 file under identity/ fails its sweep.
+	: >"$R$VAR_RASPUTIN/identity/stray"; chmod 0644 "$R$VAR_RASPUTIN/identity/stray"
+	out=$(run_audit "$R"); rc=$?
+	rm -f "$R$VAR_RASPUTIN/identity/stray"
+	ok "TC-973-06 a 0644 file under identity/ is refused" "$(yes_if [ "$rc" -ne 0 ])" "$out"
+	ok "TC-973-06 the sweep names it" "$(yes_if says 'identity/stray is 0644 in a swept tree' "$out")" "$out"
+	# A public leaf.pem in each identity leaf directory passes: undeclared.
+	for d in $IDENTITY_TLS; do : >"$R$d/leaf.pem"; chmod 0644 "$R$d/leaf.pem"; done
+	: >"$R$VAR_RASPUTIN/trust/identity-ca.pem"; chmod 0644 "$R$VAR_RASPUTIN/trust/identity-ca.pem"
+	out=$(run_audit "$R"); rc=$?
+	ok "TC-973-06 a 0644 leaf.pem in each tls/identity-* directory, and identity-ca.pem, pass" \
+		"$(yes_if passed "$rc" "$out")" "$out"
+	# Each identity directory and file at a group- or world-readable mode is
+	# refused, naming it.
+	for p in $IDENTITY_DIRS $IDENTITY_FILES; do
+		if [ -d "$R$p" ]; then want=0700; w=0704; else want=0600; w=0604; fi
+		chmod o+r "$R$p"
+		out=$(run_audit "$R"); rc=$?
+		chmod o-r "$R$p"
+		ok "TC-973-06 world access on $p is refused, naming it" \
+			"$(yes_if [ "$rc" -ne 0 ] && says "$p is $w, declared $want" "$out")" "$out"
+	done
+	# The directories are required.
+	for p in $IDENTITY_DIRS; do
+		R2=$(world); rm -rf "$R2$p"
+		out=$(run_audit "$R2")
+		ok "TC-973-06 a missing $p is refused as required" \
+			"$(yes_if says "$p is missing and is required" "$out")" "$out"
+	done
+}
+
 for SH in $TEST_SHELLS; do
 	echo "== $SH"
 	cases
@@ -708,6 +780,7 @@ for SH in $TEST_SHELLS; do
 	store_cases
 	restore_cases
 	rollback_cases
+	identity_cases
 done
 
 # ── a TERM ends the audit, cleans up, and writes no verdict ────────────────
@@ -996,6 +1069,38 @@ bad=$(awk '
 ' "$TMPFILES")
 ok "TC-754-03 no tmpfiles line other than d names a store path" \
 	"$(yes_if [ -z "$bad" ])" "offending: $bad"
+
+# TC-973-06: tmpfiles and the inventory agree on every identity directory's
+# mode, uid and gid, both written here as literals; each file is an optional
+# 0600 root row; identity/ is swept, the data directories are not.
+while read -r rel mode uid gid; do
+	p="$VAR_RASPUTIN/$rel"
+	ok "TC-973-06 tmpfiles.d declares $p once, $mode $uid:$gid" \
+		"$(yes_if d_line_is "$p" "$mode" "$uid" "$gid")" "d lines for $p: $(tmpfiles_d "$p")"
+	ok "TC-973-06 the inventory declares $p required, as its d line does" \
+		"$(yes_if row_matches_d "$p")" "d: $(tmpfiles_d "$p") | inventory: $(inv_row "$p")"
+done <<'EOF_ID'
+identity-db 0700 992 992
+identity-db/data 0700 992 992
+keycloak 0700 991 991
+keycloak/data 0700 991 991
+identity 0700 0 0
+tls/identity-server 0700 0 0
+tls/identity-db-server 0700 0 0
+tls/identity-api-client 0700 0 0
+tls/identity-door-client 0700 0 0
+tls/identity-db-client 0700 0 0
+tls/identity-repair-code 0700 0 0
+EOF_ID
+for p in $IDENTITY_FILES; do
+	ok "TC-973-06 the inventory declares $p optional 0600 with no OWNER or GROUP" \
+		"$(yes_if [ "$(inv_row "$p")" = "0600 optional 0 0 3" ])" "inventory: $(inv_row "$p")"
+done
+ok "TC-973-06 identity is swept" "$(yes_if listed "$VAR_RASPUTIN/identity" "$sweeps")" "$sweeps"
+for p in identity-db keycloak $IDENTITY_TLS; do
+	case "$p" in /*) ;; *) p="$VAR_RASPUTIN/$p" ;; esac
+	ok "TC-973-06 $p is not swept" "$(yes_if not listed "$p" "$sweeps")" "$sweeps"
+done
 
 # TC-754-13: the harness inventory differs from the shipped one only in the
 # declared OWNER and GROUP columns, which it sets to this user's ids.

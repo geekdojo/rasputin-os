@@ -90,6 +90,10 @@ NotifyAccess=main
 # global setting; the original #8 repro was manual, the real OTA path is
 # service-driven and is covered.
 LimitCORE=infinity
+# The OOM order (geekdojo/geekdojo-brain#973): store -999, api and agent -950,
+# identity -900, everything else 0. The control plane's own processes outlive
+# the identity service under memory pressure.
+OOMScoreAdjust=-950
 
 [Install]
 WantedBy=multi-user.target

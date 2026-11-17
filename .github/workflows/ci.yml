@@ -314,6 +314,26 @@ jobs:
       # store-paths-functional job runs it under real systemd.
       - name: Store unit tests
         run: sh test/store-unit-test.sh
+      # The identity service's units (geekdojo/geekdojo-brain#973): every
+      # directive of keycloak-db.service and keycloak.service at its value and
+      # in its section, the JVM flags, the OOM order across the four units,
+      # the forbidden lines (an order on the api, a chosen restart delay or
+      # start limit, MemoryHigh, TimeoutStartSec=infinity, [Install], a
+      # watchdog, a heap dump) refused by negative controls, and the units
+      # tied to the static users, the tmpfiles lines and the start wait's curl
+      # in both defconfigs. The store-paths-functional job runs them under
+      # real systemd.
+      - name: Identity unit tests
+        run: sh test/identity-unit-test.sh
+      # keycloak.service's hooks (geekdojo/geekdojo-brain#973): the start-failure
+      # hold's re-arm, count, refusal and kept cause, the start wait's UP,
+      # missing inputs, main process gone and TERM, and the exit records with
+      # their cap, against a scratch tree with a fake systemctl and curl,
+      # under dash, bash, busybox ash and busybox's own applets.
+      - name: Identity unit hook tests
+        env:
+          REQUIRE_BUSYBOX: "1"
+        run: sh test/identity-hooks-test.sh
       # The secrets store's main config, openbao.hcl, and its enablement
       # (geekdojo/geekdojo-brain#756): the exact keys of each scope, the
       # listener on 127.0.0.1:8200 with a required client certificate and the
@@ -762,6 +782,20 @@ jobs:
       # image.
       - name: API store wiring against real systemd (pulled in, skipped, stopped, restarted)
         run: sh test/api-store-wiring-functional.sh
+      # The identity service's units and hooks (geekdojo/geekdojo-brain#973)
+      # under real systemd 258.7 as PID 1 with the real pinned Keycloak and
+      # JRE, checked against their .hash files and built with the pinned api's
+      # options: skipped before Identity 2.6's config and on each missing
+      # input, the start chain and `active` only after /health/started answers
+      # UP over mutual TLS, 991 and 992 with no capabilities and no core, each
+      # uid's own credentials, writes confined, the IP firewall with a
+      # control, the live at-rest audit, orderly stops in start-post, a JVM
+      # killed in start-post, the three-start hold and its re-arm, no secret
+      # in the journal or curl's argv, and the database's start limit. Same
+      # job: it builds the same image. Before the store unit's step, so it
+      # runs and reports whatever that step does.
+      - name: Identity units against real systemd and the pinned Keycloak (conditions, start wait, sandbox, hold, exit records)
+        run: sh test/identity-unit-functional.sh
       # The store's unit (geekdojo/geekdojo-brain#755) under real systemd 258.7
       # as PID 1 with the real pinned bao, downloaded and checked against
       # openbao.hash, on the overlay's openbao.hcl byte for byte (#756): wanted
