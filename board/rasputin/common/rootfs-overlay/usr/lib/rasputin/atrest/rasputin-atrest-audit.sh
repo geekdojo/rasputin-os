@@ -163,6 +163,46 @@ owner_only() {
 	[ "$(( 0$1 & 0077 ))" -eq 0 ]
 }
 
+# shared_writable MODE — group or others may write the file.
+shared_writable() {
+	[ "$(( 0$1 & 0022 ))" -ne 0 ]
+}
+
+# public_cert FILE — the file holds one or more PEM CERTIFICATE blocks and
+# nothing else (geekdojo/geekdojo-brain#1128). A granted app's ca.pem is public
+# by construction and is written 0644 into agent-state/, a swept tree, so the
+# sweep has to tell it from a secret. It decides by content, never by name:
+# key.pem sits beside ca.pem in the same directory.
+#
+# Strict, so that anything it does not recognise is a secret. Outside a block
+# only blank lines are allowed; inside one, only base64 lines, at least one.
+# Any other label (a private key, a TRUSTED CERTIFICATE), text before, between
+# or after the blocks, CRLF line endings, a block that never closes, binary
+# (DER) content and an empty file all fail. awk stops at the first line that
+# does not fit, so a binary file is dropped at its first line.
+#
+# No openssl: the image ships no openssl binary, and adding one for an audit
+# would grow the attack surface. So this proves the file is PEM certificate
+# blocks, not that their bytes are X.509 — only root writes these trees.
+#
+# Fails closed: if awk cannot read the file or cannot run, its status is not 0
+# and the file is treated as a secret. It prints nothing from the file: every
+# line the audit writes carries a path and a mode, never content.
+public_cert() {
+	LC_ALL=C awk '
+		inblk == 0 && $0 == "-----BEGIN CERTIFICATE-----" { inblk = 1; body = 0; next }
+		inblk == 0 && $0 == "" { next }
+		inblk == 0 { bad = 1; exit }
+		$0 == "-----END CERTIFICATE-----" {
+			if (body == 0) { bad = 1; exit }
+			inblk = 0; blocks++; next
+		}
+		/^[A-Za-z0-9+\/=]+$/ { body++; next }
+		{ bad = 1; exit }
+		END { if (bad || inblk || blocks == 0) exit 1; exit 0 }
+	' "$1" >/dev/null 2>&1
+}
+
 while read -r col1 col2 col3 col4 col5 _rest; do
 	case "$col1" in
 	'' | \#*) continue ;;
@@ -187,7 +227,16 @@ while read -r col1 col2 col3 col4 col5 _rest; do
 				# still reported its count.
 				fail "FAIL $f mode could not be read in a swept tree; every file under $col2 is owner-only"
 			elif ! owner_only "$m"; then
-				fail "FAIL $f is $m in a swept tree; every file under $col2 is owner-only"
+				# A public certificate may be readable, never
+				# writable by anyone but its owner: one anyone
+				# can rewrite is a trust anchor anyone can swap.
+				if public_cert "$f"; then
+					if shared_writable "$m"; then
+						fail "FAIL $f is $m in a swept tree; a public certificate there must not be writable by group or others"
+					fi
+				else
+					fail "FAIL $f is $m in a swept tree; every file under $col2 is owner-only unless it is a public certificate"
+				fi
 			fi
 		done
 		continue
