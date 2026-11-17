@@ -1,6 +1,8 @@
 #!/bin/sh
-# Static assertions on how rasputin-api.service is wired to the secrets store,
-# plus the api pin guard (geekdojo/geekdojo-brain#757).
+# Static assertions on how rasputin-api.service is wired to its two loopback
+# backends, the secrets store (geekdojo/geekdojo-brain#757) and the identity
+# service (geekdojo/geekdojo-brain#974, Identity 2.6), plus the store's api pin
+# guard.
 #
 # Why. The api unit selects the store with two Environment= lines and pulls it
 # in with one Wants=. Every way to get one wrong is silent: a selector in the
@@ -21,6 +23,15 @@
 # read through test/lib/hcl-keys.sh (geekdojo/geekdojo-brain#756). The guard
 # decides on those two facts only.
 #
+# The identity service (#974). The same shape: the selector
+# RASPUTIN_IDENTITY_BACKEND=keycloak and the two addresses are each assigned
+# once, no other RASPUTIN_IDENTITY_* is set, Wants=keycloak.service is present,
+# and nothing orders on or hard-depends on either identity unit, because the
+# api restarts them from inside its own start. The addresses are tied to
+# keycloak.conf's listeners, read with package/keycloak/kc-conf.sh, and the
+# selector is refused while keycloak.conf is absent from the overlay (#757's
+# guard, for this backend).
+#
 # Fails closed. A missing unit, a missing library, no GNU make, a store
 # ExecStart with no -config= and an unreadable pin each print one line starting
 # FAILED: and exit non-zero before any case runs.
@@ -40,12 +51,18 @@ API_UNIT="$OVERLAY/etc/systemd/system/rasputin-api.service"
 STORE_UNIT="$OVERLAY/etc/systemd/system/openbao.service"
 MK="$ROOT/package/rasputin-api/rasputin-api.mk"
 LIB="$ROOT/test/lib"
+KC_LIB="$ROOT/package/keycloak/kc-conf.sh"
+KC_CONF="$OVERLAY/etc/rasputin/identity/keycloak.conf"
 
 # The last api release without the store client. cp#462 (the client and the
 # selector) is not an ancestor of its tag.
 PIN_WITHOUT_CLIENT=2026.10.0
 WANT_BACKEND=openbao
 WANT_ADDR=https://127.0.0.1:8200
+# The identity service (#974).
+WANT_ID_BACKEND=keycloak
+WANT_ID_ADDR=https://127.0.0.1:8543
+WANT_ID_MGMT=https://127.0.0.1:8544
 
 # --- fail closed, before any case (TC-757-04, TC-757-09 e and f) ---------------
 for f in "$API_UNIT" "$STORE_UNIT"; do
@@ -54,6 +71,7 @@ done
 for f in checks.sh mk-var.sh unit-directives.sh hcl-keys.sh; do
 	[ -f "$LIB/$f" ] || { echo "FAILED: the test library $LIB/$f is missing, so this test cannot run."; exit 1; }
 done
+[ -f "$KC_LIB" ] || { echo "FAILED: the conf parser $KC_LIB is missing, so keycloak.conf cannot be read."; exit 1; }
 command -v make >/dev/null 2>&1 \
 	|| { echo "FAILED: GNU make is not on PATH, and the api pin is read from rasputin-api.mk with it."; exit 1; }
 
@@ -61,6 +79,8 @@ command -v make >/dev/null 2>&1 \
 . "$ROOT/test/lib/mk-var.sh"
 . "$ROOT/test/lib/unit-directives.sh"
 . "$ROOT/test/lib/hcl-keys.sh"
+# shellcheck source=package/keycloak/kc-conf.sh
+. "$KC_LIB"
 
 D_API=$(directives "$API_UNIT")
 D_STORE=$(directives "$STORE_UNIT")
@@ -121,13 +141,14 @@ sources() { printf '%s\n' "$1" | awk -F'\t' -v k="$2=" 'index($1, k) == 1 { prin
 
 ASSIGN=$(assignments "$D_API")
 
-# exactly_one NAME WANT — NAME is assigned once in the unit, byte-exact WANT.
+# exactly_one NAME WANT [CASE] — NAME is assigned once in the unit, byte-exact
+# WANT. CASE labels the check (default TC-757-01).
 exactly_one() {
 	_n=$(n_assigned "$ASSIGN" "$1")
 	_got=$(assigned "$ASSIGN" "$1")
 	_st=1
 	[ "$_n" -eq 1 ] && [ "$_got" = "$2" ] && _st=0
-	check "TC-757-01 [Service] $1=$2, assigned exactly once" "$_st" \
+	check "${3:-TC-757-01} [Service] $1=$2, assigned exactly once" "$_st" \
 		"$_n assignment(s), in: $(sources "$ASSIGN" "$1")"
 }
 
@@ -181,6 +202,61 @@ else
 		"the config listens on $_addr but the api's RASPUTIN_SECRETSTORE_ADDR is $WANT_ADDR"
 fi
 
+# --- the identity service (#974) ---------------------------------------------------
+echo
+echo "4. the api's identity settings (TC-974-06)"
+ID_SET=$(n_assigned "$ASSIGN" RASPUTIN_IDENTITY_BACKEND)
+if [ "$ID_SET" -eq 0 ]; then
+	echo "  branch: RASPUTIN_IDENTITY_BACKEND is not set, so the api runs without identity; no RASPUTIN_IDENTITY_* may be set either"
+	_other=$(printf '%s\n' "$ASSIGN" | awk -F'\t' 'index($1, "RASPUTIN_IDENTITY_") == 1 { printf "%s%s", sep, $2; sep = "|" }')
+else
+	exactly_one RASPUTIN_IDENTITY_BACKEND "$WANT_ID_BACKEND" TC-974-06
+	exactly_one RASPUTIN_IDENTITY_ADDR "$WANT_ID_ADDR" TC-974-06
+	exactly_one RASPUTIN_IDENTITY_MGMT_ADDR "$WANT_ID_MGMT" TC-974-06
+	_other=$(printf '%s\n' "$ASSIGN" | awk -F'\t' '
+		index($1, "RASPUTIN_IDENTITY_") == 1 && index($1, "RASPUTIN_IDENTITY_BACKEND=") != 1 \
+			&& index($1, "RASPUTIN_IDENTITY_ADDR=") != 1 && index($1, "RASPUTIN_IDENTITY_MGMT_ADDR=") != 1 { printf "%s%s", sep, $2; sep = "|" }')
+	check "TC-974-06 [Unit] Wants= includes keycloak.service" \
+		"$(yes_if contains "
+keycloak.service
+" "
+$(words "$D_API" Unit Wants)
+")" "Wants= is: $(values "$D_API" Unit Wants | tr '\n' '|')"
+fi
+check "TC-974-06 no other RASPUTIN_IDENTITY_* setting is assigned" "$(yes_if [ -z "$_other" ])" "forbidden line present: $_other"
+for k in Requires BindsTo Requisite PartOf Upholds Before After; do
+	for u in keycloak.service keycloak-db.service; do
+		_hit=$(lines_naming "$D_API" Unit "$k" "$u")
+		check "TC-974-06 no $k= on $u (the api restarts it from its own start)" "$(yes_if [ -z "$_hit" ])" "forbidden line present: $_hit"
+	done
+done
+
+echo
+echo "5. the identity addresses tied to keycloak.conf (TC-974-07)"
+if [ ! -f "$KC_CONF" ]; then
+	echo "  branch: keycloak.conf is not in the overlay, so the selector must not be set"
+	check "TC-974-07 RASPUTIN_IDENTITY_BACKEND is not set while keycloak.conf is absent" "$(yes_if [ "$ID_SET" -eq 0 ])" \
+		"RASPUTIN_IDENTITY_BACKEND is set in $(sources "$ASSIGN" RASPUTIN_IDENTITY_BACKEND) but $KC_CONF is not in the overlay. The api would restart a keycloak.service that skips on its missing config and report identity down on every control plane, so the selector waits for the config."
+elif [ "$ID_SET" -eq 0 ]; then
+	echo "  branch: keycloak.conf is in the overlay and the selector is not set, so there is no address to tie"
+else
+	_kc=$(mktemp -d) || { echo "FAILED: a scratch directory could not be created."; exit 1; }
+	if kc_conf_lines "$KC_CONF" "$_kc/bad" >"$_kc/lines"; then
+		kv() { awk -v k="$1=" 'index($0, k) == 1 { print substr($0, length(k) + 1) }' "$_kc/lines" | tr '\n' ' ' | sed 's/ $//'; }
+		_https="$(kv http-host):$(kv https-port)"
+		_mgmt="$(kv http-management-host):$(kv http-management-port)"
+		for pair in "RASPUTIN_IDENTITY_ADDR|$_https|http-host:https-port" "RASPUTIN_IDENTITY_MGMT_ADDR|$_mgmt|http-management-host:http-management-port"; do
+			_name=${pair%%|*}; _rest=${pair#*|}; _conf=${_rest%%|*}; _keys=${_rest#*|}
+			_got=$(assigned "$ASSIGN" "$_name" | head -1)
+			check "TC-974-07 $_name ($_got) is https://<keycloak.conf's $_keys>" "$(yes_if [ "$_got" = "https://$_conf" ])" \
+				"$_name is $_got but keycloak.conf's $_keys is $_conf"
+		done
+	else
+		check "TC-974-07 keycloak.conf can be read for its listeners" 1 "line $(cat "$_kc/bad") of $KC_CONF is not blank, a # comment or key=value"
+	fi
+	rm -rf "$_kc"
+fi
+
 if [ "${API_STORE_WIRING_TREE_ONLY:-0}" = 1 ]; then
 	if [ "$fails" -ne 0 ]; then echo "api-store-wiring-test: $fails check(s) FAILED"; exit 1; fi
 	echo "api-store-wiring-test: all checks passed"
@@ -189,7 +265,7 @@ fi
 
 # --- the shared directives() (TC-757-04, F-757-05) --------------------------------
 echo
-echo "4. one copy of directives() (TC-757-04)"
+echo "6. one copy of directives() (TC-757-04)"
 for t in seal-key-test.sh store-unit-test.sh; do
 	_copy=$(grep -n '^[[:space:]]*directives()' "$ROOT/test/$t" || true)
 	check "TC-757-04 test/$t holds no copy of directives()" "$(yes_if [ -z "$_copy" ])" "$_copy"
@@ -204,6 +280,8 @@ SH_BIN=$(command -v sh)
 REL_API=board/rasputin/common/rootfs-overlay/etc/systemd/system/rasputin-api.service
 REL_STORE=board/rasputin/common/rootfs-overlay/etc/systemd/system/openbao.service
 REL_MK=package/rasputin-api/rasputin-api.mk
+REL_KC_LIB=package/keycloak/kc-conf.sh
+REL_KC_CONF=board/rasputin/common/rootfs-overlay/etc/rasputin/identity/keycloak.conf
 N=0
 
 # tree — a fresh scratch root holding this script, its libraries, the two units
@@ -217,6 +295,10 @@ tree() {
 	cp "$API_UNIT" "$T/$REL_API"
 	cp "$STORE_UNIT" "$T/$REL_STORE"
 	cp "$MK" "$T/$REL_MK"
+	mkdir -p "$(dirname "$T/$REL_KC_LIB")" "$(dirname "$T/$REL_KC_CONF")"
+	cp "$KC_LIB" "$T/$REL_KC_LIB"
+	[ -f "$KC_CONF" ] && cp "$KC_CONF" "$T/$REL_KC_CONF"
+	return 0
 }
 # edit FILE MODE LINE — in a scratch file: "after:L" puts LINE after the line L,
 # "before:L" before it, "replace:L" in its place (an empty LINE deletes L). The
@@ -276,15 +358,15 @@ failed_closed() {
 
 REL_CONFIG="board/rasputin/common/rootfs-overlay$CONFIG"
 # config — a copy of the shipped store config in the scratch tree, when the
-# overlay carries one: the section 5 controls see the tree as shipped, and the
-# section 6 controls edit it (geekdojo/geekdojo-brain#756, TC-756-30).
+# overlay carries one: the section 7 controls see the tree as shipped, and the
+# section 8 controls edit it (geekdojo/geekdojo-brain#756, TC-756-30).
 config() {
 	[ -f "$OVERLAY$CONFIG" ] || return 0
 	mkdir -p "$(dirname "$T/$REL_CONFIG")"
 	cp "$OVERLAY$CONFIG" "$T/$REL_CONFIG"
 }
 echo
-echo "5. negative controls: the checker refuses each wrong copy (TC-757-03)"
+echo "7. negative controls: the checker refuses each wrong copy (TC-757-03)"
 tree; config; run_tree
 passes "TC-757-03 positive control, the unmodified units"
 tree; config; edit "$T/$REL_API" after:Wants=openbao.service 'Requires=openbao.service' \
@@ -310,7 +392,7 @@ tree; config; edit "$T/$REL_STORE" replace:Before=rasputin-api.service '' \
 	&& { run_tree; refused "TC-757-03 the store's Before=rasputin-api.service removed" 'Before= includes rasputin-api.service'; }
 
 echo
-echo "6. the pin guard's controls (TC-757-09)"
+echo "8. the pin guard's controls (TC-757-09)"
 ADDR_LINE='  address = "127.0.0.1:8200"'
 MOVED=2099.01.0
 move_pin() { edit "$T/$REL_MK" "replace:RASPUTIN_API_VERSION = $PIN" "RASPUTIN_API_VERSION = $MOVED"; }
@@ -336,11 +418,43 @@ tree; rm -f "$T/$REL_MK"; run_tree
 failed_closed "TC-757-09(f) rasputin-api.mk missing" 'RASPUTIN_API_VERSION could not be read'
 
 echo
-echo "7. the test fails closed (TC-757-04)"
+echo "9. the identity wiring's controls (TC-974-06, TC-974-07)"
+ID_BACKEND_LINE="Environment=RASPUTIN_IDENTITY_BACKEND=$WANT_ID_BACKEND"
+ID_ADDR_LINE="Environment=RASPUTIN_IDENTITY_ADDR=$WANT_ID_ADDR"
+ID_MGMT_LINE="Environment=RASPUTIN_IDENTITY_MGMT_ADDR=$WANT_ID_MGMT"
+tree; config; run_tree
+passes "TC-974-06 positive control, the shipped tree"
+tree; config; edit "$T/$REL_API" "replace:$ID_BACKEND_LINE" 'Environment=RASPUTIN_IDENTITY_BACKEND=Keycloak' \
+	&& { run_tree; refused "TC-974-06 the selector Keycloak" 'Environment=RASPUTIN_IDENTITY_BACKEND=Keycloak'; }
+tree; config; edit "$T/$REL_API" before:EnvironmentFile=-/var/lib/rasputin/node.env \
+	'Environment=RASPUTIN_DATA_DIR=/var/lib/rasputin RASPUTIN_IDENTITY_ADDR=https://127.0.0.1:9443' \
+	&& { run_tree; refused "TC-974-06 a second _ADDR assignment on another line" \
+		'Environment=RASPUTIN_DATA_DIR=/var/lib/rasputin RASPUTIN_IDENTITY_ADDR=https://127.0.0.1:9443'; }
+tree; config; edit "$T/$REL_API" after:Wants=keycloak.service 'Requires=keycloak.service' \
+	&& { run_tree; refused "TC-974-06 Requires=keycloak.service" 'Requires=keycloak.service'; }
+tree; config; edit "$T/$REL_API" after:Wants=keycloak.service 'After=keycloak-db.service' \
+	&& { run_tree; refused "TC-974-06 After=keycloak-db.service" 'After=keycloak-db.service'; }
+tree; config; edit "$T/$REL_API" replace:Wants=keycloak.service '' \
+	&& { run_tree; refused "TC-974-06 Wants=keycloak.service removed" 'Wants= includes keycloak.service'; }
+tree; config; edit "$T/$REL_API" "after:$ID_MGMT_LINE" 'Environment=RASPUTIN_IDENTITY_CA_FILE=/x' \
+	&& { run_tree; refused "TC-974-06 an extra RASPUTIN_IDENTITY_CA_FILE" 'Environment=RASPUTIN_IDENTITY_CA_FILE=/x'; }
+tree; config; edit "$T/$REL_KC_CONF" replace:https-port=8543 'https-port=8545' \
+	&& { run_tree; refused "TC-974-07 keycloak.conf's https-port=8545" "$WANT_ID_ADDR" '127.0.0.1:8545'; }
+tree; config; edit "$T/$REL_KC_CONF" replace:http-management-port=8544 'http-management-port=9544' \
+	&& { run_tree; refused "TC-974-07 keycloak.conf's http-management-port=9544" "$WANT_ID_MGMT" '127.0.0.1:9544'; }
+tree; config; rm -f "$T/$REL_KC_CONF"; run_tree
+refused "TC-974-07 no keycloak.conf with the selector set" 'is not set while keycloak.conf is absent'
+tree; config; rm -f "$T/$REL_KC_CONF"
+edit "$T/$REL_API" "replace:$ID_BACKEND_LINE" '' && edit "$T/$REL_API" "replace:$ID_ADDR_LINE" '' \
+	&& edit "$T/$REL_API" "replace:$ID_MGMT_LINE" '' && { run_tree; passes "TC-974-07 no keycloak.conf and no selector"; }
+echo
+echo "10. the test fails closed (TC-757-04)"
 tree; rm -f "$T/$REL_API"; run_tree
 failed_closed "TC-757-04(a) the api unit missing" 'rasputin-api.service is missing'
 tree; rm -f "$T/test/lib/unit-directives.sh"; run_tree
 failed_closed "TC-757-04(b) test/lib/unit-directives.sh missing" 'unit-directives.sh is missing'
+tree; rm -f "$T/$REL_KC_LIB"; run_tree
+failed_closed "TC-974-06 package/keycloak/kc-conf.sh missing" 'kc-conf.sh is missing'
 # No make: a PATH holding only dirname, which the script needs before it looks
 # for make.
 NOMAKE="$SCRATCH/nomake"

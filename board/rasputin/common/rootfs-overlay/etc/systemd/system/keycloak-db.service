@@ -1,7 +1,7 @@
 # The identity service's database (geekdojo/geekdojo-brain#973, Identity 2.5;
 # platform.md §3.2): the carried PostgreSQL 18 (#972), sandboxed, its own uid,
 # loopback only. There is no [Install] section and no wants link here:
-# Identity 2.6 enables it. keycloak.service Requires= it, so starting the
+# post-build.sh enables it (Identity 2.6, #974). keycloak.service Requires= it, so starting the
 # identity service starts this first, and stopping this stops the identity
 # service.
 # test/identity-unit-test.sh asserts every line here;
