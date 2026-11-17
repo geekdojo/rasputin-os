@@ -36,6 +36,10 @@
 #     Every file under PATH, recursively, must be owner-only. This is the half
 #     that catches a NEW secret nobody declared, because the list above only
 #     knows about paths someone remembered to write down.
+#     One exception, decided by content and never by name: a file that holds
+#     only PEM CERTIFICATE blocks is public, so it may be readable by group
+#     and others, but never writable by them (geekdojo/geekdojo-brain#1128).
+#     A key, a certificate bundled with its key, or any other text is not.
 #
 # Lines beginning with # are comments.
 

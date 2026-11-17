@@ -773,6 +773,197 @@ identity_cases() {
 	done
 }
 
+# ── public certificates in a swept tree (geekdojo/geekdojo-brain#1128) ───────
+# A granted app's ca.pem is public and is written 0644 into agent-state/, a
+# swept tree. The sweep passes a file that holds only PEM CERTIFICATE blocks
+# and that neither group nor others can write; everything else it refuses as
+# before. The certificates and keys are real PEM, the shape Go's
+# pem.EncodeToMemory writes, generated per run so no key is committed. With no
+# openssl the run fails rather than skips.
+PC="$TMP/pc"
+mkdir -p "$PC"
+if ! command -v openssl >/dev/null 2>&1; then
+	echo "FAIL: openssl is needed to generate the certificate fixtures" >&2
+	exit 1
+fi
+# pc_gen NAME — an EC P-256 key (SEC1 and PKCS#8 forms) and a self-signed
+# certificate for it.
+pc_gen() {
+	openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 \
+		-out "$PC/$1.p8" 2>/dev/null &&
+	openssl ec -in "$PC/$1.p8" -out "$PC/$1.ec" 2>/dev/null &&
+	openssl req -new -x509 -key "$PC/$1.p8" -subj "/CN=$1" -days 1 \
+		-out "$PC/$1.crt" 2>/dev/null
+}
+if ! pc_gen ca || ! pc_gen inter; then
+	echo "FAIL: openssl could not generate the certificate fixtures" >&2
+	exit 1
+fi
+CERT="$PC/ca.crt"
+KEY_EC="$PC/ca.ec"
+KEY_P8="$PC/ca.p8"
+# Every fixture is checked for the shape it claims, so a generator that
+# changed its output cannot turn a refusal case into a pass over nothing.
+for _f in "$CERT:CERTIFICATE" "$KEY_EC:EC PRIVATE KEY" "$KEY_P8:PRIVATE KEY"; do
+	[ "$(head -n 1 "${_f%%:*}")" = "-----BEGIN ${_f#*:}-----" ] ||
+		{ echo "FAIL: fixture ${_f%%:*} is not ${_f#*:} PEM" >&2; exit 1; }
+done
+cat "$CERT" "$PC/inter.crt" >"$PC/chain"
+cat "$CERT" "$KEY_EC" >"$PC/cert-then-key"
+cat "$KEY_EC" "$CERT" >"$PC/key-then-cert"
+{ cat "$CERT"; echo "subject=CN = ca"; } >"$PC/text-after"
+openssl x509 -in "$CERT" -text >"$PC/text-before" 2>/dev/null
+awk '{ printf "%s\r\n", $0 }' "$CERT" >"$PC/crlf"
+sed '$d' "$CERT" >"$PC/unclosed"
+printf '%s\n' '-----BEGIN CERTIFICATE-----' '-----END CERTIFICATE-----' >"$PC/empty-block"
+sed '$s/.*/-----END PRIVATE KEY-----/' "$CERT" >"$PC/mismatched"
+sed 's/ CERTIFICATE-----$/ TRUSTED CERTIFICATE-----/' "$CERT" >"$PC/trusted"
+openssl x509 -in "$CERT" -outform DER -out "$PC/der" 2>/dev/null
+for _f in chain cert-then-key key-then-cert text-after text-before crlf unclosed empty-block mismatched trusted der; do
+	[ -s "$PC/$_f" ] || { echo "FAIL: fixture $_f could not be written" >&2; exit 1; }
+done
+grep -q '^Certificate:' "$PC/text-before" || { echo "FAIL: fixture text-before has no text" >&2; exit 1; }
+# The body lines of the key and the certificate, which no output may carry.
+SECRET_LINES=$(grep -hv '^-----' "$KEY_EC" "$KEY_P8")
+CERT_LINES=$(grep -v '^-----' "$CERT")
+
+SWEPT_CERT="console agent-state coredump openbao-seal openbao-audit identity"
+PC_DIR="$VAR_RASPUTIN/agent-state/apprelay/app1/mnt"
+NOT_CERT_TAIL="in a swept tree; every file under $VAR_RASPUTIN/agent-state is owner-only unless it is a public certificate"
+WRITABLE_TAIL="in a swept tree; a public certificate there must not be writable by group or others"
+
+# pc_put ROOT PATH SOURCE MODE — SOURCE copied to ROOT/PATH at MODE.
+pc_put() {
+	mkdir -p "$(dirname "$1$2")"
+	cp "$3" "$1$2"
+	chmod "$4" "$1$2"
+}
+# pc_refused NAME SOURCE LABEL — a 0644 file in agent-state/ holding SOURCE is
+# refused as a secret: the non-certificate line, never the writable one.
+pc_refused() {
+	R=$(world)
+	pc_put "$R" "$PC_DIR/$1" "$2" 0644
+	out=$(run_audit "$R"); rc=$?
+	ok "$3 $1 is refused" "$(yes_if [ "$rc" -ne 0 ])" "$out"
+	ok "$3 $1 gets the non-certificate line" \
+		"$(yes_if says "$PC_DIR/$1 is 0644 $NOT_CERT_TAIL" "$out")" "$out"
+	ok "$3 $1 does not get the writable-certificate line" \
+		"$(yes_if not says 'must not be writable' "$out")" "$out"
+}
+# no_content OUTPUT LINES — no line of LINES appears in OUTPUT.
+no_content() {
+	_o="$1"
+	printf '%s\n' "$2" | while IFS= read -r _l; do
+		[ -z "$_l" ] && continue
+		says "$_l" "$_o" && { echo leaked; break; }
+	done | grep -q leaked && return 1
+	return 0
+}
+
+public_cert_cases() {
+	R=$(world)
+	out=$(run_audit "$R")
+	base=$(printf '%s\n' "$out" | tail -n 1 | sed -n 's/^rasputin-atrest: PASS checked=\([0-9]*\)$/\1/p')
+
+	# TC-1128-01: the bench finding's shape passes, and is still counted.
+	R=$(world)
+	pc_put "$R" "$PC_DIR/ca.pem" "$CERT" 0644
+	out=$(run_audit "$R"); rc=$?
+	ok "TC-1128-01 a 0644 PEM ca.pem under agent-state/apprelay passes" "$(yes_if passed "$rc" "$out")" "$out"
+	ok "TC-1128-01 the certificate is counted: checked is one more than the bare tree's" \
+		"$(yes_if last_line_matches "^rasputin-atrest: PASS checked=$((base + 1))\$" "$out")" "base $base; $out"
+
+	# TC-1128-02: every swept tree, decided by content and not by name.
+	for t in $SWEPT_CERT; do
+		R=$(world)
+		if [ "$t" = openbao-seal ]; then
+			p="$VAR_RASPUTIN/$t/chain.json"; src="$PC/chain"
+		else
+			p="$VAR_RASPUTIN/$t/peer.pem"; src="$CERT"
+		fi
+		pc_put "$R" "$p" "$src" 0644
+		out=$(run_audit "$R"); rc=$?
+		ok "TC-1128-02 a 0644 public certificate at $p passes" "$(yes_if passed "$rc" "$out")" "$out"
+	done
+
+	# TC-1128-03: readable is fine, as long as it is not shared-writable.
+	for m in 0640 0604; do
+		R=$(world)
+		pc_put "$R" "$PC_DIR/ca.pem" "$CERT" "$m"
+		out=$(run_audit "$R"); rc=$?
+		ok "TC-1128-03 a public certificate at $m passes" "$(yes_if passed "$rc" "$out")" "$out"
+	done
+
+	# TC-1128-04: a certificate group or others can write is refused.
+	for m in 0664 0646 0666; do
+		R=$(world)
+		pc_put "$R" "$PC_DIR/ca.pem" "$CERT" "$m"
+		out=$(run_audit "$R"); rc=$?
+		last=$(printf '%s\n' "$out" | tail -n 1)
+		ok "TC-1128-04 a public certificate at $m is refused" "$(yes_if [ "$rc" -ne 0 ])" "$out"
+		ok "TC-1128-04 the refusal at $m names the path and says why" \
+			"$(yes_if says "$R$PC_DIR/ca.pem is $m $WRITABLE_TAIL" "$out")" "$out"
+		ok "TC-1128-04 the verdict at $m is FAIL with one failure, the certificate first" \
+			"$(yes_if last_line_matches '^rasputin-atrest: FAIL failures=1 checked=[0-9]+ first=FAIL ' "$out")" "$out"
+		ok "TC-1128-04 the verdict at $m names the certificate as its first failure" \
+			"$(yes_if says "first=FAIL $R$PC_DIR/ca.pem is $m" "$last")" "$last"
+	done
+
+	# TC-1128-05: a private key named ca.pem is still a secret.
+	pc_refused ca.pem "$KEY_EC" "TC-1128-05 (EC PRIVATE KEY)"
+	pc_refused ca.pem "$KEY_P8" "TC-1128-05 (PKCS#8 PRIVATE KEY)"
+
+	# TC-1128-06: a certificate bundled with its key, either way round.
+	pc_refused cert-then-key.pem "$PC/cert-then-key" "TC-1128-06"
+	pc_refused key-then-cert.pem "$PC/key-then-cert" "TC-1128-06"
+
+	# TC-1128-07: certificate content only — no extra text, no CRLF.
+	pc_refused text-after.pem "$PC/text-after" "TC-1128-07 (a) text after END:"
+	pc_refused text-before.pem "$PC/text-before" "TC-1128-07 (b) x509 -text before BEGIN:"
+	pc_refused crlf.pem "$PC/crlf" "TC-1128-07 (c) CRLF line endings:"
+
+	# TC-1128-08: malformed PEM fails closed.
+	pc_refused unclosed.pem "$PC/unclosed" "TC-1128-08 (a) a block cut off before END:"
+	pc_refused empty-block.pem "$PC/empty-block" "TC-1128-08 (b) a block with no body:"
+	pc_refused mismatched.pem "$PC/mismatched" "TC-1128-08 (c) BEGIN CERTIFICATE closed by END PRIVATE KEY:"
+	pc_refused trusted.pem "$PC/trusted" "TC-1128-08 (d) a TRUSTED CERTIFICATE block:"
+
+	# TC-1128-09: a DER certificate is binary and fails closed.
+	R=$(world)
+	pc_put "$R" "$VAR_RASPUTIN/coredump/ca.der" "$PC/der" 0644
+	out=$(run_audit "$R"); rc=$?
+	ok "TC-1128-09 a 0644 DER certificate in coredump/ is refused" "$(yes_if [ "$rc" -ne 0 ])" "$out"
+	ok "TC-1128-09 the DER file gets the non-certificate line" \
+		"$(yes_if says "coredump/ca.der is 0644 in a swept tree; every file under $VAR_RASPUTIN/coredump is owner-only unless it is a public certificate" "$out")" "$out"
+
+	# TC-1128-10: LOG-SECRETS — nothing from the file reaches the output.
+	for src in "$KEY_EC" "$KEY_P8" "$PC/cert-then-key"; do
+		R=$(world)
+		pc_put "$R" "$PC_DIR/ca.pem" "$src" 0644
+		out=$(run_audit "$R")
+		ok "TC-1128-10 the output for $(basename "$src") carries no PEM label" \
+			"$(yes_if not says 'PRIVATE KEY' "$out")" "$out"
+		ok "TC-1128-10 the output for $(basename "$src") carries no key body line" \
+			"$(yes_if no_content "$out" "$SECRET_LINES")" "$out"
+		ok "TC-1128-10 the output for $(basename "$src") carries no certificate body line" \
+			"$(yes_if no_content "$out" "$CERT_LINES")" "$out"
+	done
+
+	# TC-1128-11: ERR-CLOSED — with no awk the content check cannot run, so
+	# the certificate is refused as a secret. Not under busybox sh: it runs
+	# its own awk applet ahead of PATH, so the stub never takes effect there
+	# (the measured note above term_case).
+	if [ "$SH" != busybox_sh ]; then
+		R=$(world)
+		pc_put "$R" "$PC_DIR/ca.pem" "$CERT" 0644
+		out=$(run_audit_without "$R" awk)
+		ok "TC-1128-11 with no awk a public certificate gets the non-certificate line" \
+			"$(yes_if says "$PC_DIR/ca.pem is 0644 $NOT_CERT_TAIL" "$out")" "$out"
+		ok "TC-1128-11 with no awk the verdict is FAIL" \
+			"$(yes_if last_line_matches '^rasputin-atrest: FAIL ' "$out")" "$out"
+	fi
+}
+
 for SH in $TEST_SHELLS; do
 	echo "== $SH"
 	cases
@@ -781,6 +972,7 @@ for SH in $TEST_SHELLS; do
 	restore_cases
 	rollback_cases
 	identity_cases
+	public_cert_cases
 done
 
 # ── a TERM ends the audit, cleans up, and writes no verdict ────────────────
