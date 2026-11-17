@@ -69,6 +69,11 @@ find_ovmf() {
 #              readable and writable, qemu_exec prints one sentence naming it
 #              and returns 1 without starting QEMU. There is no TCG fallback:
 #              it would read as a product fault.
+#              QEMU_NO_KVMCLOCK=1 turns kvmclock off (-cpu max,kvmclock=off):
+#              under KVM the guest otherwise takes its wall clock from the
+#              host through kvmclock, so -rtc base= has no effect. The
+#              growpart leg sets it, because its clock-floor assertion needs
+#              the emulated RTC to drive the clock, as on a Pi.
 #   arm64      needs QEMU_KERNEL and QEMU_APPEND: `virt` has no Pi firmware,
 #              so the caller reads a boot slot's kernel and cmdline itself.
 #   QEMU_DISK2 (optional) a second raw disk, attached the same way as the first.
@@ -89,8 +94,10 @@ qemu_exec() {
 		if [ -n "${QEMU_DISK2:-}" ]; then
 			set -- -drive file="$QEMU_DISK2",format=raw,if=virtio "$@"
 		fi
+		_cpu=max
+		[ "${QEMU_NO_KVMCLOCK:-0}" = 1 ] && _cpu=max,kvmclock=off
 		exec timeout "$_budget" qemu-system-x86_64 \
-			-machine q35 -accel kvm -m "$QEMU_MEM_MIB" -smp 2 -cpu max -nographic \
+			-machine q35 -accel kvm -m "$QEMU_MEM_MIB" -smp 2 -cpu "$_cpu" -nographic \
 			-drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
 			-drive if=pflash,format=raw,file="$VARS_FD" \
 			-drive file="$_img",format=raw,if=virtio \

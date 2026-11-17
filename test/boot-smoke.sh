@@ -1248,7 +1248,11 @@ fi
 GROW_FWD="restrict=on,hostfwd=tcp:127.0.0.1:${SSH_PORT}-:22"
 CONSOLE_LOG="$WORK/grow1-console.log"
 : > "$CONSOLE_LOG"
-qemu_exec "$ARCH" "$GROW_IMG" "$BOOT_BUDGET" "$CONSOLE_LOG" "$GROW_FWD" \
+# QEMU_NO_KVMCLOCK=1: on amd64 under KVM the guest's wall clock otherwise comes
+# from the host through kvmclock and -rtc base= has no effect, so the floor
+# would never be the clock source (geekdojo/geekdojo-brain#974). Both of the
+# leg's boots; the main boot keeps KVM's default.
+QEMU_NO_KVMCLOCK=1 qemu_exec "$ARCH" "$GROW_IMG" "$BOOT_BUDGET" "$CONSOLE_LOG" "$GROW_FWD" \
   -rtc base=2000-01-01T00:00:00 -no-reboot &
 QPID=$!
 echo "growpart leg: boot 1 of $GROW_IMG (+8G) with the RTC at 2000-01-01, no route out, and -no-reboot"
@@ -1312,7 +1316,7 @@ echo "growpart leg ($ARCH) clock: forged floor $FLOOR_FORGED into /var/lib/raspu
 
 CONSOLE_LOG="$WORK/grow2-console.log"
 : > "$CONSOLE_LOG"
-qemu_exec "$ARCH" "$GROW_IMG" "$BOOT_BUDGET" "$CONSOLE_LOG" "$GROW_FWD" \
+QEMU_NO_KVMCLOCK=1 qemu_exec "$ARCH" "$GROW_IMG" "$BOOT_BUDGET" "$CONSOLE_LOG" "$GROW_FWD" \
   -rtc base=2000-01-01T00:00:00 &
 QPID=$!
 echo "growpart leg: boot 2 of $GROW_IMG on the forged floor"

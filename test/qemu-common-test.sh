@@ -36,10 +36,11 @@ chmod +x "$TMP/bin/qemu-system-x86_64" "$TMP/bin/timeout"
 PATH="$TMP/bin:$PATH"
 OVMF_CODE="$TMP/code.fd" VARS_FD="$TMP/vars.fd"
 
-# run DEV — qemu_exec amd64 with the device DEV; sets OUT, RC and ARGV.
+# run DEV [NOCLOCK] — qemu_exec amd64 with the device DEV, and
+# QEMU_NO_KVMCLOCK=NOCLOCK when given; sets OUT, RC and ARGV.
 run() {
 	rm -f "$TMP/argv"
-	OUT=$( (QEMU_KVM_DEV="$1" qemu_exec amd64 "$TMP/disk.img" 60 "$TMP/console.log" hostfwd=tcp:127.0.0.1:1-:22) 2>&1); RC=$?
+	OUT=$( (QEMU_KVM_DEV="$1" QEMU_NO_KVMCLOCK="${2:-0}" qemu_exec amd64 "$TMP/disk.img" 60 "$TMP/console.log" hostfwd=tcp:127.0.0.1:1-:22) 2>&1); RC=$?
 	ARGV=$(cat "$TMP/argv" 2>/dev/null)
 }
 
@@ -62,6 +63,21 @@ check "TC-974-12 a usable KVM device: QEMU's argv carries -accel kvm" \
 	"$(yes_if contains "
 -accel
 kvm
+" "
+$ARGV
+")" "$ARGV"
+check "TC-974-19 the default amd64 boot keeps kvmclock: -cpu max, and no kvmclock=off" \
+	"$({ contains "
+-cpu
+max
+" "
+$ARGV
+" && ! contains kvmclock=off "$ARGV"; } && echo 0 || echo 1)" "$ARGV"
+run "$TMP/rw-kvm" 1
+check "TC-974-19 QEMU_NO_KVMCLOCK=1 (the growpart leg) gives -cpu max,kvmclock=off" \
+	"$(yes_if contains "
+-cpu
+max,kvmclock=off
 " "
 $ARGV
 ")" "$ARGV"
