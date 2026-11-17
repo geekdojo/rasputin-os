@@ -44,6 +44,18 @@
 #       lines, and the start wait's curl carries paths only
 #   25  a database that exits at once on every start reaches systemd's start limit,
 #       and starts again once the fault is gone
+#   Identity 2.7's first boot (geekdojo/geekdojo-brain#975), from emptied data:
+#   29  the first start creates the database through the gate, records
+#       `created`, imports the realm once and creates no administrator; the
+#       locale provider is builtin and checksums are on
+#   30  a same-boot restart of the database keeps the `created` record, with
+#       no second initdb
+#   31  data present, not armed, after a new boot: `untouched`, the baseline
+#       staged, the realm import skipped
+#   32  armed with data present: `untouched`, the staged baseline removed
+#   33  armed with the data emptied: `refused`, the database held stopped and
+#       Keycloak not active, also after the api's reset-failed and restarts
+#   34  the reboot points of a first start, each re-run on its own facts
 #
 # TEST HARNESS, not from the image, and labelled where it is done:
 #   * the keycloak (991) and postgres (992) users, which mkusers creates on the
@@ -57,11 +69,14 @@
 #   * Identity 2.6's keycloak.conf, postgresql.conf and pg_hba.conf, written
 #     here from #957's probe configs with their paths moved to the units'
 #     credentials;
-#   * Identity 2.7's initdb and bootstrap SQL, run here once;
+#   * the realm baseline, copied from the pinned api tarball's identity/ to
+#     the path the api package installs it at;
 #   * a throwaway identity CA and its leaves (test/lib/test-pki.sh) standing
 #     in for the ones the api mints (#977), and a mesh CA;
-#   * a drop-in Environment= pointing the hooks' console line at a file,
+#   * drop-ins Environment= pointing the hooks' console lines at files,
 #     because in a privileged container /dev/kmsg is the host's;
+#   * removing /run/rasputin-identity-db-init/ and running tmpfiles again,
+#     standing in for a new boot, and scenario 34's interrupted states;
 #   * scenario 20's UDP listeners and probe, scenario 27's curl recorder (a
 #     drop-in RASPUTIN_KCHOOK_CURL for one start, which copies its own argv
 #     from /proc and execs /usr/bin/curl), and scenario 25's bad setting;
@@ -88,6 +103,7 @@ ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 OVERLAY="$ROOT/board/rasputin/common/rootfs-overlay"
 SYSD="$OVERLAY/etc/systemd/system"
 HOOK_REL=usr/lib/rasputin/identity/rasputin-keycloak-hooks.sh
+ID_REL=usr/lib/rasputin/identity
 KCPKG="$ROOT/package/keycloak"
 JREPKG="$ROOT/package/temurin-jre"
 BASE=rasputin-identity-unit-functional:f43-systemd-258.7
@@ -109,6 +125,8 @@ for t in openssl make curl tar; do
 	command -v "$t" >/dev/null 2>&1 || { echo "FAILED: this test needs $t, and it is not on PATH."; exit 1; }
 done
 for f in "$SYSD/$KC" "$SYSD/$DB" "$OVERLAY/$HOOK_REL" "$OVERLAY/usr/lib/rasputin/outcome/outcome.sh" \
+	"$OVERLAY/$ID_REL/armed.sh" "$OVERLAY/$ID_REL/identity-db-init-gate.sh" "$OVERLAY/$ID_REL/identity-db-init.sh" \
+	"$OVERLAY/$ID_REL/identity-stage-import.sh" \
 	"$OVERLAY/usr/lib/tmpfiles.d/rasputin.conf" "$OVERLAY/usr/lib/rasputin/atrest/inventory" \
 	"$OVERLAY/usr/lib/rasputin/atrest/rasputin-atrest-audit.sh" "$KCPKG/keycloak.mk" "$KCPKG/keycloak.hash" \
 	"$JREPKG/temurin-jre.mk" "$JREPKG/temurin-jre.hash"; do
@@ -183,7 +201,9 @@ tar -xzf "$SCRATCH/$JRE_SOURCE" -C "$SCRATCH/jre" --strip-components=1 \
 	|| { echo "FAILED: $JRE_SOURCE could not be extracted."; exit 1; }
 rm -f "$SCRATCH/$KC_SOURCE" "$SCRATCH/$JRE_SOURCE"
 api_dir_fetch "$ROOT" "$BR_ARCH" "$SCRATCH/api" identity "the identity build options" || exit 1
-[ -f "$API_DIR/keycloak-build.conf" ] || { echo "FAILED: api $API_VERSION's identity/ has no keycloak-build.conf."; exit 1; }
+for f in keycloak-build.conf realm-baseline.json; do
+	[ -f "$API_DIR/$f" ] || { echo "FAILED: api $API_VERSION's identity/ has no $f."; exit 1; }
+done
 
 # --- the test PKI (TEST HARNESS: stands in for the identity CA and leaves) ---
 P="$SCRATCH/pki"
@@ -241,7 +261,6 @@ max_wal_senders = 0
 log_destination = 'stderr'
 EOF
 printf 'hostssl keycloak keycloak 127.0.0.1/32 cert\n' >"$SCRATCH/conf/pg_hba.conf"
-printf 'CREATE ROLE keycloak LOGIN;\nCREATE DATABASE keycloak OWNER keycloak;\n' >"$SCRATCH/conf/bootstrap.sql"
 # TEST HARNESS: scenario 27's curl recorder.
 cat >"$SCRATCH/conf/curl-recorder" <<'EOF'
 #!/bin/sh
@@ -265,7 +284,8 @@ ctr_boot "the identity units" "$IMAGE" -v "$OVERLAY:/overlay:ro" || exit 1
 echo "in the container: $(inside 'systemctl --version | head -1')"
 if ! { docker cp "$SCRATCH/kc" "$CID:/usr/lib/keycloak" >/dev/null && docker cp "$SCRATCH/jre" "$CID:/usr/lib/temurin-jre" >/dev/null \
 	&& docker cp "$P" "$CID:/pki" >/dev/null && docker cp "$SCRATCH/conf" "$CID:/harness" >/dev/null \
-	&& docker cp "$API_DIR/keycloak-build.conf" "$CID:/harness/keycloak-build.conf" >/dev/null; }; then
+	&& docker cp "$API_DIR/keycloak-build.conf" "$CID:/harness/keycloak-build.conf" >/dev/null \
+	&& docker cp "$API_DIR/realm-baseline.json" "$CID:/harness/realm-baseline.json" >/dev/null; }; then
 	echo "FAILED: could not copy Keycloak, the JRE, the test PKI and the harness configs into the container."; exit 1
 fi
 
@@ -288,11 +308,20 @@ install -m 0644 /overlay/etc/systemd/system/$KC /etc/systemd/system/$KC
 install -m 0644 /overlay/etc/systemd/system/$DB /etc/systemd/system/$DB
 install -D -m 0755 /overlay/$HOOK_REL /$HOOK_REL
 install -D -m 0644 /overlay/usr/lib/rasputin/outcome/outcome.sh /usr/lib/rasputin/outcome/outcome.sh
+# Identity 2.7's gate, init and stage steps and armed.sh, verbatim.
+install -m 0644 /overlay/$ID_REL/armed.sh /$ID_REL/armed.sh
+for s in identity-db-init-gate.sh identity-db-init.sh identity-stage-import.sh; do
+	install -m 0755 /overlay/$ID_REL/\$s /$ID_REL/\$s
+done
+# The realm baseline where the api package installs it.
+install -D -m 0644 /harness/realm-baseline.json /usr/share/rasputin/identity/realm-baseline.json
 install -D -m 0755 /overlay/usr/lib/rasputin/atrest/rasputin-atrest-audit.sh /usr/lib/rasputin/atrest/audit.sh
 install -m 0755 /harness/curl-recorder /usr/local/bin/curl-recorder
 # TEST HARNESS: in a privileged container /dev/kmsg is the host's.
 mkdir -p /etc/systemd/system/$KC.d
-printf '[Service]\nEnvironment=RASPUTIN_KCHOOK_KMSG=/run/kchook-console\n' >/etc/systemd/system/$KC.d/harness-console.conf
+printf '[Service]\nEnvironment=RASPUTIN_KCHOOK_KMSG=/run/kchook-console\nEnvironment=RASPUTIN_KCSTAGE_KMSG=/run/kcstage-console\n' >/etc/systemd/system/$KC.d/harness-console.conf
+mkdir -p /etc/systemd/system/$DB.d
+printf '[Service]\nEnvironment=RASPUTIN_IDDBGATE_KMSG=/run/iddbgate-console\n' >/etc/systemd/system/$DB.d/harness-console.conf
 systemctl daemon-reload
 " || { echo "FAILED: could not install the units, the hook and the harness into the container."; exit 1; }
 
@@ -381,11 +410,8 @@ no_exits "TC-973-28"
 echo
 echo "15. each input removed in turn: skipped, not failed (TC-973-15)"
 put_confs || { echo "FAILED: the harness configs could not be written."; exit 1; }
-# TEST HARNESS: Identity 2.7's initdb and bootstrap SQL, as postgres.
-inside "setpriv --reuid=992 --regid=992 --clear-groups /usr/bin/initdb -D $V/identity-db/data -E UTF8 \
-		--locale-provider=builtin --builtin-locale=C.UTF-8 --locale=C -U postgres -A reject --no-instructions >/tmp/initdb.log 2>&1 &&
-	setpriv --reuid=992 --regid=992 --clear-groups /usr/bin/postgres --single -D $V/identity-db/data postgres </harness/bootstrap.sql >/tmp/bootstrap.log 2>&1" \
-	|| { inside 'cat /tmp/initdb.log /tmp/bootstrap.log | tail -20'; echo "FAILED: initdb or the bootstrap SQL failed."; exit 1; }
+# No harness initdb: the first start below (scenario 16) creates the database
+# through Identity 2.7's gate and init step, as on a node.
 # Each removal: the input, the unit started, and the unit that skips.
 while IFS='|' read -r what start; do
 	reset
@@ -686,6 +712,172 @@ starts=$(inside "journalctl --after-cursor='$cursor' -u $DB -o cat --no-pager | 
 check "TC-973-25 $DB was started StartLimitBurst=$burst times, systemd's own count (got $starts)" "$(yes_if [ "$starts" = "$burst" ])"
 inside "cp /tmp/pg.good /etc/rasputin/identity/postgresql.conf && systemctl reset-failed $DB && systemctl start $DB"
 check "TC-973-25 with the fault gone, reset-failed and start bring it to active" "$(yes_if [ "$(show $DB ActiveState)" = active ])"
+reset
+
+# --- Identity 2.7: first boot (geekdojo/geekdojo-brain#975) -------------------
+IDB=$V/identity-db
+IDREC_DIR=/run/rasputin-identity-db-init
+IDREC=$IDREC_DIR/outcome
+STAGED=$V/keycloak/data/import/realm-baseline.json
+BASELINE=/usr/share/rasputin/identity/realm-baseline.json
+# psql_kc SQL — SQL as keycloak over mutual TLS with the db-client leaf, as
+# Keycloak connects. SQL holds no double quote and no $.
+psql_kc() {
+	inside "psql 'host=127.0.0.1 port=5432 dbname=keycloak user=keycloak sslmode=verify-full sslrootcert=$V/trust/identity-ca.pem sslcert=$V/tls/identity-db-client/leaf.pem sslkey=$V/tls/identity-db-client/leaf.key' -Atc \"$1\" 2>&1"
+}
+realm_id() { psql_kc "SELECT id FROM realm WHERE name = 'rasputin'"; }
+realm_count() { psql_kc "SELECT count(*) FROM realm WHERE name = 'rasputin'"; }
+rec_outcome() { inside "sed -n 's/^outcome=//p' $IDREC 2>/dev/null"; }
+# new_boot — both units stopped and reset, the hooks' state and the outcome
+# record cleared, and tmpfiles run again (TEST HARNESS: stands in for a boot).
+new_boot() {
+	reset
+	inside "rm -rf $IDREC_DIR; systemd-tmpfiles --create /usr/lib/tmpfiles.d/rasputin.conf >/dev/null 2>&1; true"
+}
+start_kc() { inside "systemctl start $KC" >/dev/null 2>&1; active_kc; }
+# import_done CURSOR — wait for Keycloak's own line, after CURSOR, that realm
+# rasputin was imported or already existed, and print which. On a fresh
+# database Keycloak creates its schema and the master realm and runs the
+# import after /health/started answers UP (measured here at 26.8.2), so
+# `active` alone does not mean the import has run.
+import_done() {
+	wait_for "Keycloak logged realm rasputin imported or already existing" \
+		"journalctl --after-cursor='$1' -u $KC -o cat --no-pager | grep -qE \"Realm 'rasputin' (imported|already exists)\"" || return 1
+	inside "journalctl --after-cursor='$1' -u $KC -o cat --no-pager | grep -oE \"Realm 'rasputin' (imported|already exists)\" | tail -n 1"
+}
+boot=$(inside 'cat /proc/sys/kernel/random/boot_id')
+
+echo
+echo "29. the first start creates the database once (TC-975-01, TC-975-05)"
+new_boot
+inside "rm -rf $IDB/data $IDB/data.init $V/keycloak/data/import; systemd-tmpfiles --create /usr/lib/tmpfiles.d/rasputin.conf >/dev/null 2>&1; true"
+check "TC-975-01 given: tmpfiles' empty data directory, 0700 992:992, no armed, no record" \
+	"$(yes_if inside "[ -d $IDB/data ] && [ -z \"\$(ls -A $IDB/data)\" ] && [ \"\$(stat -c '%a %u:%g' $IDB/data)\" = '700 992:992' ] && [ ! -e $V/identity/armed ] && [ ! -e $IDREC_DIR ]")"
+c=$(cursor)
+start_kc
+check "TC-975-01 $KC is active" "$(yes_if [ "$(show $KC ActiveState)" = active ])" \
+	"$(inside "journalctl --after-cursor='$c' -u $KC -u $DB --no-pager -o cat | tail -40")"
+rec=$(inside "cat $IDREC")
+check "TC-975-01 the record is exactly outcome=created, this boot's id and a reason" \
+	"$({ [ "$(printf '%s\n' "$rec" | sed -n '1p;2p')" = "outcome=created
+boot_id=$boot" ] && [ "$(printf '%s\n' "$rec" | grep -c .)" = 3 ] && printf '%s\n' "$rec" | sed -n 3p | grep -q '^reason=The .*\.$'; } && echo 0 || echo 1)" "$rec"
+modes=$(inside "stat -c '%a %U' $IDREC $IDREC_DIR | tr '\n' ' '")
+check "TC-975-01 the record is 0600 root in a 0700 root directory (got '$modes')" "$(yes_if [ "$modes" = "600 root 700 root " ])"
+imp=$(import_done "$c")
+check "TC-975-01 Keycloak imported realm rasputin on this start (got '$imp')" "$(yes_if [ "$imp" = "Realm 'rasputin' imported" ])"
+n=$(inside "journalctl --after-cursor='$c' -u $DB -p 6..6 -o cat --no-pager | grep -c '^identity-db-init-gate: outcome=created reason=\"'")
+check "TC-975-01 the journal holds one <6> identity-db-init-gate outcome=created line (got $n)" "$(yes_if [ "$n" = 1 ])"
+check "TC-975-01 data holds the cluster; data.init and the pending marker are gone" \
+	"$(yes_if inside "[ -f $IDB/data/PG_VERSION ] && [ ! -e $IDB/data.init ] && [ ! -e $IDREC_DIR/pending ]")" "$(inside "ls -A $IDB $IDB/data $IDREC_DIR")"
+n=$(realm_count)
+check "TC-975-01 realm rasputin exists exactly once (got '$n')" "$(yes_if [ "$n" = 1 ])"
+n=$(psql_kc "SELECT count(*) FROM user_entity u JOIN realm r ON r.id = u.realm_id WHERE r.name = 'master'")
+check "TC-975-01 master holds no user, no bootstrap administrator or service account (got '$n')" "$(yes_if [ "$n" = 0 ])"
+out=$(psql_kc "SELECT datlocprovider FROM pg_database WHERE datname = 'keycloak'")
+check "TC-975-05 datlocprovider is b (got '$out')" "$(yes_if [ "$out" = b ])"
+out=$(psql_kc "SHOW data_checksums")
+check "TC-975-05 data_checksums is on (got '$out')" "$(yes_if [ "$out" = on ])"
+RID=$(realm_id)
+echo "    realm rasputin id: $RID"
+[ -n "$RID" ] || { echo "FAILED: realm rasputin has no id, so the later id checks would compare nothing."; exit 1; }
+
+echo
+echo "30. a same-boot restart of the database keeps created (TC-975-07)"
+# The database system identifier is set by initdb and nothing else, so an
+# unchanged identifier and PG_VERSION mtime mean no second initdb.
+sysid() { inside "pg_controldata $IDB/data | sed -n 's/^Database system identifier: *//p'"; }
+before="$(inside "stat -c %Y $IDB/data/PG_VERSION") $(sysid)"
+inside "systemctl restart $DB" >/dev/null 2>&1
+active_kc
+after="$(inside "stat -c %Y $IDB/data/PG_VERSION") $(sysid)"
+check "TC-975-07 the record still reads outcome=created" "$(yes_if [ "$(rec_outcome)" = created ])" "$(inside "cat $IDREC")"
+check "TC-975-07 no second initdb: PG_VERSION mtime and system identifier unchanged ($before / $after)" \
+	"$({ [ -n "${before#* }" ] && [ "$before" = "$after" ]; } && echo 0 || echo 1)"
+check "TC-975-07 realm rasputin's id is unchanged" "$(yes_if [ "$(realm_id)" = "$RID" ])"
+
+echo
+echo "31. data present, not armed, after a new boot: untouched (TC-975-02)"
+new_boot
+c=$(cursor)
+start_kc
+imp=$(import_done "$c")
+check "TC-975-02 Keycloak skipped the import: realm rasputin already exists (got '$imp')" "$(yes_if [ "$imp" = "Realm 'rasputin' already exists" ])"
+check "TC-975-02 the record reads outcome=untouched" "$(yes_if [ "$(rec_outcome)" = untouched ])" "$(inside "cat $IDREC")"
+st=$(inside "stat -c '%a %u:%g' $STAGED")
+check "TC-975-02 the baseline is staged at 0600 991:991 (got '$st')" "$(yes_if [ "$st" = '600 991:991' ])"
+check "TC-975-02 the staged file is byte-equal to the shipped baseline" "$(yes_if inside "[ \"\$(sha256sum <$BASELINE)\" = \"\$(sha256sum <$STAGED)\" ]")"
+check "TC-975-02 realm rasputin's id is unchanged and it exists once (the import was skipped)" \
+	"$({ [ "$(realm_id)" = "$RID" ] && [ "$(realm_count)" = 1 ]; } && echo 0 || echo 1)"
+
+echo
+echo "32. armed with data present: the staged baseline is removed (TC-975-04)"
+inside "install -m 0600 /dev/null $V/identity/armed"
+check "TC-975-04 given: a staged baseline from the start before" "$(yes_if inside "[ -f $STAGED ]")"
+inside "systemctl stop $KC $DB" >/dev/null 2>&1
+start_kc
+out=$(rec_outcome)
+check "TC-975-04 the record reads untouched (got '$out')" "$(yes_if [ "$out" = untouched ])"
+check "TC-975-04 the staged baseline is gone" "$(yes_if inside "[ ! -e $STAGED ]")" "$(inside "ls -A $V/keycloak/data/import")"
+check "TC-975-04 $KC is active and realm rasputin's id is unchanged" \
+	"$({ [ "$(show $KC ActiveState)" = active ] && [ "$(realm_id)" = "$RID" ]; } && echo 0 || echo 1)"
+
+echo
+echo "33. armed with the data emptied: refused, held stopped (TC-975-03)"
+inside "systemctl stop $KC $DB; find $IDB/data -mindepth 1 -delete" >/dev/null 2>&1
+c=$(cursor)
+inside "systemctl start $KC" >/dev/null 2>&1
+wait_for "$DB is failed with no job left" "[ \"\$(systemctl show -P ActiveState $DB)\" = failed ] && [ -z \"\$(systemctl show -P Job $DB)\" ] && [ -z \"\$(systemctl show -P Job $KC)\" ]"
+# held — the TC-975-03 facts, read now.
+held() {
+	rec=$(inside "cat $IDREC")
+	check "TC-975-03 $1: the record reads outcome=refused with this boot's id" \
+		"$(yes_if [ "$(printf '%s\n' "$rec" | sed -n '1p;2p')" = "outcome=refused
+boot_id=$boot" ])" "$rec"
+	check "TC-975-03 $1: $DB is failed (got $(show $DB ActiveState))" "$(yes_if [ "$(show $DB ActiveState)" = failed ])"
+	check "TC-975-03 $1: data is still empty, no data.init, no postmaster.pid" \
+		"$(yes_if inside "[ -z \"\$(ls -A $IDB/data)\" ] && [ ! -e $IDB/data.init ]")" "$(inside "ls -A $IDB $IDB/data")"
+	check "TC-975-03 $1: postgres never started under the unit" \
+		"$(yes_if inside "! journalctl --after-cursor='$c' -u $DB -o cat --no-pager | grep -q 'starting PostgreSQL'")"
+	check "TC-975-03 $1: $KC is not active (got $(show $KC ActiveState))" "$(yes_if [ "$(show $KC ActiveState)" != active ])"
+}
+held "after the start"
+n=$(inside "journalctl --after-cursor='$c' -u $DB -p 2..2 -o cat --no-pager | grep -c '^identity-db-init-gate: outcome=refused reason='")
+check "TC-975-03 a <2> identity-db-init-gate outcome=refused line is in the journal (got $n)" "$(yes_if [ "$n" -ge 1 ])"
+# The api's sequence on a new leaf.
+inside "systemctl reset-failed $KC $DB; systemctl restart $DB; systemctl restart $KC" >/dev/null 2>&1
+settled "$DB"; settled "$KC"
+wait_for "$DB is failed with no job left" "[ \"\$(systemctl show -P ActiveState $DB)\" = failed ] && [ -z \"\$(systemctl show -P Job $DB)\" ]"
+held "after the api's reset-failed and restarts"
+inside "rm -f $V/identity/armed"
+
+echo
+echo "34. the reboot points of a first start re-run on their own facts (TC-975-06)"
+# run_case LABEL WANT — a new boot, then the pair started: the record reads
+# WANT, the cluster is complete, Keycloak is active with one realm rasputin.
+run_case() {
+	inside "rm -rf $IDREC_DIR"
+	inside "systemctl reset-failed $KC $DB" >/dev/null 2>&1
+	_c=$(cursor)
+	start_kc
+	import_done "$_c" >/dev/null
+	check "TC-975-06 $1: the record reads $2 (got '$(rec_outcome)')" "$(yes_if [ "$(rec_outcome)" = "$2" ])"
+	check "TC-975-06 $1: the cluster is complete, no data.init" \
+		"$(yes_if inside "[ -f $IDB/data/PG_VERSION ] && [ -f $IDB/data/global/pg_control ] && [ ! -e $IDB/data.init ]")" "$(inside "ls -A $IDB $IDB/data")"
+	check "TC-975-06 $1: $KC is active with exactly one realm rasputin" \
+		"$({ [ "$(show $KC ActiveState)" = active ] && [ "$(realm_count)" = 1 ]; } && echo 0 || echo 1)"
+}
+# (a) empty data, a partial data.init: initdb stopped part-way.
+reset
+inside "find $IDB/data -mindepth 1 -delete; rm -rf $IDB/data.init; install -d -m 0700 -o 992 -g 992 $IDB/data.init $IDB/data.init/base
+	echo 18 >$IDB/data.init/PG_VERSION; touch $IDB/data.init/base/partial; chown -R 992:992 $IDB/data.init"
+run_case "(a) empty data, partial data.init" created
+# (b) data absent, a complete data.init: the reboot fell between rmdir and mv.
+reset
+inside "mv $IDB/data $IDB/data.init"
+run_case "(b) data absent, complete data.init" created
+# (c) complete data.
+reset
+run_case "(c) complete data" untouched
 reset
 
 echo

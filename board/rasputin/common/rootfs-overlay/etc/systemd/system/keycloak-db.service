@@ -43,11 +43,20 @@ Group=postgres
 # The database's start time is not measured; 1 h is a chosen bound, the same
 # as the identity service's.
 TimeoutStartSec=1h
-# ExecStartPre= slots, in this order, for later items. None ships here.
+# ExecStartPre= slots, in this order, for later items, ahead of the lines
+# below:
 #   Identity 5.4: identity-restore.sh (a staged restore)
 #   Identity 5.6: identity-rollback.sh (the version gate)
-#   Identity 2.7: identity-db-init-gate.sh, then identity-db-init.sh (initdb
-#                 and the bootstrap SQL)
+# Identity 2.7 (geekdojo/geekdojo-brain#975): first boot creates the data once,
+# on facts. The gate (`+`, root) decides from the data directory and `armed`,
+# prepares the staging directory and writes the outcome record; the init step
+# runs initdb and the bootstrap SQL as postgres inside this sandbox and renames
+# the cluster into place; post records `created`. No `-`: a refusal fails the
+# start, and Restart= with systemd's start limit holds the database, and the
+# identity service with it through Requires=.
+ExecStartPre=+/usr/lib/rasputin/identity/identity-db-init-gate.sh pre
+ExecStartPre=/usr/lib/rasputin/identity/identity-db-init.sh
+ExecStartPre=+/usr/lib/rasputin/identity/identity-db-init-gate.sh post
 ExecStart=/usr/bin/postgres -D /var/lib/rasputin/identity-db/data -c config_file=/etc/rasputin/identity/postgresql.conf
 # Everything root writes for the database reaches it here: the postgres uid
 # can read none of these source directories, and only it and root can read the

@@ -35,6 +35,11 @@ AGENT_UNIT="$SYSD/rasputin-agent.service"
 STORE_UNIT="$SYSD/openbao.service"
 TMPFILES="$OVERLAY/usr/lib/tmpfiles.d/rasputin.conf"
 HOOK=/usr/lib/rasputin/identity/rasputin-keycloak-hooks.sh
+# Identity 2.7's hooks (geekdojo/geekdojo-brain#975).
+GATE=/usr/lib/rasputin/identity/identity-db-init-gate.sh
+INIT=/usr/lib/rasputin/identity/identity-db-init.sh
+STAGE=/usr/lib/rasputin/identity/identity-stage-import.sh
+ARMED=/usr/lib/rasputin/identity/armed.sh
 MK="$ROOT/package/rasputin-identity-db/rasputin-identity-db.mk"
 DEFCONFIGS="$ROOT/configs/rasputin_rpi_defconfig $ROOT/configs/rasputin_n100_defconfig"
 
@@ -49,6 +54,7 @@ command -v make >/dev/null 2>&1 \
 . "$ROOT/test/lib/mk-var.sh"
 . "$ROOT/test/lib/unit-directives.sh"
 count() { printf '%s\n' "$1" | grep -c "^$2|$3=" ; }
+perms() { ls -ld "$1" 2>/dev/null | cut -c1-10; }
 
 # The static users, from the package. Each line: name uid group gid ...
 USERS=$(mk_var "$MK" RASPUTIN_IDENTITY_DB_USERS) || { echo "FAILED: could not read RASPUTIN_IDENTITY_DB_USERS from $MK."; exit 1; }
@@ -158,8 +164,16 @@ $V/tls/identity-db-server/leaf.key
 	exactly Service NotifyAccess main
 	exactly Service User postgres
 	exactly Service Group postgres
-	_pre=$(values "$D" Service ExecStartPre)
-	check "[Service] no ExecStartPre= line (2.7, 5.4 and 5.6 add them)" "$(yes_if [ -z "$_pre" ])" "got: $_pre"
+	# TC-975-14: the gate as root, the init step in the sandbox, the gate's
+	# post as root; none with `-`, so a refusal fails the start.
+	lines Service ExecStartPre "+$GATE pre
+$INIT
++$GATE post"
+	for s in "$GATE" "$INIT"; do
+		check "TC-975-14 $s ships executable in the overlay" "$(yes_if test -x "$OVERLAY$s")"
+	done
+	check "TC-975-14 $ARMED ships 0644 (sourced, never run)" "$(yes_if [ "$(perms "$OVERLAY$ARMED")" = -rw-r--r-- ])" \
+		"got: $(perms "$OVERLAY$ARMED")"
 	exactly Service ExecStart '/usr/bin/postgres -D /var/lib/rasputin/identity-db/data -c config_file=/etc/rasputin/identity/postgresql.conf'
 	lines Service LoadCredential "server.pem:$V/tls/identity-db-server/leaf.pem
 server.key:$V/tls/identity-db-server/leaf.key
@@ -202,7 +216,10 @@ $V/tls/identity-db-client/leaf.pk8
 MALLOC_ARENA_MAX=2
 "JAVA_OPTS_KC_HEAP=-Xms128m -Xmx384m"
 "JAVA_OPTS_APPEND='"$KC_APPEND"'"'
-	lines Service ExecStartPre "+$HOOK hold"
+	# TC-975-14: the stage step after the hold, as root, with no `-`.
+	lines Service ExecStartPre "+$HOOK hold
++$STAGE"
+	check "TC-975-14 $STAGE ships executable in the overlay" "$(yes_if test -x "$OVERLAY$STAGE")"
 	exactly Service ExecStart '/usr/lib/keycloak/bin/kc.sh --config-file=/etc/rasputin/identity/keycloak.conf start --optimized --import-realm'
 	lines Service ExecStartPost "+$HOOK wait"
 	lines Service ExecStopPost "-+$HOOK exit"
@@ -340,7 +357,38 @@ refuses verify_db "$DB_UNIT" "TC-973-01 MemoryMax=128M" 'replace:MemoryMax=96M' 
 refuses verify_db "$DB_UNIT" "TC-973-01 TimeoutStartSec=2h" 'replace:TimeoutStartSec=1h' 'TimeoutStartSec=2h' '[Service] TimeoutStartSec=1h'
 refuses verify_db "$DB_UNIT" "TC-973-01 the config condition removed" \
 	'replace:ConditionPathExists=/etc/rasputin/identity/postgresql.conf' '' 'ConditionPathExists lines'
-refuses verify_db "$DB_UNIT" "TC-973-01 an ExecStartPre= line" Service 'ExecStartPre=/bin/true' 'no ExecStartPre='
+refuses verify_db "$DB_UNIT" "TC-973-01 an extra ExecStartPre= line" Service 'ExecStartPre=/bin/true' 'ExecStartPre lines'
+# TC-975-14: each wrong prefix, order or missing line on the 2.7 hooks, named.
+refuses verify_db "$DB_UNIT" "TC-975-14 the gate's pre with a -+ prefix" "replace:ExecStartPre=+$GATE pre" \
+	"ExecStartPre=-+$GATE pre" "ExecStartPre lines"
+refuses verify_db "$DB_UNIT" "TC-975-14 the init step with a - prefix" "replace:ExecStartPre=$INIT" \
+	"ExecStartPre=-$INIT" "ExecStartPre lines"
+refuses verify_db "$DB_UNIT" "TC-975-14 the gate's post with a -+ prefix" "replace:ExecStartPre=+$GATE post" \
+	"ExecStartPre=-+$GATE post" "ExecStartPre lines"
+refuses verify_db "$DB_UNIT" "TC-975-14 the gate's pre without +" "replace:ExecStartPre=+$GATE pre" \
+	"ExecStartPre=$GATE pre" "ExecStartPre lines"
+refuses verify_db "$DB_UNIT" "TC-975-14 the gate's post without +" "replace:ExecStartPre=+$GATE post" \
+	"ExecStartPre=$GATE post" "ExecStartPre lines"
+refuses verify_db "$DB_UNIT" "TC-975-14 the init step with +" "replace:ExecStartPre=$INIT" \
+	"ExecStartPre=+$INIT" "ExecStartPre lines"
+# A real swap of pre and post: both lines present, in the wrong order.
+mkdir -p "$SCRATCH/s"
+awk -v a="ExecStartPre=+$GATE pre" -v b="ExecStartPre=+$GATE post" \
+	'$0 == a { print b; next } $0 == b { print a; next } { print }' "$DB_UNIT" >"$SCRATCH/s/keycloak-db.service"
+out=$(verify_db "$SCRATCH/s/keycloak-db.service"); rc=$?
+check "TC-975-14 pre and post swapped: refused, naming 'ExecStartPre lines'" \
+	"$({ [ "$rc" -ne 0 ] && ! cmp -s "$DB_UNIT" "$SCRATCH/s/keycloak-db.service" \
+		&& printf '%s\n' "$out" | grep -A1 FAIL | grep -qF 'ExecStartPre lines'; } && echo 0 || echo 1)" "$out"
+refuses verify_db "$DB_UNIT" "TC-975-14 the init step missing" "replace:ExecStartPre=$INIT" '' "ExecStartPre lines"
+refuses verify_db "$DB_UNIT" "TC-975-14 the gate's post missing" "replace:ExecStartPre=+$GATE post" '' "ExecStartPre lines"
+refuses verify_kc "$KC_UNIT" "TC-975-14 the stage step with a -+ prefix" "replace:ExecStartPre=+$STAGE" \
+	"ExecStartPre=-+$STAGE" "ExecStartPre lines"
+refuses verify_kc "$KC_UNIT" "TC-975-14 the stage step without +" "replace:ExecStartPre=+$STAGE" \
+	"ExecStartPre=$STAGE" "ExecStartPre lines"
+refuses verify_kc "$KC_UNIT" "TC-975-14 the stage step before the hold" "replace:ExecStartPre=+$HOOK hold" \
+	"ExecStartPre=+$STAGE
+ExecStartPre=+$HOOK hold" "ExecStartPre lines"
+refuses verify_kc "$KC_UNIT" "TC-975-14 the stage step missing" "replace:ExecStartPre=+$STAGE" '' "ExecStartPre lines"
 refuses verify_db "$DB_UNIT" "TC-973-01 KillMode=control-group" 'replace:KillMode=mixed' 'KillMode=control-group' '[Service] KillMode=mixed'
 # TC-973-02: one changed flag or hook prefix in keycloak.service, named.
 refuses verify_kc "$KC_UNIT" "TC-973-02 -Xmx512m" 'replace:Environment="JAVA_OPTS_KC_HEAP=-Xms128m -Xmx384m"' \
