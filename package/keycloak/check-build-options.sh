@@ -31,6 +31,10 @@ fail() {
 }
 
 [ "$#" -eq 2 ] || fail "check-build-options.sh needs the build conf and the built generated-bytecode.jar."
+KC_CONF_LIB="$(dirname "$0")/kc-conf.sh"
+[ -f "$KC_CONF_LIB" ] || fail "Cannot check Keycloak's build options, because the conf parser $KC_CONF_LIB does not exist."
+# shellcheck source=package/keycloak/kc-conf.sh
+. "$KC_CONF_LIB"
 CONF="$1"
 JAR="$2"
 UNZIP="${UNZIP:-unzip}"
@@ -52,13 +56,11 @@ case "$rc" in
 	*) fail "Cannot check Keycloak's build options, because $UNZIP exited $rc reading $MEMBER from $JAR." ;;
 esac
 
-# The conf as kc.<key>=<value>, refusing any line that is not key=value.
-awk -v bad="$WORK/badline" '
-	/^[[:space:]]*$/ || /^[[:space:]]*#/ { next }
-	/^[A-Za-z0-9._-]+=/ { print "kc." $0; next }
-	{ print NR > bad; exit 1 }
-' "$CONF" > "$WORK/conf" \
+# The conf as kc.<key>=<value>, refusing any line that is not key=value. The
+# grammar is read by kc-conf.sh, the one parser of it (F-974-09).
+kc_conf_lines "$CONF" "$WORK/badline" > "$WORK/conf.lines" \
 	|| fail "Cannot check Keycloak's build options, because line $(cat "$WORK/badline") of $CONF is not blank, a # comment or key=value."
+sed 's/^/kc./' "$WORK/conf.lines" > "$WORK/conf"
 
 awk '
 	/^[[:space:]]*$/ || /^[[:space:]]*#/ { next }
