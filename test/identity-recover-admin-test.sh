@@ -55,6 +55,10 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
 BUSYBOX_DIR=""
+# An id that cannot run, first on PATH for TC-1131-10's "id fails" case.
+mkdir -p "$TMP/id-fails"
+printf '#!/bin/sh\necho "id: cannot find name for user ID" >&2\nexit 1\n' > "$TMP/id-fails/id"
+chmod 0755 "$TMP/id-fails/id"
 if command -v busybox >/dev/null 2>&1; then
 	BUSYBOX_DIR="$TMP/busybox-applets"
 	mkdir -p "$BUSYBOX_DIR"
@@ -198,6 +202,7 @@ setup() {
 # (as the api passes one), the stubs and any VAR=VALUE in $EXTRA. Called in a
 # subshell, so its process is the script's; stdin is the caller's.
 EXTRA=""
+PATH_FIRST=""
 launch() {
 	# Each shell named in full, so one outside the exact PATH is still found.
 	case "$SH" in
@@ -206,6 +211,7 @@ launch() {
 	esac
 	_path=/usr/bin:/bin
 	[ "$SH" = busybox_applets ] && _path="$BUSYBOX_DIR:$_path"
+	[ -n "$PATH_FIRST" ] && _path="$PATH_FIRST:$_path"
 	# shellcheck disable=SC2086 # _cmd is "busybox sh" on purpose; EXTRA is VAR=VALUE words
 	exec env -i PATH="$_path" FAKE_DIR="$F" \
 		RASPUTIN_KCRECOVER_SYSTEMCTL="$FAKES/systemctl" RASPUTIN_KCRECOVER_SYSTEMD_RUN="$FAKES/systemd-run" \
@@ -316,9 +322,10 @@ RASPUTIN_RECOVER_CLIENT_SECRET"
 	done
 
 	# TC-1131-10: exec refuses empty input, no client id and root.
-	for case in "stdin at EOF" "an empty line" "no client id" "uid 0"; do
+	for case in "stdin at EOF" "an empty line" "no client id" "uid 0" "id fails"; do
 		setup
 		EXTRA=""
+		PATH_FIRST=""
 		case "$case" in
 			"stdin at EOF") go "<eof>" exec rasputin-recover-t10 ;;
 			"an empty line") go "
@@ -327,8 +334,13 @@ RASPUTIN_RECOVER_CLIENT_SECRET"
 " exec ;;
 			"uid 0") EXTRA=RASPUTIN_KCRECOVER_UID=0; go "$SECRET
 " exec rasputin-recover-t10 ;;
+			# F-1131-13: id cannot run and the uid seam is unset, so the uid is
+			# unknown; the guard must refuse, not read the empty value as non-root.
+			"id fails") PATH_FIRST="$TMP/id-fails"; go "$SECRET
+" exec rasputin-recover-t10 ;;
 		esac
 		EXTRA=""
+		PATH_FIRST=""
 		ok "TC-1131-10 $case: exit 2" "$(yes_if test "$RC" = 2)" "rc=$RC"
 		ok "TC-1131-10 $case: one sentence on stderr, no secret" "$(yes_if one_sentence)" "$(cat "$W/stderr" "$W/stdout")"
 		ok "TC-1131-10 $case: kc.sh never ran" "$(yes_if test ! -e "$F/kc-argv")"

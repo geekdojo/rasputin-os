@@ -91,8 +91,12 @@ EOF
 exec_kcsh() {
 	_client=$1
 	[ -n "$_client" ] || refuse "The admin recovery did not run, because no client id was given."
-	[ "${RASPUTIN_KCRECOVER_UID:-$(id -u)}" != 0 ] \
-		|| refuse "The admin recovery did not run, because it would have run as root."
+	# Fail closed: a uid that is not a non-empty decimal (id could not run) is
+	# refused like root, since it cannot be shown not to be root.
+	_uid=${RASPUTIN_KCRECOVER_UID:-$(id -u 2>/dev/null)}
+	case $_uid in
+		'' | *[!0-9]* | 0) refuse "The admin recovery did not run, because it would have run as root or its user could not be read." ;;
+	esac
 	_secret=""
 	IFS= read -r _secret || :
 	[ -n "$_secret" ] || refuse "The admin recovery did not run, because no client secret arrived on its input."
