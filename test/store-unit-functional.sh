@@ -66,7 +66,11 @@
 #      that ends on bao's own failure line, not a timer (TC-805-32); the store
 #      stopped mid-wait (TC-805-33); the store crashing into its start limit
 #      mid-wait (F-805-19); the provisioner's leaf absent
-#      (TC-805-34); and #833's read point (TC-805-41)
+#      (TC-805-34); #833's read point (TC-805-41); and the app-key engine,
+#      policy and role (geekdojo/geekdojo-brain#1084, TC-1084-35): a fresh
+#      store from this image's init.json gets all three through the author
+#      identity, applied then unchanged, and a store from the previous
+#      release's init.json records unchanged with its sentence and gets none
 #      The provisioner holds Requisite= and PartOf= on the store, never a
 #      requirement dependency, which cuts scenario 6's and scenario 8's crash
 #      loops short of StartLimitBurst under 258.7 (ledger F-805-17). The store
@@ -105,9 +109,10 @@
 #      the live store's sys/health version (F-801-02), and every start in
 #      scenarios 1 to 12 passed the gate (TC-801-35)
 # The provisioner runs in every scenario from 2 on, as on a node: each start
-# of the store that reaches READY starts it. Scenario 3's first boot carries TC-805-27's empty
-# provision.tsv half, and scenario 7 its four policies and three roles
-# (TC-805-28).
+# of the store that reaches READY starts it. Scenario 3's first boot carries TC-805-27's
+# shipped provision.tsv half, which since #1084 adds the app-key items
+# (applied changed=3), and scenario 7 its five policies and four roles from
+# init.json plus the provisioned policy and role (TC-805-28, TC-1084-35).
 #
 # The main config is the overlay's openbao.hcl, installed byte for byte
 # (TC-756-09); this test writes no config of its own.
@@ -133,6 +138,8 @@
 #     (TC-805-31), a wrong seal key (TC-805-32, TC-805-33) and a LogLevelMax
 #     drop-in that keeps bao's lines out of the journal (TC-805-33);
 #   * scenario 8's missing policy file;
+#   * TC-1084-35's previous-release init.json: the overlay's, with the
+#     author's two requests removed by jq, and a leaf for CN rasputin-app-keys;
 #   * scenario 12's stub api ExecStart (a drop-in on the shipped
 #     rasputin-api.service), its stand-in rasputin-firstboot.service, the
 #     stores A and B and the staging laid out as the api's PrepareRestore lays
@@ -339,6 +346,7 @@ mkdir -p "$P"
 	mint_leaf "$P/rotate.key" "$P/rotate.pem" rasputin-seal-rotate "$P/store-ca.pem" "$P/ca.key" clientAuth &&
 	mint_leaf "$P/provisioner.key" "$P/provisioner.pem" rasputin-provisioner "$P/store-ca.pem" "$P/ca.key" clientAuth &&
 	mint_leaf "$P/rel.key" "$P/rel.pem" rasputin-rel-n1 "$P/store-ca.pem" "$P/ca.key" clientAuth &&
+	mint_leaf "$P/appkeys.key" "$P/appkeys.pem" rasputin-app-keys "$P/store-ca.pem" "$P/ca.key" clientAuth &&
 	mint_ca "$P/foreign-ca.key" "$P/foreign-ca.pem" store-unit-test-foreign-ca &&
 	mint_leaf "$P/foreign.key" "$P/foreign.pem" store-unit-test-foreign "$P/foreign-ca.pem" "$P/foreign-ca.key" clientAuth
 } || { echo "FAILED: openssl could not make the test PKI."; exit 1; }
@@ -523,11 +531,11 @@ for case in "A no leaf:rm -f $V/tls/openbao-server/leaf.pem $V/tls/openbao-serve
 		prov_settled "$pprev" || fails=$((fails + 1))
 		prec=$(inside "cat $PRECORD")
 		pid=$(pshow InvocationID)
-		check "TC-805-27 first boot, the shipped empty provision.tsv: the record says unchanged, with this run's run_id" \
-			"$(yes_if eval 'contains "outcome=unchanged" "$prec" && contains "run_id=$pid" "$prec" && [ ${#pid} = 32 ]')" "$prec"
+		check "TC-805-27 TC-1084-35 first boot, the shipped provision.tsv: the record says applied, with this run's run_id" \
+			"$(yes_if eval 'contains "outcome=applied" "$prec" && contains "run_id=$pid" "$prec" && [ ${#pid} = 32 ]')" "$prec"
 		pline=$(inside "cat /run/store-provision-console")
-		check "TC-805-27 first boot: a <6> rasputin-store-provision: outcome=unchanged changed=0 line" \
-			"$(yes_if contains '<6>rasputin-store-provision: outcome=unchanged changed=0 ' "$pline")" "$pline"
+		check "TC-805-27 TC-1084-35 first boot: a <6> rasputin-store-provision: outcome=applied changed=3 line (the app-key engine, policy and role)" \
+			"$(yes_if contains '<6>rasputin-store-provision: outcome=applied changed=3 ' "$pline")" "$pline"
 		ready=$(show ActiveEnterTimestampMonotonic)
 		pstart=$(pshow InactiveExitTimestampMonotonic)
 		check "TC-805-27 first boot: the provisioner ran after the store's READY ($pstart >= $ready)" \
@@ -766,7 +774,7 @@ case "$1" in
 		printf 'roles\t%s\n' "$(get "$U/auth/cert/certs?list=true")"
 		printf 'mounts\t%s\n' "$(get "$U/sys/mounts")"
 		printf 'audit\t%s\n' "$(get "$U/sys/audit")"
-		for p in rasputin-api rasputin-seal-rotate rasputin-provisioner rasputin-bindable; do
+		for p in rasputin-api rasputin-seal-rotate rasputin-provisioner rasputin-bindable rasputin-author rasputin-app-keys; do
 			printf 'policy-%s\t%s\n' "$p" "$(get "$U/sys/policies/acl/$p")"
 		done
 		for a in $(get "$U/auth/token/accessors?list=true" | sed 's/.*"keys":\[\([^]]*\)\].*/\1/; s/[",]/ /g'); do
@@ -779,6 +787,12 @@ case "$1" in
 		c --cert "/pki/$2.pem" --key "/pki/$2.key" -H "@/root/lookup.token.hdr" "$U/auth/token/lookup-self" \
 			| sed -n 's/.*"policies":\(\[[^]]*\]\).*/\1/p'
 		rm -f /root/lookup.token /root/lookup.token.hdr
+		;;
+	loginpol)
+		# loginpol LEAF ROLE — the token_policies a login through ROLE with
+		# LEAF is given, read from the login's own answer, never the token.
+		c --cert "/pki/$2.pem" --key "/pki/$2.key" -X POST --data "{\"name\":\"$3\"}" "$U/auth/cert/login" \
+			| sed -n 's/.*"token_policies":\(\[[^]]*\]\).*/\1/p'
 		;;
 	write)
 		login api rasputin-api /root/api.token || { echo "login failed"; exit 1; }
@@ -826,7 +840,7 @@ view() {
 	printf 'mount %s\n' "$(field mounts "$1" | jq -c '.data["rasputin-secrets/"] | {type, options, accessor, uuid}')"
 	printf 'audit %s\n' "$(field audit "$1" | jq -c '.data')"
 	printf 'mounts %s\n' "$(field mounts "$1" | jq -c '.data | keys | sort')"
-	for _p in rasputin-api rasputin-seal-rotate rasputin-provisioner rasputin-bindable; do
+	for _p in rasputin-api rasputin-seal-rotate rasputin-provisioner rasputin-bindable rasputin-author rasputin-app-keys; do
 		printf 'policy-%s %s\n' "$_p" "$(field "policy-$_p" "$1" | jq -j '.data.policy' | openssl dgst -sha256 -r | cut -d' ' -f1)"
 	done
 	printf 'root-tokens %s\n' "$(printf '%s\n' "$1" | awk -F'\t' '$1 == "token" { sub(/^[^\t]*\t/, ""); print }' | jq -s '[.[] | select(.data.policies | index("root"))] | length')"
@@ -841,10 +855,14 @@ printf '[Service]\nExecStart=\nExecStart=%s -config=/etc/rasputin/openbao/test-i
 systemctl daemon-reload" >/dev/null 2>&1
 check "the data directory is empty before the start that initialises" "$(yes_if [ -z "$(inside "ls -A $V/openbao")" ])"
 C7=$(cursor)
+pprev=$(pshow InvocationID)
 inside "systemctl start openbao.service" >/dev/null 2>&1
 st=$(show ActiveState)
 check "systemctl start returns with the store active on the shipped config (got '$st')" "$(yes_if [ "$st" = active ])"
 wait_for "sys/health answers 200 after the store's own self-init" "$HEALTH_200" || fails=$((fails + 1))
+# The provisioner runs after READY and, since #1084, adds the app-key items:
+# its run is over before the store is read.
+prov_settled "$pprev" || fails=$((fails + 1))
 only_loopback "after the start that initialised it"
 
 echo "  -- self-init (TC-804-18)"
@@ -858,19 +876,21 @@ r7=$(inside "sh /root/store-read.sh inspect")
 v7=$(view "$r7")
 printf '%s\n' "$v7" | sed 's/^/         /'
 check "TC-804-18 (2) zero tokens carry the root policy" "$(yes_if contains 'root-tokens 0' "$v7")" "$v7"
-for p in rasputin-api rasputin-seal-rotate rasputin-provisioner rasputin-bindable; do
+for p in rasputin-api rasputin-seal-rotate rasputin-provisioner rasputin-bindable rasputin-author rasputin-app-keys; do
 	want=$(openssl dgst -sha256 -r "$API_POLICY/$p.hcl" | cut -d' ' -f1)
-	check "TC-804-18 TC-805-28 (2) policy $p's text in the store is the api tarball's, byte for byte" \
+	check "TC-804-18 TC-805-28 TC-1084-35 (2) policy $p's text in the store is the api tarball's, byte for byte" \
 		"$(yes_if contains "policy-$p $want" "$v7")" "$v7"
 done
 check "TC-804-18 (2) rasputin-secrets/ is a kv mount, version 2" \
 	"$(yes_if [ "$(field mounts "$r7" | jq -c '.data["rasputin-secrets/"] | [.type, .options.version]')" = '["kv","2"]' ])" "$(field mounts "$r7" | jq -c '.data["rasputin-secrets/"]' 2>&1)"
-# TC-805-28: the three roles init.json makes since #805, plus the inspector,
-# and the four policies (the #805 PINS of TC-804-18).
-check "TC-804-18 TC-805-28 (2) the cert roles are exactly the three plus the inspector" \
-	"$(yes_if contains 'roles ["rasputin-api","rasputin-provisioner","rasputin-seal-rotate","store-unit-test-inspector"]' "$v7")" "$v7"
-check "TC-805-28 (2) the policies are the four, the inspector's, and the store's own default and root" \
-	"$(yes_if contains 'policies ["default","rasputin-api","rasputin-bindable","rasputin-provisioner","rasputin-seal-rotate","root","test-inspector"]' "$v7")" "$v7"
+# TC-805-28: the roles init.json makes (three since #805, the author's since
+# #1084), the provisioned rasputin-app-keys role, plus the inspector; and the
+# five init.json policies, the provisioned rasputin-app-keys one (the #805
+# and #1084 PINS of TC-804-18).
+check "TC-804-18 TC-805-28 TC-1084-35 (2) the cert roles are exactly init.json's four, the provisioned rasputin-app-keys, and the inspector" \
+	"$(yes_if contains 'roles ["rasputin-api","rasputin-app-keys","rasputin-author","rasputin-provisioner","rasputin-seal-rotate","store-unit-test-inspector"]' "$v7")" "$v7"
+check "TC-805-28 TC-1084-35 (2) the policies are init.json's five, the provisioned rasputin-app-keys, the inspector's, and the store's own default and root" \
+	"$(yes_if contains 'policies ["default","rasputin-api","rasputin-app-keys","rasputin-author","rasputin-bindable","rasputin-provisioner","rasputin-seal-rotate","root","test-inspector"]' "$v7")" "$v7"
 check "TC-804-18 (2) exactly one audit device, a file at /var/lib/rasputin/openbao-audit/audit.log" \
 	"$(yes_if [ "$(field audit "$r7" | jq -c '.data | [length, (.[] | .type, .options.file_path)]')" = '[1,"file","/var/lib/rasputin/openbao-audit/audit.log"]' ])" "$(field audit "$r7" | jq -c .data 2>&1)"
 code=$(inside "sh /root/store-read.sh write")
@@ -934,6 +954,7 @@ done
 
 echo "  -- a restart: no self-init, nothing changed, unsealed from the fragment (TC-804-19, TC-756-15)"
 C8=$(cursor)
+pprev=$(pshow InvocationID)
 inside "systemctl restart openbao.service" >/dev/null 2>&1
 st=$(show ActiveState)
 check "TC-756-15 systemctl restart returns with the store active (got '$st')" "$(yes_if [ "$st" = active ])"
@@ -952,7 +973,9 @@ check "TC-804-19 the restart printed no rasputin-store-init: line" "$(yes_if not
 check "TC-804-18 no process of the unit failed its execution setup on the start that initialised or the restart" \
 	"$(yes_if not_contains 'Failed at step' "$j7$j8")" "$(printf '%s\n%s\n' "$j7" "$j8" | grep 'Failed' | head -3)"
 check "TC-804-19 the record is unchanged, byte for byte" "$(yes_if [ "$(inside "sha256sum $RECORD" | cut -d' ' -f1)" = "$REC7_SHA" ])"
-# TC-805-28: the comparison carries the three roles and four policies.
+# TC-805-28: the comparison carries the roles and policies, the provisioner's
+# included, read once its run after the restart is over.
+prov_settled "$pprev" || fails=$((fails + 1))
 r8=$(inside "sh /root/store-read.sh inspect")
 v8=$(view "$r8")
 check "TC-804-19 policies, roles, the mount, the audit device and the policy text are identical, with still zero root tokens" \
@@ -1241,11 +1264,12 @@ pj=$(inside "journalctl -u $PROV _SYSTEMD_INVOCATION_ID=$(pshow InvocationID) --
 check "TC-805-27 no provisioner line names the bound" "$(yes_if not_contains 'logged no unseal result within' "$pj$prec")" "$pj"
 
 echo "  -- N to N+1, no root token (TC-805-29)"
-# Config N: an emptied data directory, the shipped empty provision.tsv, the
+# Config N: an emptied data directory, a provision.tsv with no entry (the
+# shipped one lists #1084's items, which TC-1084-35 runs below), the
 # inspector (scenario 7's drop-in) to read what the store holds.
+set_tsv ''
 inside "systemctl stop openbao.service; systemctl reset-failed openbao.service $PROV 2>/dev/null
 rm -rf $V/openbao/* $V/openbao/.[!.]* $V/openbao-audit/* /run/rasputin-store-init /run/rasputin-store-provision /run/store-provision-console
-install -m 0644 /overlay/etc/rasputin/openbao/provision.tsv /etc/rasputin/openbao/provision.tsv
 printf '[Service]\nExecStart=\nExecStart=%s -config=/etc/rasputin/openbao/test-inspector.json\n' '$SHIPPED_EXEC' >/etc/systemd/system/openbao.service.d/harness-inspector.conf
 systemctl daemon-reload" >/dev/null 2>&1
 api_restart
@@ -1473,6 +1497,75 @@ check "TC-805-41 systemctl start returns only after the new run has finished: ac
 inside "systemctl start $PROV" >/dev/null 2>&1
 check "TC-805-41 systemctl start on the active (exited) unit starts no run: InvocationID and run_id unchanged" \
 	"$(yes_if eval '[ "$(pshow InvocationID)" = "$id41" ] && [ "$(pfield run_id "$(inside "cat $PRECORD")")" = "$id41" ]')"
+
+echo "  -- the app-key engine, policy and role through the author (TC-1084-35)"
+# (a) A fresh store from this image's init.json and the shipped provision.tsv.
+inside "systemctl stop rasputin-api.service openbao.service; systemctl reset-failed openbao.service $PROV 2>/dev/null
+rm -rf $V/openbao/* $V/openbao/.[!.]* $V/openbao-audit/* /run/rasputin-store-init /run/rasputin-store-provision /run/store-provision-console
+install -m 0644 /overlay/etc/rasputin/openbao/provision.tsv /etc/rasputin/openbao/provision.tsv" >/dev/null 2>&1
+api_restart
+pa=$(pshow InvocationID); prec=$(inside "cat $PRECORD"); pline=$(inside "cat /run/store-provision-console")
+check "TC-1084-35 fresh store, run one: the record is applied under this run's run_id ($pa)" \
+	"$(yes_if eval '[ "$(pfield outcome "$prec")" = applied ] && [ "$(pfield run_id "$prec")" = "$pa" ]')" "$prec"
+check "TC-1084-35 fresh store, run one: the <6> line says applied changed=3" \
+	"$(yes_if contains '<6>rasputin-store-provision: outcome=applied changed=3 ' "$pline")" "$pline"
+r35=$(inside "sh /root/store-read.sh inspect"); v35=$(view "$r35")
+check "TC-1084-35 the store holds a transit mount rasputin-app-keys" \
+	"$(yes_if [ "$(field mounts "$r35" | jq -r '.data["rasputin-app-keys/"].type')" = transit ])" "$(field mounts "$r35" | jq -c '.data | keys' 2>&1)"
+want=$(openssl dgst -sha256 -r "$API_POLICY/rasputin-app-keys.hcl" | cut -d' ' -f1)
+check "TC-1084-35 the store's policy rasputin-app-keys is the image file's text, byte for byte" \
+	"$(yes_if contains "policy-rasputin-app-keys $want" "$v35")" "$v35"
+check "TC-1084-35 the store holds the roles rasputin-app-keys and rasputin-author" \
+	"$(yes_if eval 'field roles "$r35" | jq -e ".data.keys | index(\"rasputin-app-keys\") and index(\"rasputin-author\")" >/dev/null')" "$(field roles "$r35")"
+lk=$(inside "sh /root/store-read.sh loginpol appkeys rasputin-app-keys")
+check "TC-1084-35 the api's key leaf logs in through rasputin-app-keys carrying exactly [rasputin-app-keys] (got $lk)" \
+	"$(yes_if [ "$lk" = '["rasputin-app-keys"]' ])"
+au=$(audit_after 0)
+for path in sys/mounts/rasputin-app-keys sys/policies/acl/rasputin-app-keys auth/cert/certs/rasputin-app-keys; do
+	pol=$(printf '%s\n' "$au" | jq -c --arg p "$path" 'select(.type == "request" and .request.path == $p and (.request.operation == "update" or .request.operation == "create")) | .auth.policies' 2>/dev/null | head -1)
+	check "TC-1084-35 the write to $path was made by the author (its audit entry carries [rasputin-author], got $pol)" "$(yes_if [ "$pol" = '["rasputin-author"]' ])"
+done
+check "TC-1084-35 zero tokens carry root" "$(yes_if contains 'root-tokens 0' "$v35")" "$v35"
+A35=$(audit_lines)
+api_restart
+pb=$(pshow InvocationID); prec=$(inside "cat $PRECORD")
+check "TC-1084-35 fresh store, run two: unchanged under a new run_id ($pb, not $pa)" \
+	"$(yes_if eval '[ "$pb" != "$pa" ] && [ "$(pfield run_id "$prec")" = "$pb" ] && [ "$(pfield outcome "$prec")" = unchanged ]')" "$prec"
+check "TC-1084-35 fresh store, run two: the <6> line says unchanged changed=0" \
+	"$(yes_if contains '<6>rasputin-store-provision: outcome=unchanged changed=0 ' "$(inside "cat /run/store-provision-console")")"
+wr=$(audit_after "$A35" | jq -c 'select(.type == "request" and (.request.operation == "create" or .request.operation == "update") and (.request.path | test("rasputin-app-"))) | .request.path' 2>/dev/null)
+check "TC-1084-35 fresh store, run two: no write to a rasputin-app-* path" "$(yes_if [ -z "$wr" ])" "$wr"
+check "TC-1084-35 fresh store, run two: the inspector's view is byte-identical" \
+	"$(yes_if [ "$(view "$(inside "sh /root/store-read.sh inspect")")" = "$v35" ])"
+
+# (b) A store initialised from the previous release's init.json (TEST
+# HARNESS: the overlay's, with the author's two requests removed), then this
+# release's provision step.
+jq '(.initialize[] | select(has("policies")) | .policies.request) |= map(select(has("policy-rasputin-author") | not))
+	| (.initialize[] | select(has("auth")) | .auth.request) |= map(select(has("role-rasputin-author") | not))' "$INIT" >"$SCRATCH/init-previous.json"
+nreq() { jq '[.initialize[] | to_entries[] | .value.request[]] | length' "$1"; }
+check "TEST HARNESS: the previous init.json is the overlay's less exactly the author's policy and role ($(nreq "$SCRATCH/init-previous.json") of $(nreq "$INIT") requests)" \
+	"$(yes_if eval '[ $(( $(nreq "$INIT") - $(nreq "$SCRATCH/init-previous.json") )) = 2 ] && ! grep -q rasputin-author "$SCRATCH/init-previous.json"')"
+docker cp "$SCRATCH/init-previous.json" "$CID:/root/init-previous.json" >/dev/null || check "the previous init.json is copied into the container" 1
+inside "systemctl stop rasputin-api.service openbao.service; systemctl reset-failed openbao.service $PROV 2>/dev/null
+rm -rf $V/openbao/* $V/openbao/.[!.]* $V/openbao-audit/* /run/rasputin-store-init /run/rasputin-store-provision /run/store-provision-console
+install -m 0644 /root/init-previous.json /etc/rasputin/openbao/init.json" >/dev/null 2>&1
+api_restart
+prec=$(inside "cat $PRECORD"); pline=$(inside "cat /run/store-provision-console")
+check "TC-1084-35 previous-release store: the record is unchanged with the 'initialised before release 2026.11.3' sentence" \
+	"$(yes_if eval '[ "$(pfield outcome "$prec")" = unchanged ] && [ "$(pfield reason "$prec")" = "This secrets store was initialised before release 2026.11.3, so it has no identity that can add the app-key engine; app keys are unavailable on it." ]')" "$prec"
+check "TC-1084-35 previous-release store: the line is <6> unchanged changed=0, and not failed" \
+	"$(yes_if contains '<6>rasputin-store-provision: outcome=unchanged changed=0 reason="This secrets store was initialised before release 2026.11.3' "$pline")" "$pline"
+# Read before the inspector runs, whose own reads name rasputin-app-keys.
+ap=$(audit_after 0 | jq -c 'select(.type == "request" and (.request.path | test("rasputin-app-"))) | .request.path' 2>/dev/null)
+check "TC-1084-35 previous-release store: the provision run sent no request to a rasputin-app-* path" "$(yes_if [ -z "$ap" ])" "$ap"
+ro=$(inside "sh /root/store-read.sh inspect")
+check "TC-1084-35 previous-release store: no rasputin-app-keys mount, policy or role, and no rasputin-author role" \
+	"$(yes_if eval '[ "$(field mounts "$ro" | jq -r ".data[\"rasputin-app-keys/\"]")" = null ] && ! field policies "$ro" | jq -e ".data.keys | index(\"rasputin-app-keys\")" >/dev/null && ! field roles "$ro" | jq -e ".data.keys | (index(\"rasputin-app-keys\") or index(\"rasputin-author\"))" >/dev/null')" \
+	"$(field roles "$ro") $(field policies "$ro")"
+inside "systemctl stop rasputin-api.service openbao.service; install -m 0644 /overlay/etc/rasputin/openbao/init.json /etc/rasputin/openbao/init.json" >/dev/null 2>&1
+check "the overlay's init.json is back, byte for byte" \
+	"$(yes_if [ "$(inside "sha256sum </etc/rasputin/openbao/init.json")" = "$(inside "sha256sum </overlay/etc/rasputin/openbao/init.json")" ])"
 
 echo "  -- no token in any unit's journal (TC-805-28)"
 tokens=$(inside "journalctl --no-pager -o cat | grep -c -E 'hv[sbr]\.[A-Za-z0-9]{24}|(^|[^A-Za-z0-9])[sbr]\.[A-Za-z0-9]{24}([^A-Za-z0-9]|\$)'")

@@ -3,7 +3,8 @@
 # Tests for rasputin-store-provision.sh, the oneshot that adds a later
 # release's kv-v2 mounts and cert roles to the secrets store through the
 # store's provisioner identity (geekdojo/geekdojo-brain#805, TC-805-16 to
-# TC-805-23).
+# TC-805-23), and its Transit engines, policies and roles through the author
+# identity, rasputin-author (geekdojo/geekdojo-brain#1084, TC-1084-34).
 #
 # Why. The oneshot holds rasputin-api.service while it runs, waits on the
 # store's own unseal facts, and is the only writer of mounts and roles after
@@ -103,12 +104,15 @@ exec sleep 1000
 EOF
 # bao: records each call's argv on one line, and whether the call saw the
 # client settings and the login's token in its environment (never the token
-# itself). State (mounts, roles) lives under FAKE_STATE.
+# itself): token=login for the provisioner's, token=author for the author's.
+# State (mounts, roles, policy text) lives under FAKE_STATE.
 cat > "$BIN/bao" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >> "$FAKE_LOG/bao"
 _tok=none
-[ -n "${BAO_TOKEN:-}" ] && { [ "$BAO_TOKEN" = "$FAKE_TOKEN" ] && _tok=login || _tok=other; }
+if [ -n "${BAO_TOKEN:-}" ]; then
+	case "$BAO_TOKEN" in "$FAKE_TOKEN") _tok=login ;; "$FAKE_AUTHOR_TOKEN") _tok=author ;; *) _tok=other ;; esac
+fi
 printf '%s timeout=%s retries=%s addr=%s cacert=%s cert=%s key=%s token=%s\n' "$1" "${BAO_CLIENT_TIMEOUT:-}" "${BAO_MAX_RETRIES:-}" \
 	"${BAO_ADDR:-}" "${BAO_CACERT:-}" "${BAO_CLIENT_CERT:-}" "${BAO_CLIENT_KEY:-}" "$_tok" >> "$FAKE_LOG/bao.env"
 case "$1 ${2:-}" in
@@ -119,7 +123,11 @@ case "$1 ${2:-}" in
 			*) printf 'Error reading sys/health: Error making API request.\n\nCode: 503. Raw Message:\n' >&2; exit 2 ;;
 		esac ;;
 	"login -method=cert")
-		[ "$FAKE_LOGIN" = ok ] && { printf '%s' "$FAKE_TOKEN"; exit 0; }
+		case "$*" in *" name=rasputin-author")
+			[ "$FAKE_AUTHOR_LOGIN" = ok ] && { printf '%s' "$FAKE_AUTHOR_TOKEN"; exit 0; } ;;
+		*)
+			[ "$FAKE_LOGIN" = ok ] && { printf '%s' "$FAKE_TOKEN"; exit 0; } ;;
+		esac
 		printf 'Error authenticating: Error making API request.\n\nURL: PUT https://127.0.0.1:8200/v1/auth/cert/login\nCode: 403. Errors:\n\n* permission denied\n' >&2
 		exit 2 ;;
 	"read sys/mounts/"*)
@@ -129,12 +137,21 @@ case "$1 ${2:-}" in
 		fi
 		printf 'Error reading %s: Error making API request.\n\nCode: 400. Errors:\n\n* No secret engine mount at %s/\n' "$2" "${2#sys/mounts/}" >&2
 		exit 2 ;;
-	"write sys/mounts/"*|"write auth/cert/certs/"*)
+	"read -field=policy")
+		_pn=${3#sys/policies/acl/}
+		if [ "$FAKE_POLICY_READ" = error ]; then
+			printf 'Error reading %s: Error making API request.\n\nCode: 500. Errors:\n\n* internal error\n' "$3" >&2; exit 2
+		fi
+		[ -f "$FAKE_STATE/policy-$_pn" ] && { cat "$FAKE_STATE/policy-$_pn"; exit 0; }
+		printf 'No value found at %s\n' "$3" >&2
+		exit 2 ;;
+	"write sys/mounts/"*|"write auth/cert/certs/"*|"write sys/policies/acl/"*)
 		case " $FAKE_REFUSE " in *" $2 "*)
 			printf 'Error writing data to %s: Error making API request.\n\nCode: 403. Errors:\n\n* permission denied\n' "$2" >&2; exit 2 ;;
 		esac
 		case "$2" in
 			sys/mounts/*) : > "$FAKE_STATE/mount-${2#sys/mounts/}" ;;
+			sys/policies/acl/*) cat "${3#policy=@}" > "$FAKE_STATE/policy-${2#sys/policies/acl/}" || exit 2 ;;
 			*) printf '%s\n' "${2#auth/cert/certs/}" >> "$FAKE_STATE/roles" ;;
 		esac
 		exit 0 ;;
@@ -170,6 +187,7 @@ rec() { sed -n "s/^$1=//p" "$RUN/outcome" 2>/dev/null; }
 calls() { [ -f "$LOG/$1" ] && grep -c '' "$LOG/$1" || echo 0; }
 TAG=rasputin-store-provision
 TOKEN=s.FAKEtoken0123456789abcdef
+AUTHOR_TOKEN=FAKE-author-token-0123456789
 INV=0123456789abcdef0123456789abcdef
 OK_LINE='2026-10-12T00:00:01.000Z [INFO]  core: unsealed with stored key'
 NONE_LINE='2026-10-12T00:00:00.500Z [WARN]  failed to unseal core: error="stored unseal keys are supported, but none were found: is the server initialized?"'
@@ -180,7 +198,9 @@ NONE_LINE='2026-10-12T00:00:00.500Z [WARN]  failed to unseal core: error="stored
 setup() {
 	W=$(mktemp -d "$TMP/w.XXXXXX")
 	RUN="$W/run" WORK="$W/work" CONFIG="$W/provision.tsv" CREDS="$W/creds" LOG="$W/log" STATE="$W/state"
-	mkdir -p "$WORK" "$CREDS" "$LOG" "$STATE"
+	PD="$W/openbao-policy"
+	mkdir -p "$WORK" "$CREDS" "$LOG" "$STATE" "$PD"
+	printf 'path "rasputin-app-keys/encrypt/+" {\n  capabilities = ["update"]\n}\n' > "$PD/rasputin-app-keys.hcl"
 	printf 'role\trasputin-rel-x\trasputin-bindable\n' > "$CONFIG"
 	: > "$CREDS/store-ca.pem"; : > "$CREDS/provisioner.pem"; : > "$CREDS/provisioner.key"
 	BOOT_ID="b00710d0-0000-4000-8000-000000000805"
@@ -188,6 +208,7 @@ setup() {
 	: > "$W/kmsg"
 	FAKE_INVOCATION_ID=$INV FAKE_JOURNAL="" FAKE_JOURNAL_DELAY="" FAKE_HEALTH=503 FAKE_LOGIN=ok
 	FAKE_MOUNT_READ="" FAKE_REFUSE="" FAKE_LIST="" BOUND=37
+	FAKE_AUTHOR_LOGIN=ok FAKE_POLICY_READ=""
 }
 journal_says() { printf '%s\n' "$@" > "$STATE/journal"; }
 
@@ -206,7 +227,9 @@ run() {
 	env PATH="$_path" RASPUTIN_STOREPROV_RUN="$RUN" RASPUTIN_STOREPROV_WORK="$WORK" \
 		RASPUTIN_STOREPROV_CONFIG="$CONFIG" RASPUTIN_STOREPROV_CREDS="$CREDS" RASPUTIN_STOREPROV_BAO="$BIN/bao" \
 		RASPUTIN_STOREPROV_JOURNAL="$BIN/journal" RASPUTIN_STOREPROV_BOOTID="$W/bootid" RASPUTIN_STOREPROV_KMSG="$W/kmsg" \
-		RASPUTIN_STOREPROV_UNSEAL_BOUND="$BOUND" FAKE_LOG="$LOG" FAKE_STATE="$STATE" FAKE_TOKEN="$TOKEN" \
+		RASPUTIN_STOREPROV_UNSEAL_BOUND="$BOUND" RASPUTIN_STOREPROV_POLICY_DIR="$PD" \
+		FAKE_LOG="$LOG" FAKE_STATE="$STATE" FAKE_TOKEN="$TOKEN" FAKE_AUTHOR_TOKEN="$AUTHOR_TOKEN" \
+		FAKE_AUTHOR_LOGIN="$FAKE_AUTHOR_LOGIN" FAKE_POLICY_READ="$FAKE_POLICY_READ" \
 		FAKE_INVOCATION_ID="$FAKE_INVOCATION_ID" FAKE_JOURNAL="$FAKE_JOURNAL" FAKE_JOURNAL_DELAY="$FAKE_JOURNAL_DELAY" \
 		FAKE_HEALTH="$FAKE_HEALTH" FAKE_LOGIN="$FAKE_LOGIN" FAKE_MOUNT_READ="$FAKE_MOUNT_READ" FAKE_REFUSE="$FAKE_REFUSE" \
 		FAKE_LIST="$FAKE_LIST" "$@" \
@@ -239,22 +262,27 @@ health_asks() { count '^read sys/health$' "$LOG/bao"; }
 no_login() { ok "$1: no login was made" "$(yes_if [ "$(count '^login' "$LOG/bao")" = 0 ])" "$(cat "$LOG/bao" 2>/dev/null)"; }
 
 # --- TC-805-16: the parse fails closed ------------------------------------------
-parse_cases() {
-	_tab=$(printf '\t')
+# parse_rows TC — each LABEL|TEXT|NEEDLE row on stdin refuses the whole file,
+# in wait and in apply, before any call.
+parse_rows() {
 	while IFS='|' read -r label text needle; do
 		[ -n "$label" ] || continue
 		for phase in wait apply; do
 			setup
 			printf '%b' "$text" > "$CONFIG"
 			run "$phase"
-			ok "TC-805-16 $label: $phase exits 1" "$(yes_if [ "$RC" = 1 ])" "rc=$RC $OUT $(cat "$W/stderr")"
-			ok "TC-805-16 $label: $phase's result is failed" "$(yes_if [ "$(res outcome)" = failed ])" "$(cat "$WORK/result" 2>&1)"
-			ok "TC-805-16 $label: $phase's reason names $needle" "$(yes_if contains "$needle" "$(res reason)")" "$(res reason)"
-			ok "TC-805-16 $label: $phase made no systemctl, journal or bao call" \
+			ok "$1 $label: $phase exits 1" "$(yes_if [ "$RC" = 1 ])" "rc=$RC $OUT $(cat "$W/stderr")"
+			ok "$1 $label: $phase's result is failed" "$(yes_if [ "$(res outcome)" = failed ])" "$(cat "$WORK/result" 2>&1)"
+			ok "$1 $label: $phase's reason names $needle" "$(yes_if contains "$needle" "$(res reason)")" "$(res reason)"
+			ok "$1 $label: $phase made no systemctl, journal or bao call" \
 				"$(yes_if [ "$(calls systemctl)$(calls journal)$(calls bao)" = 000 ])" "$(cat "$LOG"/* 2>/dev/null)"
 		done
-	done <<EOF_CASES
-an unknown kind|policy\trasputin-rel-x\n|Line 1 of
+	done
+}
+parse_cases() {
+	_tab=$(printf '\t')
+	parse_rows TC-805-16 <<EOF_CASES
+an unknown kind|secret\trasputin-rel-x\n|Line 1 of
 a mount with a third field|mount\trasputin-rel-x\textra\n|Line 1 of
 a role with two fields|role\trasputin-rel-x\n|Line 1 of
 a role with four fields|role\trasputin-rel-x\trasputin-bindable\tx\n|Line 1 of
@@ -284,12 +312,12 @@ EOF_CASES
 	run apply
 	ok "TC-805-16 comment and blank lines are skipped: the one item is applied" \
 		"$(yes_if eval '[ "$RC" = 0 ] && [ "$(res outcome)" = applied ] && [ "$(res changed)" = 1 ]')" "rc=$RC $(cat "$WORK/result" 2>&1) $(cat "$W/stderr")"
-	# The shipped file: no entry, so no wait and no store call.
-	setup; cp "$SHIPPED" "$CONFIG"; run wait
-	ok "TC-805-16 the shipped provision.tsv: wait exits 0 at once with zero fake calls" \
+	# A file with no entry: no wait and no store call.
+	setup; printf '# nothing\n' > "$CONFIG"; run wait
+	ok "TC-805-16 a provision.tsv with no entry: wait exits 0 at once with zero fake calls" \
 		"$(yes_if eval '[ "$RC" = 0 ] && [ "$EL" -le 1 ] && [ "$(calls systemctl)$(calls journal)$(calls bao)" = 000 ] && [ ! -e "$WORK/result" ]')" "rc=$RC el=$EL $(cat "$LOG"/* 2>/dev/null)"
 	run apply
-	ok "TC-805-16 the shipped provision.tsv: apply gives unchanged changed=0 with zero bao calls" \
+	ok "TC-805-16 a provision.tsv with no entry: apply gives unchanged changed=0 with zero bao calls" \
 		"$(yes_if eval '[ "$RC" = 0 ] && [ "$(res outcome)" = unchanged ] && [ "$(res changed)" = 0 ] && [ "$(calls bao)" = 0 ]')" "rc=$RC $(cat "$WORK/result" 2>&1)"
 }
 
@@ -453,6 +481,135 @@ apply_cases() {
 		"$(yes_if eval '[ "$RC" = 1 ] && [ "$(res outcome)" = failed ] && [ "$(res changed)" = 0 ] && contains "sys/mounts/rasputin-rel-m (HTTP 403)" "$(res reason)"')" "rc=$RC $(cat "$WORK/result")"
 }
 
+# --- TC-1084-34: the author's items (geekdojo/geekdojo-brain#1084) -------------
+# OLD_ROLES is a store initialised before the author: the previous release's
+# three roles. NEW_ROLES adds rasputin-author, as init.json now makes it.
+OLD_ROLES='rasputin-api
+rasputin-provisioner
+rasputin-seal-rotate'
+NEW_ROLES="$OLD_ROLES
+rasputin-author"
+NO_AUTHOR_REASON="This secrets store was initialised before release 2026.11.3, so it has no identity that can add the app-key engine; app keys are unavailable on it."
+# shipped_store ROLES — setup, the shipped provision.tsv, the store's roles.
+shipped_store() { setup; cp "$SHIPPED" "$CONFIG"; printf '%s\n' "$1" > "$STATE/roles"; }
+app_calls() { count 'rasputin-app-' "$LOG/bao"; }
+author_logins() { count '^login .*name=rasputin-author$' "$LOG/bao"; }
+authored_cases() {
+	_tab=$(printf '\t')
+	# The shipped file holds exactly the three items, in order.
+	ok "TC-1084-34 the shipped provision.tsv's items are the engine, the policy and the role, in that order" \
+		"$(yes_if [ "$(grep -v -e '^#' -e '^[[:space:]]*$' "$SHIPPED")" = "engine${_tab}rasputin-app-keys${_tab}transit
+policy${_tab}rasputin-app-keys
+role${_tab}rasputin-app-keys${_tab}rasputin-app-keys" ])" "$(grep -v '^#' "$SHIPPED")"
+
+	# A store initialised before the author: unchanged, the sentence at <6>,
+	# no author login, no rasputin-app-* call.
+	shipped_store "$OLD_ROLES"; run pre; run apply
+	ok "TC-1084-34 old store: apply exits 0, unchanged changed=0" \
+		"$(yes_if eval '[ "$RC" = 0 ] && [ "$(res outcome)" = unchanged ] && [ "$(res changed)" = 0 ]')" "rc=$RC $(cat "$WORK/result" 2>&1)"
+	ok "TC-1084-34 old store: the reason is the 'initialised before release' sentence" \
+		"$(yes_if [ "$(res reason)" = "$NO_AUTHOR_REASON" ])" "$(res reason)"
+	ok "TC-1084-34 old store: no author login and no rasputin-app-* call" \
+		"$(yes_if eval '[ "$(author_logins)" = 0 ] && [ "$(app_calls)" = 0 ]')" "$(cat "$LOG/bao")"
+	ok "TC-1084-34 old store: the store calls are exactly the provisioner's login and its role list" \
+		"$(yes_if [ "$(cat "$LOG/bao")" = "login -method=cert -token-only -no-store name=rasputin-provisioner
+list auth/cert/certs" ])" "$(cat "$LOG/bao")"
+	run record INVOCATION_ID=$INV
+	ok "TC-1084-34 old store: the record says unchanged, and the line is <6> with the sentence" \
+		"$(yes_if eval '[ "$(rec outcome)" = unchanged ] && [ "$OUT" = "<6>$TAG: outcome=unchanged changed=0 reason=\"$NO_AUTHOR_REASON\"" ]')" "$OUT"
+
+	# A fresh store: applied changed=3, as the author, then unchanged.
+	shipped_store "$NEW_ROLES"; run apply
+	ok "TC-1084-34 fresh store: apply exits 0, applied changed=3" \
+		"$(yes_if eval '[ "$RC" = 0 ] && [ "$(res outcome)" = applied ] && [ "$(res changed)" = 3 ]')" "rc=$RC $(cat "$WORK/result" 2>&1) $(cat "$W/stderr")"
+	ok "TC-1084-34 fresh store: the calls are the provisioner's login and list, the author's login, then the engine, policy and role, each read first where it can be" \
+		"$(yes_if [ "$(cat "$LOG/bao")" = "login -method=cert -token-only -no-store name=rasputin-provisioner
+list auth/cert/certs
+login -method=cert -token-only -no-store name=rasputin-author
+read sys/mounts/rasputin-app-keys
+write sys/mounts/rasputin-app-keys type=transit
+read -field=policy sys/policies/acl/rasputin-app-keys
+write sys/policies/acl/rasputin-app-keys policy=@$PD/rasputin-app-keys.hcl
+write auth/cert/certs/rasputin-app-keys certificate=@$CREDS/store-ca.pem allowed_common_names=rasputin-app-keys token_policies=rasputin-app-keys token_no_default_policy=true token_ttl=1h" ])" "$(cat "$LOG/bao")"
+	ok "TC-1084-34 fresh store: the author's login carried no token, and every rasputin-app-* call carried the author's" \
+		"$(yes_if eval '[ "$(sed -n 3p "$LOG/bao.env")" = "login timeout=2s retries=0 addr=https://127.0.0.1:8200 cacert=$CREDS/store-ca.pem cert=$CREDS/provisioner.pem key=$CREDS/provisioner.key token=none" ] && [ "$(sed -n "4,\$p" "$LOG/bao.env" | grep -vc " token=author\$")" = 0 ]')" "$(cat "$LOG/bao.env")"
+	ok "TC-1084-34 fresh store: the policy written is the image file's text" \
+		"$(yes_if cmp -s "$PD/rasputin-app-keys.hcl" "$STATE/policy-rasputin-app-keys")"
+	ok "TC-1084-34 fresh store: one <6> line per item" \
+		"$(yes_if eval 'contains "<6>$TAG: added the transit engine rasputin-app-keys." "$OUT" && contains "<6>$TAG: added the policy rasputin-app-keys from $PD/rasputin-app-keys.hcl." "$OUT" && contains "<6>$TAG: added the cert role rasputin-app-keys, bound to rasputin-app-keys." "$OUT"')" "$OUT"
+	_w1=$(grep -c '^write' "$LOG/bao")
+	run apply
+	ok "TC-1084-34 fresh store, the next run: unchanged changed=0 and no write" \
+		"$(yes_if eval '[ "$RC" = 0 ] && [ "$(res outcome)" = unchanged ] && [ "$(res changed)" = 0 ] && [ "$(grep -c "^write" "$LOG/bao")" = "$_w1" ]')" "rc=$RC $(cat "$WORK/result") $(cat "$LOG/bao")"
+
+	# A changed policy file is rewritten and counts as changed; only the
+	# policy is written.
+	printf 'path "rasputin-app-keys/decrypt/+" {\n  capabilities = ["update"]\n}\n' >> "$PD/rasputin-app-keys.hcl"
+	: > "$LOG/bao"; run apply
+	ok "TC-1084-34 a changed policy file: applied changed=1, the one write the policy's" \
+		"$(yes_if eval '[ "$RC" = 0 ] && [ "$(res outcome)" = applied ] && [ "$(res changed)" = 1 ] && [ "$(grep "^write" "$LOG/bao")" = "write sys/policies/acl/rasputin-app-keys policy=@$PD/rasputin-app-keys.hcl" ]')" "rc=$RC $(cat "$WORK/result") $(cat "$LOG/bao")"
+	ok "TC-1084-34 a changed policy file: the store now holds the new text, and the line says rewrote" \
+		"$(yes_if eval 'cmp -s "$PD/rasputin-app-keys.hcl" "$STATE/policy-rasputin-app-keys" && contains "<6>$TAG: rewrote the policy rasputin-app-keys" "$OUT"')" "$OUT"
+
+	# The policy file absent, empty or unreadable: refused before any call,
+	# naming the file.
+	for how in absent empty unreadable; do
+		for phase in wait apply; do
+			shipped_store "$NEW_ROLES"
+			case $how in
+				absent) rm -f "$PD/rasputin-app-keys.hcl" ;;
+				empty) : > "$PD/rasputin-app-keys.hcl" ;;
+				unreadable) chmod 000 "$PD/rasputin-app-keys.hcl" ;;
+			esac
+			run "$phase"
+			ok "TC-1084-34 the policy file $how: $phase exits 1, failed, naming the file, with no call" \
+				"$(yes_if eval '[ "$RC" = 1 ] && [ "$(res outcome)" = failed ] && contains "The policy file $PD/rasputin-app-keys.hcl" "$(res reason)" && [ "$(calls systemctl)$(calls journal)$(calls bao)" = 000 ]')" "rc=$RC $(res reason) $(cat "$LOG"/* 2>/dev/null)"
+			chmod 600 "$PD/rasputin-app-keys.hcl" 2>/dev/null
+		done
+	done
+
+	# On a store with the author role, each refusal is failed, naming the item.
+	for refuse in sys/mounts/rasputin-app-keys sys/policies/acl/rasputin-app-keys auth/cert/certs/rasputin-app-keys; do
+		shipped_store "$NEW_ROLES"; FAKE_REFUSE=$refuse; run pre; run apply
+		ok "TC-1084-34 a refused write to $refuse: apply exits 1, failed, naming the write and its 403" \
+			"$(yes_if eval '[ "$RC" = 1 ] && [ "$(res outcome)" = failed ] && contains "refused rasputin-author'"'"'s write to $refuse (HTTP 403)" "$(res reason)"')" "rc=$RC $(res reason)"
+		run record INVOCATION_ID=$INV
+		ok "TC-1084-34 a refused write to $refuse: the record is failed and the line <3>, naming it" \
+			"$(yes_if eval '[ "$(rec outcome)" = failed ] && contains "<3>$TAG: outcome=failed changed=0 reason=" "$OUT" && contains "$refuse" "$OUT"')" "$OUT"
+	done
+	shipped_store "$NEW_ROLES"; FAKE_AUTHOR_LOGIN=refuse; run pre; run apply
+	ok "TC-1084-34 the author's login refused: failed, naming the login as rasputin-author and its 403, and no rasputin-app-* call" \
+		"$(yes_if eval '[ "$RC" = 1 ] && [ "$(res outcome)" = failed ] && contains "refused the login as rasputin-author (HTTP 403)" "$(res reason)" && [ "$(app_calls)" = 0 ]')" "rc=$RC $(res reason) $(cat "$LOG/bao")"
+	run record INVOCATION_ID=$INV
+	ok "TC-1084-34 the author's login refused: a <3> line naming it" \
+		"$(yes_if contains "<3>$TAG: outcome=failed changed=0 reason=\"The secrets store refused the login as rasputin-author" "$OUT")" "$OUT"
+	shipped_store "$NEW_ROLES"; FAKE_LIST=error; run pre; run apply
+	ok "TC-1084-34 the role list fails: failed, naming the list, with no author login and no rasputin-app-* call" \
+		"$(yes_if eval '[ "$RC" = 1 ] && [ "$(res outcome)" = failed ] && contains "did not list its cert roles" "$(res reason)" && [ "$(author_logins)" = 0 ] && [ "$(app_calls)" = 0 ]')" "rc=$RC $(res reason) $(cat "$LOG/bao")"
+	run record INVOCATION_ID=$INV
+	ok "TC-1084-34 the role list fails: a <3> line" "$(yes_if contains "<3>$TAG: outcome=failed changed=0 reason=\"The secrets store did not list its cert roles" "$OUT")" "$OUT"
+	shipped_store "$NEW_ROLES"; FAKE_POLICY_READ=error; run apply
+	ok "TC-1084-34 the policy read errors: failed, naming the policy, with no policy write" \
+		"$(yes_if eval '[ "$RC" = 1 ] && [ "$(res outcome)" = failed ] && contains "whether the policy rasputin-app-keys exists (HTTP 500)" "$(res reason)" && ! grep -q "^write sys/policies" "$LOG/bao"')" "rc=$RC $(res reason)"
+
+	# Grammar the author's items refuse, before any call.
+	parse_rows TC-1084-34 <<EOF_APP
+an engine type other than transit|engine\trasputin-app-x\tkv-v2\n|asks for an engine of type kv-v2
+an engine with no type|engine\trasputin-app-x\n|Line 1 of
+an engine outside rasputin-app-*|engine\trasputin-rel-x\ttransit\n|outside rasputin-app-
+a policy in rasputin-rel-*|policy\trasputin-rel-x\n|outside rasputin-app-
+a policy outside both namespaces|policy\trasputin-api\n|outside rasputin-app-
+a policy with a second field|policy\trasputin-app-keys\textra\n|Line 1 of
+a rasputin-app-* role binding rasputin-bindable|role\trasputin-app-x\trasputin-bindable\n|to a policy outside rasputin-app-*
+a rasputin-app-* role binding rasputin-api|role\trasputin-app-x\trasputin-api\n|to a policy outside rasputin-app-*
+a rasputin-app-* role binding rasputin-author|role\trasputin-app-x\trasputin-author\n|to a policy outside rasputin-app-*
+a rasputin-rel-* role binding a rasputin-app-* policy|role\trasputin-rel-x\trasputin-app-keys\n|other than rasputin-bindable
+an engine named the bare prefix|engine\trasputin-app-\ttransit\n|outside rasputin-app-
+an unknown kind|secret\trasputin-app-x\n|unknown kind
+a duplicate engine|engine\trasputin-app-x\ttransit\nengine\trasputin-app-x\ttransit\n|repeats
+EOF_APP
+}
+
 # --- TC-805-22: pre, record and stopped; the record contract ---------------------
 record_cases() {
 	setup; rm -rf "$WORK"; run pre
@@ -529,6 +686,7 @@ for SH in $TEST_SHELLS; do
 	parse_cases
 	wait_cases
 	apply_cases
+	authored_cases
 	record_cases
 done
 
@@ -537,6 +695,10 @@ SH=harness
 ok "TC-805-23 the outputs searched are not empty" "$(yes_if test -s "$TMP/all-outputs")"
 ok "TC-805-23 the login's token appears in no stdout, stderr, result, record, console line or recorded argv" \
 	"$(yes_if eval '! grep -qF "$TOKEN" "$TMP/all-outputs"')" "$(grep -F "$TOKEN" "$TMP/all-outputs" | head -3)"
+ok "TC-1084-34 the author's token appears in no stdout, stderr, result, record, console line or recorded argv" \
+	"$(yes_if eval '! grep -qF "$AUTHOR_TOKEN" "$TMP/all-outputs"')" "$(grep -F "$AUTHOR_TOKEN" "$TMP/all-outputs" | head -3)"
+ok "TC-1084-34 the author's token was issued in the runs searched (positive control: the fake logged token=author calls)" \
+	"$(yes_if grep -q ' token=author$' "$TMP/all-outputs")"
 ok "TC-805-23 the script has no set -x" "$(yes_if eval '! grep -qE "^[[:space:]]*set[[:space:]]+-[a-z]*x" "$SCRIPT"')"
 case "$TEST_SHELLS" in
 	*busybox_sh*) ok "the busybox rows ran" 0 ;;

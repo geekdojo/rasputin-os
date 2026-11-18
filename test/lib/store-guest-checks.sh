@@ -115,6 +115,7 @@ checks() {
 	echo "prov_record_outcome=$(sed -n 's/^outcome=//p' "$PRECORD" 2>&1)"
 	_pj=$(journalctl -b -u rasputin-store-provision.service --no-pager -o cat 2>/dev/null)
 	echo "prov_unchanged_lines=$(printf '%s\n' "$_pj" | grep -c 'rasputin-store-provision: outcome=unchanged')"
+	echo "prov_applied_lines=$(printf '%s\n' "$_pj" | grep -c 'rasputin-store-provision: outcome=applied')"
 	echo "prov_failed_lines=$(printf '%s\n' "$_pj" | grep -c 'rasputin-store-provision: outcome=failed')"
 }
 

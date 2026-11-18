@@ -17,9 +17,11 @@
 # installed), plus `busybox sh` when busybox is installed. REQUIRE_BUSYBOX=1
 # (CI sets it) makes a missing busybox a failure.
 #
-# TC-805-25: the good tree carries exactly the four policy files init.json
-# names since geekdojo-brain#805 added rasputin-provisioner and
-# rasputin-bindable (the #805 PINS of TC-804-12).
+# TC-805-25: the good tree carries exactly the policy files init.json names:
+# four since geekdojo-brain#805 added rasputin-provisioner and
+# rasputin-bindable (the #805 PINS of TC-804-12), and five since #1084 added
+# rasputin-author. An api pin whose tarball lacks rasputin-author.hcl fails
+# the build: that is what holds #1084's release order (control-plane first).
 #
 # Run:  sh test/check-store-policy-test.sh
 set -u
@@ -60,7 +62,7 @@ ok() {
 yes_if() { if "$@"; then echo 0; else echo 1; fi; }
 
 PD=usr/share/rasputin/openbao-policy
-# good — a target holding the overlay's init.json and all four policy files, and an
+# good — a target holding the overlay's init.json and all five policy files, and an
 # extracted tarball holding the same files.
 good() {
 	W=$(mktemp -d "$TMP/w.XXXXXX")
@@ -71,6 +73,7 @@ good() {
 	printf 'path "sys/rotate/root" {\n  capabilities = ["update", "sudo"]\n}\n' > "$T/$PD/rasputin-seal-rotate.hcl"
 	printf 'path "auth/cert/certs/" {\n  capabilities = ["list"]\n}\n' > "$T/$PD/rasputin-provisioner.hcl"
 	printf 'path "auth/token/lookup-self" {\n  capabilities = ["read"]\n}\n' > "$T/$PD/rasputin-bindable.hcl"
+	printf 'path "sys/policies/acl/rasputin-app-*" {\n  capabilities = ["read"]\n}\n' > "$T/$PD/rasputin-author.hcl"
 	cp "$T/$PD"/*.hcl "$S/openbao-policy/"
 }
 guard() {
@@ -114,6 +117,10 @@ cases() {
 		good; rm "$T/$PD/$_f.hcl" "$S/openbao-policy/$_f.hcl"; guard "$T" "$S"
 		refused "TC-805-25 $_f.hcl absent from image and tarball" "The policy file /$PD/$_f.hcl that init.json names is not in the image, so the store's first start would fail and it would never unseal."
 	done
+
+	# geekdojo-brain#1084: an api pin from before the author fails the build.
+	good; rm "$T/$PD/rasputin-author.hcl" "$S/openbao-policy/rasputin-author.hcl"; guard "$T" "$S"
+	refused "#1084 rasputin-author.hcl absent from image and tarball (an api pin before the author)" "The policy file /$PD/rasputin-author.hcl that init.json names is not in the image, so the store's first start would fail and it would never unseal."
 
 	good; rm -r "$S/openbao-policy"; guard "$T" "$S"
 	refused "a tarball with no openbao-policy/" "The policy directory $S/openbao-policy cannot be read"
