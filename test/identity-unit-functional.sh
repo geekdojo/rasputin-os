@@ -340,6 +340,9 @@ put_confs() {
 		install -m 0644 /overlay/etc/rasputin/identity/pg_hba.conf /etc/rasputin/identity/pg_hba.conf"
 }
 show() { inside "systemctl show -P $2 $1"; }
+# The values of a `systemctl show -p` line ($1, NAME=v1 v2 ...), sorted, one
+# per line; for comparing a property systemd prints in no fixed order.
+sorted_tokens() { printf '%s\n' "${1#*=}" | tr ' ' '\n' | sort; }
 # settled UNIT — no job queued for UNIT.
 settled() { wait_for "$1 has no job" "[ -z \"\$(systemctl show -P Job $1)\" ]"; }
 # cursor — the journal's cursor now, so a check reads only what came after.
@@ -1024,7 +1027,18 @@ for prop in User Group LoadCredential Environment ProtectSystem ReadWritePaths P
 	CapabilityBoundingSet RestrictAddressFamilies IPAddressDeny IPAddressAllow MemoryMax OOMScoreAdjust; do
 	want=$(inside "systemctl show -p $prop $KC")
 	got=$(inside "systemctl show -p $prop $RUNIT")
-	check "TC-1131-12 during the run, $RUNIT's $prop equals $KC's" "$({ [ -n "$want" ] && [ "$got" = "$want" ]; } && echo 0 || echo 1)" \
+	# systemd keeps these three in a hash set and prints them in no fixed
+	# order, so the same set can read differently on two units: compare their
+	# tokens sorted. The other properties keep their order and compare as-is.
+	want_cmp=$want
+	got_cmp=$got
+	case $prop in
+		IPAddressAllow | IPAddressDeny | RestrictAddressFamilies)
+			want_cmp=$(sorted_tokens "$want")
+			got_cmp=$(sorted_tokens "$got")
+			;;
+	esac
+	check "TC-1131-12 during the run, $RUNIT's $prop equals $KC's" "$({ [ -n "$want" ] && [ "$got_cmp" = "$want_cmp" ]; } && echo 0 || echo 1)" \
 		"$KC: $want | $RUNIT: $got"
 done
 jpid=$(inside "pgrep -u 991 -x java")
