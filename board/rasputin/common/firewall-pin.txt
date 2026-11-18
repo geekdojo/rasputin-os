@@ -46,13 +46,15 @@
 #
 # WHY THIS VALUE
 #
-# 2026.11.2 is the STABLE firewall of the lockstep 2026.11.2 stable cut (the
-# identity dev chain: control-plane PRs #542, #546 and #547), built from
-# firewall main 811d367 (rasputin-openwrt-firewall PR #141). It carries agent
-# 2026.11.2 -- the control-plane stable v2026.11.2 this OS pins, tagged on the
-# same CP commit (0ba301f7) as dev.229, so no functional agent change -- plus
-# the Snort rules pin 0a955e35 and the rolling OpenWrt 25.12.6 feed. Stable
-# bakes stable. The previous pin was dev.212 of the 2026.11.2 dev chain.
+# 2026.11.3-dev.217 is the firewall dev release of the 2026.11.3 dev chain
+# (control-plane PRs #549, #553, #555 and #556; geekdojo/geekdojo-brain#1084),
+# built from firewall main 39f5e42 (rasputin-openwrt-firewall PRs #142 and
+# #143, release run 44360526947). It carries agent 2026.11.3-dev.231 -- the
+# control-plane dev release this OS pins -- whose only agent change since the
+# 2026.11.2 stable is the app relay serving an app's own Transit keys (the
+# firewall runs no catalog apps), plus the Snort rules re-pin to 6d098851
+# (Talos republish 2026-11-18) and the rolling OpenWrt 25.12.6 feed. Dev
+# bakes dev. The previous pin was the 2026.11.2 stable.
 #
 # History: 2026.09.4-dev.127 was the first pin -- the FIRST firewall release
 # that publishes manifest.json.sig (dev.126 and earlier ship no sig asset).
@@ -87,5 +89,6 @@
 # 2026.11.1 (stable) was the pin of the 2026.11.1 stable OS.
 # On the 2026.11.2 dev line: dev.211 (OS dev.376), dev.212 (OS dev.381,
 # dev.383).
+# 2026.11.2 (stable) was the pin of the 2026.11.2 stable OS.
 #
-2026.11.2
+2026.11.3-dev.217
