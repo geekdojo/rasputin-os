@@ -344,6 +344,17 @@ jobs:
         env:
           REQUIRE_BUSYBOX: "1"
         run: sh test/identity-hooks-test.sh
+      # The identity service's admin recovery launcher
+      # (geekdojo/geekdojo-brain#1131): `run` passes keycloak.service's
+      # [Service] lines, drop-ins included, to systemd-run in order with no
+      # lifecycle key, stdin through untouched and the secret on no argv; `exec`
+      # hands kc.sh the secret in its own environment only; each refusal exits
+      # 2 with one sentence and starts nothing. Against stubs, under dash, bash,
+      # busybox ash and busybox's own applets.
+      - name: Identity admin recovery launcher tests
+        env:
+          REQUIRE_BUSYBOX: "1"
+        run: sh test/identity-recover-admin-test.sh
       # Identity 2.7's first-boot scripts (geekdojo/geekdojo-brain#975): the
       # database gate's pre and post rows, its outcome record and the rule
       # for overwriting it, the operator-facing reasons, the init step's
@@ -825,7 +836,11 @@ jobs:
       # in the journal or curl's argv, and the database's start limit; and
       # Identity 2.7's first boot (geekdojo/geekdojo-brain#975): created,
       # imported once with no administrator, untouched, armed refusals held
-      # stopped, and each reboot point re-run on its own facts. Same job: it
+      # stopped, and each reboot point re-run on its own facts; and Identity
+      # 2.9's admin recovery (geekdojo/geekdojo-brain#1131): the launcher runs
+      # kc.sh bootstrap-admin as 991 in keycloak.service's sandbox, read while
+      # it runs, with the secret on no argv and in no file, leaves no root
+      # file, and Keycloak starts after a success and after a failure. Same job: it
       # builds the same image. Before the store unit's step, so it
       # runs and reports whatever that step does.
       - name: Identity units against real systemd and the pinned Keycloak (conditions, start wait, sandbox, hold, exit records)

@@ -13,6 +13,10 @@
 #     instead of the TLS session (accounts-and-sign-in.md §7.2);
 #   - a credential path that is not one of the unit's own LoadCredential=
 #     names fails the start, or reads a file the unit's uid cannot;
+#   - a literal /run/credentials/keycloak.service/ path in keycloak.conf is
+#     absent in the admin recovery's transient unit, so its kc.sh cannot
+#     reach the database (geekdojo/geekdojo-brain#1131): keycloak.conf names
+#     them through ${CREDENTIALS_DIRECTORY};
 #   - wal_level, the pg_hba line, the TLS floor and the statement logging are
 #     each one word from a weaker database.
 # So keycloak.conf holds exactly its runtime keys at their values, each once;
@@ -43,10 +47,11 @@ HBA="$IDDIR/pg_hba.conf"
 KC_UNIT="$OVERLAY/etc/systemd/system/keycloak.service"
 DB_UNIT="$OVERLAY/etc/systemd/system/keycloak-db.service"
 KC_LIB="$ROOT/package/keycloak/kc-conf.sh"
+RECOVER="$OVERLAY/usr/lib/rasputin/identity/rasputin-keycloak-recover-admin.sh"
 LIB="$ROOT/test/lib"
 
 # --- fail closed, before any case (TC-974-01) --------------------------------------
-for f in "$KC_LIB" "$LIB/checks.sh" "$LIB/unit-directives.sh" "$KC_UNIT" "$DB_UNIT" "$KC_CONF" "$PG_CONF" "$HBA"; do
+for f in "$KC_LIB" "$LIB/checks.sh" "$LIB/unit-directives.sh" "$KC_UNIT" "$DB_UNIT" "$KC_CONF" "$PG_CONF" "$HBA" "$RECOVER"; do
 	[ -f "$f" ] || { echo "FAILED: the file $f is missing, so the identity configuration cannot be checked."; exit 1; }
 	[ -r "$f" ] || { echo "FAILED: the file $f cannot be read, so the identity configuration cannot be checked."; exit 1; }
 done
@@ -65,7 +70,11 @@ done
 KC_LINES=$(cat "$PARSE/keycloak.conf")
 PG_LINES=$(cat "$PARSE/postgresql.conf")
 
-KC_CREDS=/run/credentials/keycloak.service
+# keycloak.conf names its credentials through ${CREDENTIALS_DIRECTORY}, which
+# systemd sets in keycloak.service and in the admin recovery's transient unit
+# (geekdojo/geekdojo-brain#1131); Keycloak expands it.
+# shellcheck disable=SC2016 # the literal text keycloak.conf holds
+KC_CREDS='${CREDENTIALS_DIRECTORY}'
 DB_CREDS=/run/credentials/keycloak-db.service
 # keycloak.conf's runtime options, exactly (platform.md §3.5; signin-origin.md
 # §4). hostname is deliberately absent.
@@ -186,6 +195,23 @@ pg_extra() {
 	[ "$_bad" = 1 ] || check "postgresql.conf sets no key outside its list" 0
 }
 
+# kc_creds — every ${CREDENTIALS_DIRECTORY}/<name> in keycloak.conf is one of
+# keycloak.service's LoadCredential= names, and no /run/credentials/ literal
+# is left (TC-1131-11).
+kc_creds() {
+	_names=$(values "$(directives "$KC_UNIT")" Service LoadCredential | sed 's/:.*//')
+	_paths=$(printf '%s\n' "$KC_LINES" | grep -oE '[$][{]CREDENTIALS_DIRECTORY[}]/[^&]*' | LC_ALL=C sort -u)
+	[ -n "$_paths" ] || { check "keycloak.conf names credentials under $KC_CREDS/" 1 "it names none"; return; }
+	for _p in $_paths; do
+		_st=1
+		printf '%s\n' "$_names" | grep -qxF "${_p##*/}" && _st=0
+		check "keycloak.conf credential $_p is one of keycloak.service's own LoadCredential= names" "$_st" \
+			"$_p: keycloak.service's LoadCredential= names are $(printf '%s' "$_names" | tr '\n' ' ')"
+	done
+	_lit=$(grep -n '/run/credentials/' "$KC_CONF" || true)
+	check "keycloak.conf holds no /run/credentials/ literal" "$(yes_if [ -z "$_lit" ])" "$(printf '%s' "$_lit" | tr '\n' '|')"
+}
+
 # creds NAME LINES OWNUNIT UNITFILE — every /run/credentials/<unit>/<name> in
 # LINES names OWNUNIT and one of UNITFILE's LoadCredential= names (TC-974-04).
 creds() {
@@ -206,6 +232,7 @@ echo "1. keycloak.conf's runtime options (TC-974-02)"
 exact keycloak.conf "$KC_LINES" "$WANT_KC"
 check "keycloak.conf sets no hostname (signin-origin.md §4)" "$(yes_if [ -z "$(key_values "$KC_LINES" hostname)" ])"
 check "keycloak.conf is 0644 in the overlay (got $(mode "$KC_CONF"))" "$(yes_if [ "$(mode "$KC_CONF")" = -rw-r--r-- ])"
+check "TC-1131-11 the recovery launcher is 0755 in the overlay (got $(mode "$RECOVER"))" "$(yes_if [ "$(mode "$RECOVER")" = -rwxr-xr-x ])"
 
 echo
 echo "2. no other key in keycloak.conf (TC-974-03)"
@@ -213,7 +240,7 @@ kc_extra
 
 echo
 echo "3. credential paths tied to LoadCredential= (TC-974-04)"
-creds keycloak.conf "$KC_LINES" keycloak.service "$KC_UNIT"
+kc_creds
 creds postgresql.conf "$PG_LINES" keycloak-db.service "$DB_UNIT"
 
 echo
@@ -246,6 +273,7 @@ REL_SYSD=board/rasputin/common/rootfs-overlay/etc/systemd/system
 REL_KC=$REL_ID/keycloak.conf
 REL_PG=$REL_ID/postgresql.conf
 REL_HBA=$REL_ID/pg_hba.conf
+REL_RECOVER=board/rasputin/common/rootfs-overlay/usr/lib/rasputin/identity/rasputin-keycloak-recover-admin.sh
 N=0
 # tree — a fresh scratch root holding this script, its libraries, the parser,
 # the three configs and the two units. Sets T.
@@ -258,6 +286,8 @@ tree() {
 	cp "$KC_LIB" "$T/package/keycloak/"
 	cp "$KC_CONF" "$PG_CONF" "$HBA" "$T/$REL_ID/"
 	cp "$KC_UNIT" "$DB_UNIT" "$T/$REL_SYSD/"
+	mkdir -p "$T/${REL_RECOVER%/*}"
+	cp -p "$RECOVER" "$T/$REL_RECOVER"
 }
 # edit FILE MODE LINE — "after:L" puts LINE after the line L, "replace:L" in
 # its place (an empty LINE deletes L). The copy must change.
@@ -325,8 +355,10 @@ echo
 echo "6. the checker refuses each wrong credential path (TC-974-04)"
 tree; edit "$T/$REL_KC" "replace:https-certificate-key-file=$KC_CREDS/server.key" "https-certificate-key-file=$KC_CREDS/db-client.key" \
 	&& { run_tree; refused "TC-974-04 keycloak.conf naming db-client.key, not a credential" "$KC_CREDS/db-client.key"; }
-tree; edit "$T/$REL_KC" "replace:https-trust-store-file=$KC_CREDS/identity-ca.pem" "https-trust-store-file=$DB_CREDS/identity-ca.pem" \
-	&& { run_tree; refused "TC-974-04 keycloak.conf naming keycloak-db.service's directory" "$DB_CREDS/identity-ca.pem"; }
+tree; edit "$T/$REL_KC" "replace:https-trust-store-file=$KC_CREDS/identity-ca.pem" "https-trust-store-file=/run/credentials/keycloak.service/identity-ca.pem" \
+	&& { run_tree; refused "TC-1131-11 keycloak.conf with one literal /run/credentials/keycloak.service path restored" '/run/credentials/'; }
+tree; chmod 0644 "$T/$REL_RECOVER"; run_tree
+refused "TC-1131-11 the recovery launcher at 0644" 'recovery launcher is 0755'
 
 echo
 echo "7. the checker refuses each wrong postgresql.conf or pg_hba.conf (TC-974-05)"

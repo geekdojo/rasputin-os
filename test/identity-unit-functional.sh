@@ -69,6 +69,17 @@
 #   37  the written outbound truststore holds the mesh CA alone (TC-974-17)
 #   38  every pgjdbc backend is TLS 1.3 with the db-client leaf's subject,
 #       read from the PKCS-8 key (TC-974-18)
+#   Identity 2.9's admin recovery (geekdojo/geekdojo-brain#1131), the
+#   launcher run as the api runs it, a synthetic secret on stdin:
+#   39  with keycloak.service stopped, kc.sh bootstrap-admin runs in the
+#       transient unit with keycloak.service's user, credentials and sandbox,
+#       read while it runs; the secret is in no argv and not in the transient
+#       unit file; no root-owned file is left; Keycloak starts, and the
+#       temporary client gets a token and reads the realm over the Admin API
+#       (TC-1131-12, TC-1131-13)
+#   40  with the database stopped too, the run fails, leaves no root-owned
+#       file and frees the unit name, and Keycloak starts; a second run then
+#       succeeds (TC-1131-14, TC-1131-15)
 #
 # TEST HARNESS, not from the image, and labelled where it is done:
 #   * the keycloak (991) and postgres (992) users, which mkusers creates on the
@@ -139,7 +150,7 @@ done
 for f in "$SYSD/$KC" "$SYSD/$DB" "$OVERLAY/$HOOK_REL" "$OVERLAY/etc/rasputin/identity/keycloak.conf" \
 	"$OVERLAY/etc/rasputin/identity/postgresql.conf" "$OVERLAY/etc/rasputin/identity/pg_hba.conf" "$ROOT/board/rasputin/common/post-build.sh" "$OVERLAY/usr/lib/rasputin/outcome/outcome.sh" \
 	"$OVERLAY/$ID_REL/armed.sh" "$OVERLAY/$ID_REL/identity-db-init-gate.sh" "$OVERLAY/$ID_REL/identity-db-init.sh" \
-	"$OVERLAY/$ID_REL/identity-stage-import.sh" \
+	"$OVERLAY/$ID_REL/identity-stage-import.sh" "$OVERLAY/$ID_REL/rasputin-keycloak-recover-admin.sh" \
 	"$OVERLAY/usr/lib/tmpfiles.d/rasputin.conf" "$OVERLAY/usr/lib/rasputin/atrest/inventory" \
 	"$OVERLAY/usr/lib/rasputin/atrest/rasputin-atrest-audit.sh" "$KCPKG/keycloak.mk" "$KCPKG/keycloak.hash" \
 	"$JREPKG/temurin-jre.mk" "$JREPKG/temurin-jre.hash"; do
@@ -280,9 +291,10 @@ install -m 0644 /overlay/etc/systemd/system/$KC /etc/systemd/system/$KC
 install -m 0644 /overlay/etc/systemd/system/$DB /etc/systemd/system/$DB
 install -D -m 0755 /overlay/$HOOK_REL /$HOOK_REL
 install -D -m 0644 /overlay/usr/lib/rasputin/outcome/outcome.sh /usr/lib/rasputin/outcome/outcome.sh
-# Identity 2.7's gate, init and stage steps and armed.sh, verbatim.
+# Identity 2.7's gate, init and stage steps and armed.sh, and Identity 2.9's
+# recovery launcher, verbatim.
 install -m 0644 /overlay/$ID_REL/armed.sh /$ID_REL/armed.sh
-for s in identity-db-init-gate.sh identity-db-init.sh identity-stage-import.sh; do
+for s in identity-db-init-gate.sh identity-db-init.sh identity-stage-import.sh rasputin-keycloak-recover-admin.sh; do
 	install -m 0755 /overlay/$ID_REL/\$s /$ID_REL/\$s
 done
 # The realm baseline where the api package installs it.
@@ -328,6 +340,9 @@ put_confs() {
 		install -m 0644 /overlay/etc/rasputin/identity/pg_hba.conf /etc/rasputin/identity/pg_hba.conf"
 }
 show() { inside "systemctl show -P $2 $1"; }
+# The values of a `systemctl show -p` line ($1, NAME=v1 v2 ...), sorted, one
+# per line; for comparing a property systemd prints in no fixed order.
+sorted_tokens() { printf '%s\n' "${1#*=}" | tr ' ' '\n' | sort; }
 # settled UNIT — no job queued for UNIT.
 settled() { wait_for "$1 has no job" "[ -z \"\$(systemctl show -P Job $1)\" ]"; }
 # cursor — the journal's cursor now, so a check reads only what came after.
@@ -929,6 +944,154 @@ n=$(printf '%s\n' "$rows" | grep -c .)
 bad=$(printf '%s\n' "$rows" | grep . | grep -vxF 't|TLSv1.3|/CN=keycloak' || true)
 check "TC-974-18 every PostgreSQL JDBC Driver backend ($n) is ssl=t, TLSv1.3, client_dn=/CN=keycloak" \
 	"$({ [ "$n" -gt 0 ] && [ -z "$bad" ]; } && echo 0 || echo 1)" "$rows"
+reset
+
+# --- Identity 2.9: admin recovery on the appliance (geekdojo/geekdojo-brain#1131)
+RECOVER=/$ID_REL/rasputin-keycloak-recover-admin.sh
+RUNIT=rasputin-keycloak-recover-admin.service
+TLSARGS="--tlsv1.3 --max-time 30 --cacert $V/trust/identity-ca.pem --cert $V/tls/identity-db-client/leaf.pem --key $V/tls/identity-db-client/leaf.key"
+absent() { ! contains "$1" "$2"; }
+# new_secret — a synthetic client secret, made on this side.
+new_secret() { printf 'tc1131-%s' "$(openssl rand -hex 24)"; }
+# recover_bg SECRET CLIENT TAG — the launcher as the api runs it: as root,
+# with exactly PATH in its environment, `run CLIENT`, and SECRET and a newline
+# on stdin. The secret is piped in from this side, so no process in the
+# container carries it on argv. In the background: its status lands in
+# /tmp/TAG.rc, its stdout and stderr in /tmp/TAG.out and /tmp/TAG.err.
+recover_bg() {
+	printf '%s\n' "$1" | docker exec -i "$CID" sh -c \
+		"env -i PATH=/usr/bin:/bin $RECOVER run $2 >/tmp/$3.out 2>/tmp/$3.err; echo \$? >/tmp/$3.rc" &
+	RECOVER_PID=$!
+}
+# recover_done TAG — wait for the run's status; sets RC and OUT (its stdout
+# and stderr).
+recover_done() {
+	wait_for "the recovery run $1 has finished" "[ -s /tmp/$1.rc ]"
+	wait "$RECOVER_PID"
+	RC=$(inside "cat /tmp/$1.rc")
+	OUT=$(inside "cat /tmp/$1.out /tmp/$1.err")
+}
+# no_foreign_files LABEL — nothing under the identity data directory is owned
+# by anyone but 991:991.
+no_foreign_files() {
+	_f=$(inside "find $V/keycloak ! -user 991 -o ! -group 991")
+	check "$1: every file under $V/keycloak is owned by 991:991" "$(yes_if [ -z "$_f" ])" "$_f"
+}
+collected() {
+	wait_for "$RUNIT is collected" "[ \"\$(systemctl show -P LoadState $RUNIT)\" = not-found ]"
+	check "$1: $RUNIT is no longer loaded (got $(show $RUNIT LoadState))" "$(yes_if [ "$(show $RUNIT LoadState)" = not-found ])"
+}
+# kc_up LABEL — keycloak.service started: active, and /health/started UP.
+# Then the wait for Keycloak's realm import line, as scenario 34 waits: with
+# the baseline staged, the import runs after /health/started answers UP, and
+# the HTTPS listener answers 503 until it has.
+kc_up() {
+	_c=$(cursor)
+	inside "systemctl start $KC" >/dev/null 2>&1
+	active_kc
+	import_done "$_c" >/dev/null
+	_h=$(inside "curl -sS $TLSARGS https://127.0.0.1:8544/health/started")
+	check "$1: $KC is active and /health/started answers UP" \
+		"$({ [ "$(show $KC ActiveState)" = active ] && contains '"UP"' "$_h"; } && echo 0 || echo 1)" "$(show $KC ActiveState) $_h"
+}
+# admin_works LABEL CLIENT SECRET — over mutual TLS, CLIENT gets a
+# client_credentials token in realm master with SECRET, and with it
+# GET /admin/realms/rasputin answers 200. SECRET and the token reach curl on
+# stdin, never argv.
+admin_works() {
+	_t=$(printf 'grant_type=client_credentials&client_id=%s&client_secret=%s' "$2" "$3" \
+		| docker exec -i "$CID" sh -c "curl -sS $TLSARGS --data-binary @- -H 'Content-Type: application/x-www-form-urlencoded' -w '\n%{http_code}' https://127.0.0.1:8543/realms/master/protocol/openid-connect/token")
+	_tok=$(printf '%s\n' "$_t" | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')
+	check "$1: client $2 gets a client_credentials token in realm master" "$(yes_if [ -n "$_tok" ])" \
+		"HTTP $(printf '%s\n' "$_t" | tail -n 1)"
+	_r=$(printf 'Authorization: Bearer %s\n' "$_tok" \
+		| docker exec -i "$CID" sh -c "curl -sS $TLSARGS -H @- -w '\n%{http_code}' https://127.0.0.1:8543/admin/realms/rasputin")
+	check "$1: with it GET /admin/realms/rasputin answers 200 with realm rasputin" \
+		"$({ [ "$(printf '%s\n' "$_r" | tail -n 1)" = 200 ] && contains '"realm":"rasputin"' "$_r"; } && echo 0 || echo 1)" \
+		"$(printf '%s\n' "$_r" | tail -n 1)"
+}
+
+echo
+echo "39. the admin recovery runs as 991 in keycloak.service's sandbox (TC-1131-12, TC-1131-13)"
+inside "systemctl start $DB" >/dev/null 2>&1
+wait_for "$DB is active" "[ \"\$(systemctl show -P ActiveState $DB)\" = active ]" || exit 1
+check "TC-1131-12 given: $KC is not active and $DB is (got $(show $KC ActiveState)/$(show $DB ActiveState))" \
+	"$(yes_if [ "$(show $KC ActiveState)/$(show $DB ActiveState)" = inactive/active ])"
+S39=$(new_secret)
+recover_bg "$S39" rasputin-recover-tc39 r39
+# Read while the run is in progress (F-1131-04): the fact waited on is the
+# unit's main process and its JVM, a java process of uid 991 in its cgroup.
+wait_for "$RUNIT has a main process and a java process of uid 991 in its cgroup" \
+	"[ \"\$(systemctl show -P MainPID $RUNIT)\" != 0 ] && p=\$(pgrep -u 991 -x java) && grep -q '/$RUNIT\$' /proc/\$p/cgroup"
+for prop in User Group LoadCredential Environment ProtectSystem ReadWritePaths PrivateTmp PrivateDevices NoNewPrivileges \
+	CapabilityBoundingSet RestrictAddressFamilies IPAddressDeny IPAddressAllow MemoryMax OOMScoreAdjust; do
+	want=$(inside "systemctl show -p $prop $KC")
+	got=$(inside "systemctl show -p $prop $RUNIT")
+	# systemd keeps these three in a hash set and prints them in no fixed
+	# order, so the same set can read differently on two units: compare their
+	# tokens sorted. The other properties keep their order and compare as-is.
+	want_cmp=$want
+	got_cmp=$got
+	case $prop in
+		IPAddressAllow | IPAddressDeny | RestrictAddressFamilies)
+			want_cmp=$(sorted_tokens "$want")
+			got_cmp=$(sorted_tokens "$got")
+			;;
+	esac
+	check "TC-1131-12 during the run, $RUNIT's $prop equals $KC's" "$({ [ -n "$want" ] && [ "$got_cmp" = "$want_cmp" ]; } && echo 0 || echo 1)" \
+		"$KC: $want | $RUNIT: $got"
+done
+jpid=$(inside "pgrep -u 991 -x java")
+st=$(inside "grep -E '^(Uid|CapEff|NoNewPrivs):' /proc/$jpid/status | tr -s '\t' ' '")
+check "TC-1131-12 during the run, the JVM (pid $jpid) is uid 991 with CapEff 0 and NoNewPrivs 1" \
+	"$(yes_if [ "$st" = "Uid: 991 991 991 991
+CapEff: 0000000000000000
+NoNewPrivs: 1" ])" "$st"
+argvs=$(inside "for f in /proc/[0-9]*/cmdline; do tr '\\0' ' ' <\$f 2>/dev/null; echo; done")
+check "TC-1131-12 during the run, the process table was read with the JVM in it (bootstrap-admin in an argv)" \
+	"$(yes_if contains bootstrap-admin "$argvs")"
+check "TC-1131-12 during the run, the secret is in no /proc/*/cmdline" "$(yes_if absent "$S39" "$argvs")"
+tf=$(inside "cat /run/systemd/transient/$RUNIT")
+check "TC-1131-12 during the run, /run/systemd/transient/$RUNIT exists and carries User=keycloak" \
+	"$(yes_if contains 'User=keycloak' "$tf")" "$tf"
+check "TC-1131-12 during the run, the secret is not in /run/systemd/transient/$RUNIT" "$(yes_if absent "$S39" "$tf")"
+recover_done r39
+check "TC-1131-12 the launcher exits 0 (got $RC)" "$(yes_if [ "$RC" = 0 ])" "$OUT"
+collected "TC-1131-12 after the run"
+no_foreign_files "TC-1131-13 after the run"
+nw=$(inside "find $V/keycloak -type f ! -perm -u+w")
+check "TC-1131-13 every regular file under $V/keycloak is writable by its owner" "$(yes_if [ -z "$nw" ])" "$nw"
+kc_up "TC-1131-13 after the run"
+admin_works "TC-1131-13" rasputin-recover-tc39 "$S39"
+check "TC-1131-13 the secret is not in the launcher's stdout or stderr" "$(yes_if absent "$S39" "$OUT")"
+check "TC-1131-13 the secret is not in journalctl -b" "$(yes_if absent "$S39" "$(inside 'journalctl -b --no-pager -o cat')")"
+files=$(inside "find $V/keycloak /run -type f -exec cat {} + 2>/dev/null")
+check "TC-1131-13 the secret is in no file under $V/keycloak or /run" "$(yes_if absent "$S39" "$files")"
+
+echo
+echo "40. a failed run leaves no root file and frees the unit name (TC-1131-14, TC-1131-15)"
+reset
+S40=$(new_secret)
+recover_bg "$S40" rasputin-recover-tc40 r40
+recover_done r40
+printf '%s\n' "$OUT" | grep -iE 'error|fail' | head -5 | sed 's/^/    /'
+check "TC-1131-14 with the database stopped the launcher exits non-zero (got $RC)" "$(yes_if [ "$RC" != 0 ])"
+check "TC-1131-14 its output carries kc.sh's database failure" \
+	"$({ contains 'Connection refused' "$OUT" || contains 'JDBC' "$OUT"; } && echo 0 || echo 1)" "$(printf '%s' "$OUT" | tail -20)"
+check "TC-1131-14 its output does not carry the secret" "$(yes_if absent "$S40" "$OUT")"
+no_foreign_files "TC-1131-14 after the failed run"
+collected "TC-1131-14 after the failed run"
+kc_up "TC-1131-14 after the failed run"
+inside "systemctl stop $KC"
+check "TC-1131-15 given: $KC stopped again and $DB active (got $(show $KC ActiveState)/$(show $DB ActiveState))" \
+	"$(yes_if [ "$(show $KC ActiveState)/$(show $DB ActiveState)" = inactive/active ])"
+S40B=$(new_secret)
+recover_bg "$S40B" rasputin-recover-tc40b r40b
+recover_done r40b
+check "TC-1131-15 the unit name is reused: a second run exits 0 (got $RC)" "$(yes_if [ "$RC" = 0 ])" "$OUT"
+collected "TC-1131-15 after the second run"
+kc_up "TC-1131-15 after the second run"
+admin_works "TC-1131-15" rasputin-recover-tc40b "$S40B"
 reset
 
 echo
