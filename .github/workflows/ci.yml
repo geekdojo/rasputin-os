@@ -325,6 +325,16 @@ jobs:
       # real systemd.
       - name: Identity unit tests
         run: sh test/identity-unit-test.sh
+      # The identity service's baked configuration (geekdojo/geekdojo-brain#974,
+      # Identity 2.6): keycloak.conf's exact runtime keys, every other key
+      # (build options, debug, a header certificate lookup, a non-normalized
+      # path switch) refused by name, the credential paths tied to each unit's
+      # LoadCredential= names, postgresql.conf's exact settings, and its
+      # hba_file's one-line pg_hba.conf. Negative controls and fail-closed
+      # runs over scratch trees. The store-paths-functional job starts both
+      # units on these files under real systemd.
+      - name: Identity config tests
+        run: sh test/identity-config-test.sh
       # keycloak.service's hooks (geekdojo/geekdojo-brain#973): the start-failure
       # hold's re-arm, count, refusal and kept cause, the start wait's UP,
       # missing inputs, main process gone and TERM, and the exit records with
@@ -428,6 +438,16 @@ jobs:
       # sh, dash and bash; and the helper's line coverage.
       - name: Store readiness check tests
         run: sh test/store-ready-test.sh
+      # The smokes' identity readiness check (geekdojo/geekdojo-brain#974): the
+      # realm wait's rounds (200 ends it, a failed unit or the start-hold
+      # record stops it, a gone QEMU ends it) and the identity report's
+      # verdicts, with stub collaborators and no clock.
+      - name: Identity ready tests
+        run: sh test/identity-ready-test.sh
+      # qemu_exec's KVM refusal (geekdojo/geekdojo-brain#974): the amd64 guest
+      # never runs under TCG, with a stub QEMU and a scratch device path.
+      - name: QEMU common tests
+        run: sh test/qemu-common-test.sh
       # The secrets store's provisioner oneshot (geekdojo/geekdojo-brain#805):
       # rasputin-store-provision.sh against a scratch tree with a fake bao, a
       # fake journal source and a fake systemctl, each recording its calls:

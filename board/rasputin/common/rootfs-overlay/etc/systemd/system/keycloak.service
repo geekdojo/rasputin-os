@@ -1,7 +1,7 @@
 # The identity service (geekdojo/geekdojo-brain#973, Identity 2.5;
 # platform.md §3.2): the pinned Keycloak (#971) on the pinned JRE (#969),
 # sandboxed, its own uid, loopback only. There is no [Install] section and no
-# wants link here: Identity 2.6 enables it.
+# wants link here: post-build.sh enables it (Identity 2.6, #974).
 # test/identity-unit-test.sh asserts every line here;
 # test/identity-unit-functional.sh runs it under real systemd 258.7 with the
 # real pinned Keycloak and JRE.
@@ -29,9 +29,10 @@ ConditionPathExists=/var/lib/rasputin/tls/identity-server/leaf.pem
 ConditionPathExists=/var/lib/rasputin/tls/identity-server/leaf.key
 ConditionPathExists=/var/lib/rasputin/tls/identity-db-client/leaf.pem
 ConditionPathExists=/var/lib/rasputin/tls/identity-db-client/leaf.pk8
-# The configuration Identity 2.6 bakes into the image. Until then the unit
-# skips rather than failing on every control plane whose api has minted the
-# leaves. A deviation from platform.md §3.2, recorded in #973.
+# The configuration Identity 2.6 bakes into the image (#974). On an image that
+# carries it, this is always true; an image without it skips rather than
+# failing on every control plane whose api has minted the leaves. A deviation
+# from platform.md §3.2, recorded in #973.
 ConditionPathExists=/etc/rasputin/identity/keycloak.conf
 
 [Service]

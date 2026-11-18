@@ -15,6 +15,14 @@ RequiresMountsFor=/var/lib/rasputin
 # test/api-store-wiring-test.sh pins these lines and
 # test/api-store-wiring-functional.sh runs them under real systemd.
 Wants=openbao.service
+# The identity service (geekdojo/geekdojo-brain#974, Identity 2.6;
+# platform.md §3.3). Wants= only, and no order in either direction: the api
+# restarts keycloak.service from inside its own start on a fresh leaf, so an
+# order would deadlock that, and a Before= would hold the api, the alert
+# channel, behind the database's init and a JVM start. The api's readiness is
+# its monitor, not an order. post-build.sh enables both identity units too.
+# test/api-store-wiring-test.sh pins this line.
+Wants=keycloak.service
 # Role gate: this unit ships preset-enabled on every image but only starts
 # on the controlplane — rasputin-firstboot drops this marker on the
 # persistent partition when role==controlplane. (Not ConditionEnvironment:
@@ -96,6 +104,19 @@ Environment=RASPUTIN_NATS_HOST=0.0.0.0
 # writes a fixed key list.
 Environment=RASPUTIN_SECRETSTORE_BACKEND=openbao
 Environment=RASPUTIN_SECRETSTORE_ADDR=https://127.0.0.1:8200
+# The identity service client (geekdojo/geekdojo-brain#974, Identity 2.6).
+# The selector, verbatim: the api reads it with no trim or case-fold, and any
+# other value turns identity off with a config fault. It arms the api's
+# monitor and client for keycloak.service. test/api-store-wiring-test.sh
+# assigns it once, ties the two addresses to keycloak.conf, and refuses it
+# while keycloak.conf is absent. node.env cannot carry these: firstboot writes
+# a fixed key list.
+Environment=RASPUTIN_IDENTITY_BACKEND=keycloak
+# Keycloak's HTTPS listener: keycloak.conf's http-host and https-port.
+Environment=RASPUTIN_IDENTITY_ADDR=https://127.0.0.1:8543
+# Keycloak's management listener, where the api reads /health/ready:
+# keycloak.conf's http-management-host and http-management-port.
+Environment=RASPUTIN_IDENTITY_MGMT_ADDR=https://127.0.0.1:8544
 EnvironmentFile=-/var/lib/rasputin/node.env
 ExecStart=/usr/bin/rasputin-api
 Restart=always

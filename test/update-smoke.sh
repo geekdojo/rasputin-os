@@ -87,6 +87,11 @@
 #      UPDATE_SMOKE_FIXTURE=operator-gone (TEST-ONLY; CI never sets it, and it
 #      prints a FIXTURE: line) moves the api's rasputin.db aside in boot 2
 #      before the sign-in, to show the refusal path.
+#      The identity service (geekdojo/geekdojo-brain#974), amd64 only: realm
+#      rasputin's discovery document answers 200 over mutual TLS
+#      (test/lib/identity-ready.sh), both identity units are active and not
+#      failed, and the database's first-boot record says created. arm64 masks
+#      both units on every boot's cmdline: identity never runs emulated.
 #   4. Roll back without committing: arm64 powers off without mark-good, and the
 #      next NORMAL boot falls back to the [all] partition (the one-shot rollback);
 #      amd64 marks the booted slot bad, and GRUB falls back to A. Assert slot A
@@ -129,6 +134,8 @@ KID="$HERE/../scripts/kernel-id.sh"
 . "$HERE/lib/test-pki.sh"
 . "$HERE/lib/listen-sockets.sh"
 . "$HERE/lib/secret-scan.sh"
+# The realm wait (geekdojo/geekdojo-brain#974), boot 2 on amd64.
+. "$HERE/lib/identity-ready.sh"
 
 case "$ARCH" in amd64|arm64) ;; *) echo "::error::unknown arch '$ARCH'"; exit 2 ;; esac
 for f in "$OLD_IMG" "$BUNDLE" "$NEW_IMG"; do
@@ -238,6 +245,9 @@ autoboot_part() { # autoboot_part SECTION
 # boot-smoke.sh's failure diagnostic.
 
 qemu_gone() { [ -z "$QPID" ] || ! kill -0 "$QPID" 2>/dev/null; }
+# qemu_alive — identity_realm_wait's ALIVE: non-zero once QEMU is gone, which
+# ends the wait.
+qemu_alive() { ! qemu_gone; }
 
 # boot N — start QEMU on the disk for boot number N (console-N.log), then wait
 # for SSH and for systemd to finish starting. Status 1 if the guest never
@@ -297,9 +307,14 @@ arm64_load_slot() {
 	_cl="$(fat_cat "$DISK" "$1" cmdline.txt | tr -d '\n')"
 	[ -n "$_cl" ] || die "boot partition $1 carries no cmdline.txt"
 	QEMU_KERNEL="$WORK/boot-kernel.bin"
-	# Same two harness additions as boot-smoke.sh: virt's only UART is a PL011,
-	# and PID 1's log goes to kmsg so the console carries it.
-	QEMU_APPEND="$_cl systemd.log_target=kmsg console=ttyAMA0,115200"
+	# Same harness additions as boot-smoke.sh: virt's only UART is a PL011,
+	# PID 1's log goes to kmsg so the console carries it, and the identity
+	# service and its database are masked, because arm64 runs under TCG here
+	# and identity never runs emulated (testing.md, Bryce 2026-11-08;
+	# geekdojo/geekdojo-brain#974). Unmasked, boot 2 would start Keycloak in
+	# its boot transaction, and arm64 TCG's measured start (506 s) does not fit
+	# READY_TIMEOUT beside the boot. The cmdline line below shows both masks.
+	QEMU_APPEND="$_cl systemd.log_target=kmsg console=ttyAMA0,115200 systemd.mask=keycloak.service systemd.mask=keycloak-db.service"
 	echo "loading partition $1: kernel $(sh "$KID" "$QEMU_KERNEL" 2>/dev/null || echo '?')"
 	echo "  cmdline: $QEMU_APPEND"
 }
@@ -425,6 +440,22 @@ case "$BASE_STATE" in
 	*" data") STORE_WANT=present ;;
 	*) STORE_WANT=empty ;;
 esac
+# What boot 2's identity database first-boot record must say (TC-974-27,
+# F-974-10), amd64 only: arm64 masks the identity units. A base that carries
+# keycloak.conf (a release with geekdojo/geekdojo-brain#974) already started
+# both units on this boot and created the database on the persistent
+# partition, so boot 2's init gate finds a cluster and writes `untouched`. A
+# base without it never ran the identity service, so boot 2 creates the
+# database. `refused`, or anything else, is never accepted.
+if [ "$ARCH" = amd64 ]; then
+	ID_BASE="$(ssh_guest 'if [ -e /etc/rasputin/identity/keycloak.conf ]; then echo conf; else echo noconf; fi' 2>/dev/null | tr -d '\r')"
+	echo "base identity config on $OLD_VERSION: ${ID_BASE:-<unread>}"
+	case "$ID_BASE" in
+		conf) IDDB_WANT=untouched ;;
+		noconf) IDDB_WANT=created ;;
+		*) die "whether the base $OLD_VERSION carries /etc/rasputin/identity/keycloak.conf could not be read over SSH (got '${ID_BASE:-<nothing>}'), so what boot 2's identity database record should say is unknown" ;;
+	esac
+fi
 poweroff_guest
 
 # ---------------------------------------------- 2: the updated slot (trial) --
@@ -453,6 +484,26 @@ if boot 2; then
 		"rasputin-kernel-match: MATCH "*) pass "boot 2: kernel-match verdict ($KM)" ;;
 		*) fail "boot 2: kernel-match verdict is not MATCH: '${KM:-<none on the console>}'" ;;
 	esac
+	# The identity service on the upgrade path (geekdojo/geekdojo-brain#974,
+	# TC-974-27, F-974-03), amd64 only: arm64 masks it. The base's api minted
+	# the identity leaves, so the new image's enabled units start in boot 2's
+	# transaction; after is-system-running, the realm wait (identity-ready.sh)
+	# ends on realm rasputin answering 200, stopped early by a failed unit or
+	# the start-hold record, and bounded by QEMU's budget through qemu_alive.
+	if [ "$ARCH" = amd64 ]; then
+		if identity_realm_wait 2 ssh_guest qemu_alive; then
+			pass "boot 2: realm rasputin answered 200 on its discovery document after $IR_SECONDS seconds"
+		else
+			fail "boot 2: realm rasputin never answered 200 on its discovery document (after $IR_SECONDS seconds): $IR_LAST"
+		fi
+		for u in keycloak keycloak-db; do
+			expect "boot 2: $u.service is active" active "$(ssh_guest "systemctl show -P ActiveState $u.service" 2>/dev/null | tr -d '\r')"
+		done
+		expect "boot 2: systemctl --failed lists no identity unit" "" \
+			"$(ssh_guest 'systemctl --failed --no-legend --plain' 2>/dev/null | grep keycloak)"
+		expect "boot 2: the identity database's first-boot record says $IDDB_WANT (base identity config: $ID_BASE)" "$IDDB_WANT" \
+			"$(ssh_guest 'sed -n "s/^outcome=//p" /run/rasputin-identity-db-init/outcome' 2>/dev/null | tr -d '\r')"
+	fi
 	# The pre-update operator signs in after the update (#967). Before the
 	# store leg, which restarts the api.
 	if [ "${UPDATE_SMOKE_FIXTURE:-}" = operator-gone ]; then

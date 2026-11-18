@@ -9,7 +9,7 @@
 # restart delay or start limit is a duration someone guessed (ARCH-FACTS), a
 # MemoryHigh stalls the JVM with no kill, TimeoutStartSec=infinity leaves a
 # crash during start-post activating forever (F-979-11), and an [Install]
-# section would let preset-all decide what Identity 2.6 decides. So each
+# section would let preset-all decide what post-build.sh's links decide. So each
 # directive is pinned at its exact value and in its section, the forbidden ones
 # are refused, and the units are tied to the static users
 # package/rasputin-identity-db declares (read with real GNU make), the tmpfiles
@@ -34,6 +34,7 @@ API_UNIT="$SYSD/rasputin-api.service"
 AGENT_UNIT="$SYSD/rasputin-agent.service"
 STORE_UNIT="$SYSD/openbao.service"
 TMPFILES="$OVERLAY/usr/lib/tmpfiles.d/rasputin.conf"
+POSTBUILD="$ROOT/board/rasputin/common/post-build.sh"
 HOOK=/usr/lib/rasputin/identity/rasputin-keycloak-hooks.sh
 # Identity 2.7's hooks (geekdojo/geekdojo-brain#975).
 GATE=/usr/lib/rasputin/identity/identity-db-init-gate.sh
@@ -44,7 +45,7 @@ MK="$ROOT/package/rasputin-identity-db/rasputin-identity-db.mk"
 DEFCONFIGS="$ROOT/configs/rasputin_rpi_defconfig $ROOT/configs/rasputin_n100_defconfig"
 
 # Fail closed: a missing input or tool is a failure with a sentence.
-for f in "$DB_UNIT" "$KC_UNIT" "$API_UNIT" "$AGENT_UNIT" "$STORE_UNIT" "$TMPFILES" "$MK" $DEFCONFIGS; do
+for f in "$DB_UNIT" "$KC_UNIT" "$API_UNIT" "$AGENT_UNIT" "$STORE_UNIT" "$TMPFILES" "$POSTBUILD" "$MK" $DEFCONFIGS; do
 	[ -f "$f" ] || { echo "FAILED: the file $f is missing, so the identity units cannot be checked."; exit 1; }
 done
 command -v make >/dev/null 2>&1 \
@@ -117,7 +118,7 @@ shared() {
 	forbidden "WatchdogSec (nothing here pets a watchdog)" '\|WatchdogSec='
 	forbidden "heap-dump flag (a heap dump copies the service's memory to disk)" 'HeapDump'
 	_install=$(grep -nE '^[[:space:]]*\[Install\]' "$U" || true)
-	check "no [Install] section (Identity 2.6 enables it, not preset-all)" "$(yes_if [ -z "$_install" ])" \
+	check "no [Install] section (post-build.sh's link enables it, not preset-all)" "$(yes_if [ -z "$_install" ])" \
 		"forbidden line present: $_install"
 
 	echo "  -- ties (TC-973-05)"
@@ -258,6 +259,25 @@ verify_oom() (
 	[ "$fails" -eq 0 ]
 )
 
+# verify_enabled POSTBUILD OVERLAY — both identity units enabled by exactly one
+# physical post-build.sh line each, linking it into multi-user.target.wants,
+# and by nothing in the overlay (TC-974-09). Comment lines do not count.
+verify_enabled() (
+	fails=0
+	for u in keycloak-db.service keycloak.service; do
+		# shellcheck disable=SC2016 # $TARGET_DIR is post-build.sh's, literally
+		_want='ln -sf /etc/systemd/system/'"$u"' "$TARGET_DIR/etc/systemd/system/multi-user.target.wants/'"$u"'"'
+		_lines=$(grep -nF "$u" "$1" | grep -v '^[0-9]*:[[:space:]]*#' || true)
+		_n=0; [ -n "$_lines" ] && _n=$(printf '%s\n' "$_lines" | grep -c '')
+		_body=$(printf '%s' "${_lines#*:}" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+		check "TC-974-09 post-build.sh has exactly one line naming $u, its multi-user.target.wants link (got $_n)" \
+			"$({ [ "$_n" -eq 1 ] && [ "$_body" = "$_want" ]; } && echo 0 || echo 1)" "lines: $(printf '%s' "$_lines" | tr '\n' '|')"
+	done
+	_wants=$(find "$2" -path '*.wants/keycloak*.service' 2>/dev/null)
+	check "TC-974-09 no *.wants link for either identity unit in the overlay (post-build.sh enables them)" "$(yes_if [ -z "$_wants" ])" "$_wants"
+	[ "$fails" -eq 0 ]
+)
+
 # verify_defconfigs FILE... — the start wait's curl, in each (TC-973-05).
 verify_defconfigs() (
 	fails=0
@@ -278,22 +298,14 @@ verify_kc "$KC_UNIT"; check "TC-973-02 the shipped keycloak.service passes every
 echo
 echo "3. the OOM order (TC-973-03)"
 verify_oom "$STORE_UNIT" "$API_UNIT" "$AGENT_UNIT" "$DB_UNIT" "$KC_UNIT"; check "TC-973-03 the four-unit OOM order holds" "$?"
-# The api and agent units differ from origin/main by that line and its
-# comment only. Only where git and origin/main are there to compare against.
-if git -C "$ROOT" rev-parse -q --verify origin/main >/dev/null 2>&1; then
-	for u in rasputin-api.service rasputin-agent.service; do
-		_d=$(git -C "$ROOT" diff -U0 origin/main -- "board/rasputin/common/rootfs-overlay/etc/systemd/system/$u" \
-			| grep -E '^[-+]' | grep -vE '^(\+\+\+|---)' | grep -vE '^\+(#.*|OOMScoreAdjust=-950|)$' || true)
-		check "TC-973-03 $u differs from origin/main only by OOMScoreAdjust=-950 and its comment" "$(yes_if [ -z "$_d" ])" "$_d"
-	done
-fi
+# #973's diff of the api and agent units against origin/main is retired: its
+# merge spent it, and Identity 2.6 changes the api unit on purpose (#974).
 echo
 echo "4. the start wait's curl in both defconfigs (TC-973-05, F-973-05)"
 verify_defconfigs $DEFCONFIGS; check "TC-973-05 both defconfigs carry the four libcurl lines" "$?"
 echo
-echo "5. not enabled by the overlay"
-wants=$(find "$OVERLAY" -path '*.wants/keycloak*.service' 2>/dev/null)
-check "no *.wants link for either identity unit in the overlay (Identity 2.6 enables them)" "$(yes_if [ -z "$wants" ])" "$wants"
+echo "5. enabled by post-build.sh, and by nothing else (TC-974-09, F-973-12)"
+verify_enabled "$POSTBUILD" "$OVERLAY"; check "TC-974-09 both identity units are enabled by one post-build.sh line each" "$?"
 
 # --- negative controls ---------------------------------------------------------
 echo
@@ -422,6 +434,25 @@ refuses verify_kc "$KC_UNIT" "TC-973-05 the db-client leaf's directory without i
 refuses verify_db "$DB_UNIT" "TC-973-05 a leaf condition that is not a credential source" \
 	"replace:ConditionPathExists=$V/tls/identity-db-server/leaf.key" "ConditionPathExists=$V/tls/identity-db-server/other.key" \
 	"condition $V/tls/identity-db-server/other.key is a LoadCredential source"
+# TC-974-09: the enablement, each wrong post-build.sh or overlay refused.
+mkdir -p "$SCRATCH/e"
+# enabled_refuses LABEL NEEDLE POSTBUILD [OVERLAY] — verify_enabled refuses.
+enabled_refuses() {
+	out=$(verify_enabled "$3" "${4:-$OVERLAY}"); rc=$?
+	check "$1: refused, naming '$2'" \
+		"$({ [ "$rc" -ne 0 ] && printf '%s\n' "$out" | grep -A1 FAIL | grep -qF -- "$2"; } && echo 0 || echo 1)" "$out"
+}
+grep -v 'multi-user.target.wants/keycloak.service"$' "$POSTBUILD" >"$SCRATCH/e/drop"
+enabled_refuses "TC-974-09 keycloak.service's link dropped" 'naming keycloak.service' "$SCRATCH/e/drop"
+awk '{ print } /multi-user.target.wants\/keycloak-db.service"$/ { print }' "$POSTBUILD" >"$SCRATCH/e/double"
+enabled_refuses "TC-974-09 keycloak-db.service's link doubled" 'naming keycloak-db.service' "$SCRATCH/e/double"
+mkdir -p "$SCRATCH/e/overlay/etc/systemd/system/multi-user.target.wants"
+ln -s /etc/systemd/system/keycloak.service "$SCRATCH/e/overlay/etc/systemd/system/multi-user.target.wants/keycloak.service"
+enabled_refuses "TC-974-09 an overlay wants link for keycloak.service" 'no *.wants link' "$POSTBUILD" "$SCRATCH/e/overlay"
+refuses verify_kc "$KC_UNIT" "TC-974-09 keycloak.service with an [Install] section" new '[Install]
+WantedBy=multi-user.target' '[Install]'
+refuses verify_db "$DB_UNIT" "TC-974-09 keycloak-db.service with an [Install] section" new '[Install]
+WantedBy=multi-user.target' '[Install]'
 # TC-973-03: an api unit at -900, refused naming the order.
 mkdir -p "$SCRATCH/o"
 sed 's/^OOMScoreAdjust=-950$/OOMScoreAdjust=-900/' "$API_UNIT" >"$SCRATCH/o/rasputin-api.service"

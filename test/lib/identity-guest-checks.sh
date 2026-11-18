@@ -12,6 +12,9 @@
 # checks:
 #   listen     on each of KC_HTTPS_PORT, KC_MGMT_PORT and DB_PORT at least one
 #              LISTEN row exists, and every one is 127.0.0.1 or [::1]
+#   listen-only the LISTEN rows the users ID_UIDS own are exactly IPv4
+#              127.0.0.1 on KC_HTTPS_PORT, KC_MGMT_PORT and DB_PORT, no more
+#              and no fewer (geekdojo/geekdojo-brain#974, K-P3 cache=local)
 #   kc-tls     on KC_HTTPS_PORT and on KC_MGMT_PORT, a read with no client
 #              certificate gets no HTTP status, and the control, a read with
 #              CLIENT_LEAF, gets one (F-967-05)
@@ -41,6 +44,8 @@
 #   DB_CA DB_CLIENT_LEAF                the same for PostgreSQL
 #   PSQL                                the psql binary
 #   ATREST_CMD                          the at-rest audit command
+#   ID_UIDS                             the identity service's and its
+#                                       database's uids, space-separated
 #   PERSIST DB_DATA                     the persistent partition, and
 #                                       PostgreSQL's data directory in it
 #   OUT                                 a tmpfs directory for scratch files
@@ -61,7 +66,7 @@ done
 . "$HERE/secret-scan.sh"
 
 for _var in KC_HTTPS_PORT KC_MGMT_PORT DB_PORT DB_NAME DB_USER CA CLIENT_LEAF DB_CA DB_CLIENT_LEAF \
-	PSQL ATREST_CMD PERSIST DB_DATA OUT; do
+	PSQL ATREST_CMD PERSIST DB_DATA OUT ID_UIDS; do
 	eval "_val=\${$_var:-}"
 	[ -n "$_val" ] || { echo "INCONCLUSIVE missing=$_var"; exit 2; }
 done
@@ -87,6 +92,18 @@ check_listen() {
 			pass "listen port=$_port on $_on"
 		fi
 	done
+}
+
+check_listen_only() {
+	_want=$(printf '127.0.0.1:%s\n' "$KC_HTTPS_PORT" "$KC_MGMT_PORT" "$DB_PORT" | sort -u)
+	_got=$(cat "$PROC_ROOT/net/tcp" "$PROC_ROOT/net/tcp6" 2>/dev/null | listening_sockets_of_uids "$ID_UIDS" | sort -u)
+	_extra=$(printf '%s\n' "$_got" | grep . | grep -vxF "$_want" | tr '\n' ' ' | sed 's/ $//')
+	_missing=$(printf '%s\n' "$_want" | grep -vxF "$(printf '%s\n' "$_got" | grep . || echo -)" | tr '\n' ' ' | sed 's/ $//')
+	if [ -z "$_extra" ] && [ -z "$_missing" ]; then
+		pass "listen-only uids=$ID_UIDS: exactly $(printf '%s\n' "$_want" | tr '\n' ' ' | sed 's/ $//')"
+	else
+		fail "listen-only uids=$ID_UIDS: ${_extra:+listens beyond the three on $_extra}${_extra:+${_missing:+; }}${_missing:+nothing listens on $_missing}"
+	fi
 }
 
 # kc_status PORT [CURL ARGS] — the HTTP status curl got, 000 for none.
@@ -173,7 +190,7 @@ scan_verdict() {
 }
 
 case "${1:-}" in
-	checks) check_listen; check_kc_tls; check_pg; check_atrest ;;
+	checks) check_listen; check_listen_only; check_kc_tls; check_pg; check_atrest ;;
 	scan) do_scan ;;
 	*) echo "usage: identity-guest-checks.sh checks|scan" >&2; exit 2 ;;
 esac

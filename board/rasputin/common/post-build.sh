@@ -34,6 +34,16 @@ ln -sf /etc/systemd/system/rasputin-agent.service \
 # test/store-config-test.sh asserts it and test/store-unit-functional.sh runs
 # it against a tree under real preset-all.
 ln -sf /etc/systemd/system/openbao.service "$TARGET_DIR/etc/systemd/system/multi-user.target.wants/openbao.service"
+# The identity service and its database (geekdojo/geekdojo-brain#974,
+# Identity 2.6), wanted on every image, the store's pattern: neither unit has
+# [Install], so preset-all leaves these links alone. Their own conditions skip
+# them off the control plane and until the api has minted their leaves. Being
+# wanted also keeps both loaded, which systemd 258.7 needs before it accepts
+# the api's reset-failed (F-973-12). One physical line each:
+# test/identity-unit-test.sh asserts them and test/identity-unit-functional.sh
+# runs them.
+ln -sf /etc/systemd/system/keycloak-db.service "$TARGET_DIR/etc/systemd/system/multi-user.target.wants/keycloak-db.service"
+ln -sf /etc/systemd/system/keycloak.service "$TARGET_DIR/etc/systemd/system/multi-user.target.wants/keycloak.service"
 # Per-role transient hostname, every boot (firstboot is run-once; a transient
 # hostname isn't). Only the controlplane may answer rasputin.local via mDNS.
 ln -sf /etc/systemd/system/rasputin-hostname.service \

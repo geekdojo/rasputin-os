@@ -1,7 +1,8 @@
 #!/bin/sh
 # Functional test for the identity service's units, keycloak.service and
-# keycloak-db.service, and keycloak.service's hooks
-# (geekdojo/geekdojo-brain#973), against REAL systemd 258.7 as PID 1 (the
+# keycloak-db.service, keycloak.service's hooks (geekdojo/geekdojo-brain#973),
+# and the configuration the image bakes for them (geekdojo/geekdojo-brain#974,
+# Identity 2.6), against REAL systemd 258.7 as PID 1 (the
 # release Buildroot 2026.08 builds into the image) with the REAL pinned
 # Keycloak and Java runtime, each downloaded for this machine's architecture
 # and checked against its package's .hash file, and Keycloak built with the
@@ -20,8 +21,11 @@
 # Scenarios, in one container, in this order:
 #   0   the test fails closed: no docker, a failed download and a tarball that
 #       does not match its .hash file each stop it with a sentence
-#   28  before Identity 2.6, leaves present and no config: the api's exact
-#       reset-failed and restart sequence leaves both units skipped
+#   28  the units enabled by post-build.sh's own link lines, with the shipped
+#       configs installed byte-identical to the overlay: the api's exact
+#       reset-failed and restart sequence exits 0 at every call and both
+#       units reach active, with no build-option drift line (F-973-12;
+#       TC-974-13, TC-974-14)
 #   15  each condition's input removed in turn: that unit is skipped, not
 #       failed, with no restart and no exit record; without mesh-ca.pem the
 #       identity service fails
@@ -56,6 +60,15 @@
 #   33  armed with the data emptied: `refused`, the database held stopped and
 #       Keycloak not active, also after the api's reset-failed and restarts
 #   34  the reboot points of a first start, each re-run on its own facts
+#   Identity 2.6's shipped configuration (geekdojo/geekdojo-brain#974):
+#   35  the WAL settings, the TLS 1.3 floor and a TLS 1.2 client refused, and
+#       the database's only listener 127.0.0.1:5432 with no Unix socket
+#       (TC-974-15)
+#   36  Keycloak's only listeners 127.0.0.1:8543 and :8544, at ready and after
+#       a restart (TC-974-16, K-P3 cache=local)
+#   37  the written outbound truststore holds the mesh CA alone (TC-974-17)
+#   38  every pgjdbc backend is TLS 1.3 with the db-client leaf's subject,
+#       read from the PKCS-8 key (TC-974-18)
 #
 # TEST HARNESS, not from the image, and labelled where it is done:
 #   * the keycloak (991) and postgres (992) users, which mkusers creates on the
@@ -66,9 +79,8 @@
 #   * the Keycloak dist and the JRE extracted whole, where the packages
 #     install a subset, and kc.sh build run in the container with the api
 #     tarball's build conf, as keycloak.mk runs it at image build;
-#   * Identity 2.6's keycloak.conf, postgresql.conf and pg_hba.conf, written
-#     here from #957's probe configs with their paths moved to the units'
-#     credentials;
+#   * an empty jssecacerts in the harness JRE, made by temurin-jre.mk's own
+#     recipe (the image's JRE ships one; the extracted tarball does not);
 #   * the realm baseline, copied from the pinned api tarball's identity/ to
 #     the path the api package installs it at;
 #   * a throwaway identity CA and its leaves (test/lib/test-pki.sh) standing
@@ -83,7 +95,7 @@
 #   * `mount --make-rshared /`, which a booted image gets from systemd's
 #     mount-setup and a container does not.
 #
-# NOT COVERED: the shipped configuration (Identity 2.6), sign-in flows under
+# NOT COVERED: sign-in flows under
 # the sandbox (the bench's TC-973-30 and TC-973-31, IDT-05), Buildroot's own
 # curl and PostgreSQL builds (the image smoke's facts), TimeoutStartSec
 # expiring (pinned statically only), start at boot, the runtime OOM kill
@@ -124,7 +136,8 @@ command -v docker >/dev/null 2>&1 || { echo "FAILED: this test needs docker, and
 for t in openssl make curl tar; do
 	command -v "$t" >/dev/null 2>&1 || { echo "FAILED: this test needs $t, and it is not on PATH."; exit 1; }
 done
-for f in "$SYSD/$KC" "$SYSD/$DB" "$OVERLAY/$HOOK_REL" "$OVERLAY/usr/lib/rasputin/outcome/outcome.sh" \
+for f in "$SYSD/$KC" "$SYSD/$DB" "$OVERLAY/$HOOK_REL" "$OVERLAY/etc/rasputin/identity/keycloak.conf" \
+	"$OVERLAY/etc/rasputin/identity/postgresql.conf" "$OVERLAY/etc/rasputin/identity/pg_hba.conf" "$ROOT/board/rasputin/common/post-build.sh" "$OVERLAY/usr/lib/rasputin/outcome/outcome.sh" \
 	"$OVERLAY/$ID_REL/armed.sh" "$OVERLAY/$ID_REL/identity-db-init-gate.sh" "$OVERLAY/$ID_REL/identity-db-init.sh" \
 	"$OVERLAY/$ID_REL/identity-stage-import.sh" \
 	"$OVERLAY/usr/lib/tmpfiles.d/rasputin.conf" "$OVERLAY/usr/lib/rasputin/atrest/inventory" \
@@ -139,6 +152,7 @@ done
 . "$ROOT/test/lib/container-systemd.sh"
 . "$ROOT/test/lib/test-pki.sh"
 . "$ROOT/test/lib/api-tarball.sh"
+. "$ROOT/test/lib/listen-sockets.sh"
 neither() { ! contains "$1" "$3" && ! contains "$2" "$3"; }
 
 SCRATCH=$(mktemp -d)
@@ -218,49 +232,7 @@ mkdir -p "$P"
 } || { echo "FAILED: openssl could not make the test PKI."; exit 1; }
 rm -f "$P/ca.key" "$P/mesh.key"
 
-# --- TEST HARNESS: Identity 2.6's configs, from #957's probe configs ---------
 mkdir -p "$SCRATCH/conf"
-cat >"$SCRATCH/conf/keycloak.conf" <<EOF
-hostname-strict=false
-hostname-backchannel-dynamic=false
-proxy-headers=xforwarded
-proxy-trusted-addresses=127.0.0.1/32
-http-enabled=false
-http-host=127.0.0.1
-https-port=8543
-https-protocols=TLSv1.3
-https-certificate-file=$KCCREDS/server.pem
-https-certificate-key-file=$KCCREDS/server.key
-https-trust-store-file=$KCCREDS/identity-ca.pem
-https-certificates-reload-period=-1
-http-management-port=8544
-cache=local
-vault-dir=/run/rasputin-identity-vault
-db-url-host=127.0.0.1
-db-url-port=5432
-db-url-database=keycloak
-db-username=keycloak
-db-url-properties=?sslmode=verify-full&sslrootcert=$KCCREDS/identity-ca.pem&sslcert=$KCCREDS/db-client.pem&sslkey=$KCCREDS/db-client.pk8
-db-pool-max-size=8
-log=console
-EOF
-cat >"$SCRATCH/conf/postgresql.conf" <<EOF
-listen_addresses = '127.0.0.1'
-port = 5432
-unix_socket_directories = ''
-hba_file = '/etc/rasputin/identity/pg_hba.conf'
-ssl = on
-ssl_min_protocol_version = 'TLSv1.3'
-ssl_cert_file = '$DBCREDS/server.pem'
-ssl_key_file = '$DBCREDS/server.key'
-ssl_ca_file = '$DBCREDS/identity-ca.pem'
-max_connections = 12
-shared_buffers = 32MB
-wal_level = minimal
-max_wal_senders = 0
-log_destination = 'stderr'
-EOF
-printf 'hostssl keycloak keycloak 127.0.0.1/32 cert\n' >"$SCRATCH/conf/pg_hba.conf"
 # TEST HARNESS: scenario 27's curl recorder.
 cat >"$SCRATCH/conf/curl-recorder" <<'EOF'
 #!/bin/sh
@@ -317,6 +289,14 @@ done
 install -D -m 0644 /harness/realm-baseline.json /usr/share/rasputin/identity/realm-baseline.json
 install -D -m 0755 /overlay/usr/lib/rasputin/atrest/rasputin-atrest-audit.sh /usr/lib/rasputin/atrest/audit.sh
 install -m 0755 /harness/curl-recorder /usr/local/bin/curl-recorder
+# TEST HARNESS: the empty jssecacerts the image's JRE ships, by
+# temurin-jre.mk's own recipe (TEMURIN_JRE_INSTALL_EMPTY_JSSECACERTS): one
+# throwaway entry added, deleted, and the listing required to show none.
+J='-storetype PKCS12 -storepass changeit -keystore /usr/lib/temurin-jre/lib/security/jssecacerts'
+rm -f /usr/lib/temurin-jre/lib/security/jssecacerts
+/usr/lib/temurin-jre/bin/keytool -genkeypair -alias temurin-jre-empty -keyalg EC -groupname secp256r1 -dname CN=empty -keypass changeit \$J >/dev/null 2>&1
+/usr/lib/temurin-jre/bin/keytool -delete -alias temurin-jre-empty \$J >/dev/null 2>&1
+/usr/lib/temurin-jre/bin/keytool -list \$J 2>/dev/null | grep -qx 'Your keystore contains 0 entries'
 # TEST HARNESS: in a privileged container /dev/kmsg is the host's.
 mkdir -p /etc/systemd/system/$KC.d
 printf '[Service]\nEnvironment=RASPUTIN_KCHOOK_KMSG=/run/kchook-console\nEnvironment=RASPUTIN_KCSTAGE_KMSG=/run/kcstage-console\n' >/etc/systemd/system/$KC.d/harness-console.conf
@@ -341,10 +321,11 @@ put_leaves() {
 		install -m 0644 /pki/dbclient.pem $V/tls/identity-db-client/leaf.pem && install -m 0600 /pki/dbclient.key $V/tls/identity-db-client/leaf.key &&
 		install -m 0600 /pki/dbclient.pk8 $V/tls/identity-db-client/leaf.pk8"
 }
+# put_confs — the overlay's three identity configs, verbatim (TC-974-13).
 put_confs() {
-	inside "install -D -m 0644 /harness/keycloak.conf /etc/rasputin/identity/keycloak.conf &&
-		install -m 0644 /harness/postgresql.conf /etc/rasputin/identity/postgresql.conf &&
-		install -m 0644 /harness/pg_hba.conf /etc/rasputin/identity/pg_hba.conf"
+	inside "install -D -m 0644 /overlay/etc/rasputin/identity/keycloak.conf /etc/rasputin/identity/keycloak.conf &&
+		install -m 0644 /overlay/etc/rasputin/identity/postgresql.conf /etc/rasputin/identity/postgresql.conf &&
+		install -m 0644 /overlay/etc/rasputin/identity/pg_hba.conf /etc/rasputin/identity/pg_hba.conf"
 }
 show() { inside "systemctl show -P $2 $1"; }
 # settled UNIT — no job queued for UNIT.
@@ -384,8 +365,23 @@ in_start_post() {
 active_kc() { wait_for "$KC is active" "[ \"\$(systemctl show -P ActiveState $KC)\" = active ]"; }
 
 echo
-echo "28. before Identity 2.6: leaves present, no config, the api's sequence (TC-973-28)"
-{ put_role && put_ca && put_mesh && put_leaves; } || { echo "FAILED: the credential sources could not be written."; exit 1; }
+echo "28. enabled by post-build.sh's links, the shipped configs, the api's sequence (TC-974-13, TC-974-14, F-973-12)"
+{ put_role && put_ca && put_mesh && put_leaves && put_confs; } || { echo "FAILED: the credential sources and the configs could not be written."; exit 1; }
+# Copied out and compared on this side: the harness image has no cmp.
+for f in keycloak.conf postgresql.conf pg_hba.conf; do
+	docker cp "$CID:/etc/rasputin/identity/$f" "$SCRATCH/installed-$f" >/dev/null 2>&1
+	check "TC-974-13 the installed $f is byte-identical to the overlay's (cmp)" \
+		"$(yes_if cmp -s "$OVERLAY/etc/rasputin/identity/$f" "$SCRATCH/installed-$f")"
+done
+# post-build.sh's own two link lines, run in the container with TARGET_DIR=/.
+LINKS=$(grep -v '^[[:space:]]*#' "$ROOT/board/rasputin/common/post-build.sh" | grep -E 'multi-user\.target\.wants/keycloak(-db)?\.service"$')
+check "TC-974-14 post-build.sh has the two identity link lines" "$(yes_if [ "$(printf '%s\n' "$LINKS" | grep -c .)" = 2 ])" "$LINKS"
+inside "TARGET_DIR=/
+$LINKS
+systemctl daemon-reload" || check "TC-974-14 the link lines and daemon-reload ran" 1
+for u in $KC $DB; do
+	check "TC-974-14 $u is enabled by the link (got $(inside "systemctl is-enabled $u"))" "$(yes_if [ "$(inside "systemctl is-enabled $u")" = enabled ])"
+done
 c=$(cursor)
 # Each call's exit status and its stderr, kept apart.
 out=$(inside "rc=''; for c in 'reset-failed $DB $KC' 'restart $DB' 'reset-failed $DB $KC' 'restart $KC'; do
@@ -393,19 +389,15 @@ out=$(inside "rc=''; for c in 'reset-failed $DB $KC' 'restart $DB' 'reset-failed
 err=$(inside 'cat /tmp/api-seq.err')
 printf '    statuses:%s\n' "$out"
 printf '%s\n' "$err" | sed 's/^/    /'
-check "TC-973-28 both restarts in the api's sequence exit 0 (statuses:$out)" \
-	"$(yes_if [ "$(echo $out | cut -d' ' -f2,4)" = "0 0" ])"
-# systemd 258.7 keeps no unit loaded that nothing references: these units have
-# no [Install] and nothing wants them before Identity 2.6, and a skipped start
-# leaves them unloaded again, so `reset-failed` on them exits 1 naming that.
-# Pinned here as what the api meets, not hidden (reported against TC-973-28).
-bad_err=$(printf '%s\n' "$err" | grep -v -e "^Failed to reset failed state of unit $DB: Unit $DB not loaded\.$" \
-	-e "^Failed to reset failed state of unit $KC: Unit $KC not loaded\.$" | grep . || true)
-check "TC-973-28 each reset-failed exits 0, or 1 saying only that the unit is not loaded (statuses:$out)" \
-	"$({ [ -z "$bad_err" ] && for r in $(echo $out | cut -d' ' -f1,3); do [ "$r" = 0 ] || [ "$r" = 1 ] || exit 1; done; } && echo 0 || echo 1)" "$bad_err"
-skipped "TC-973-28" "$DB" "$c" /etc/rasputin/identity/postgresql.conf
-skipped "TC-973-28" "$KC" "$c" /etc/rasputin/identity/keycloak.conf
-no_exits "TC-973-28"
+check "TC-974-14 each of the api's four calls exits 0 (statuses:$out)" "$(yes_if [ "$(echo $out)" = "0 0 0 0" ])" "$err"
+active_kc
+for u in $KC $DB; do
+	check "TC-974-14 $u reaches active (got $(show "$u" ActiveState))" "$(yes_if [ "$(show "$u" ActiveState)" = active ])" \
+		"$(inside "systemctl show $u -p ActiveState -p SubState -p Result; journalctl --after-cursor='$c' -u $u --no-pager -o cat | tail -20")"
+done
+drift=$(inside "journalctl --after-cursor='$c' -u $KC --no-pager -o cat | grep -i 'build time options have values that differ'" || true)
+check "TC-974-13 Keycloak's journal has no build-option drift line on the shipped keycloak.conf" "$(yes_if [ -z "$drift" ])" "$drift"
+reset
 
 echo
 echo "15. each input removed in turn: skipped, not failed (TC-973-15)"
@@ -878,6 +870,65 @@ run_case "(b) data absent, complete data.init" created
 # (c) complete data.
 reset
 run_case "(c) complete data" untouched
+reset
+
+# --- Identity 2.6: the shipped configuration (geekdojo/geekdojo-brain#974) -----
+start_kc
+check "the pair is active for scenarios 35 to 38" "$(yes_if [ "$(show $KC ActiveState)" = active ])"
+# listeners_of UID — the LISTEN rows UID owns in the container's tables,
+# sorted, space-separated (test/lib/listen-sockets.sh).
+listeners_of() { inside "cat /proc/net/tcp /proc/net/tcp6" | listening_sockets_of_uids "$1" | sort | tr '\n' ' ' | sed 's/ $//'; }
+
+echo
+echo "35. the WAL settings and TLS-only PostgreSQL (TC-974-15)"
+for kv in wal_level=minimal max_wal_senders=0 min_wal_size=32MB; do
+	got=$(psql_kc "SHOW ${kv%%=*}")
+	check "TC-974-15 SHOW ${kv%%=*} over the cert connection is ${kv#*=} (got '$got')" "$(yes_if [ "$got" = "${kv#*=}" ])"
+done
+# SHOW ssl_min_protocol_version as keycloak is refused for want of
+# pg_read_all_settings (F-974-06), so postgres -C reads the shipped config.
+got=$(inside "setpriv --reuid=992 --regid=992 --clear-groups /usr/bin/postgres -C ssl_min_protocol_version -D $IDB/data -c config_file=/etc/rasputin/identity/postgresql.conf 2>&1")
+check "TC-974-15 postgres -C ssl_min_protocol_version on the shipped config is TLSv1.3 (got '$got')" "$(yes_if [ "$got" = TLSv1.3 ])"
+out=$(inside "psql 'host=127.0.0.1 port=5432 dbname=keycloak user=keycloak sslmode=verify-full sslrootcert=$V/trust/identity-ca.pem sslcert=$V/tls/identity-db-client/leaf.pem sslkey=$V/tls/identity-db-client/leaf.key ssl_max_protocol_version=TLSv1.2' -Atc 'SELECT 1' 2>&1; echo rc=\$?")
+check "TC-974-15 a client capped at TLS 1.2, with the db-client leaf, is refused in the handshake" \
+	"$({ ! contains 'rc=0' "$out" && contains 'protocol version' "$out"; } && echo 0 || echo 1)" "$out"
+printf '    %s\n' "$out" | head -2
+got=$(listeners_of 992)
+check "TC-974-15 the only LISTEN row uid 992 owns is 127.0.0.1:5432 (got '$got')" "$(yes_if [ "$got" = 127.0.0.1:5432 ])"
+n=$(inside "grep -c '\.s\.PGSQL\.' /proc/net/unix")
+check "TC-974-15 /proc/net/unix holds no .s.PGSQL. path (got $n)" "$(yes_if [ "$n" = 0 ])"
+
+echo
+echo "36. Keycloak listens on 8543 and 8544 only (TC-974-16, K-P3 cache=local)"
+got=$(listeners_of 991)
+check "TC-974-16 at ready, the LISTEN rows uid 991 owns are exactly 127.0.0.1:8543 and :8544 (got '$got')" \
+	"$(yes_if [ "$got" = "127.0.0.1:8543 127.0.0.1:8544" ])"
+inside "systemctl restart $KC" >/dev/null 2>&1
+active_kc
+got=$(listeners_of 991)
+check "TC-974-16 after one restart, exactly 127.0.0.1:8543 and :8544 again (got '$got')" \
+	"$(yes_if [ "$got" = "127.0.0.1:8543 127.0.0.1:8544" ])"
+
+echo
+echo "37. the outbound truststore is the mesh CA alone (TC-974-17)"
+# keycloakchangeit is Keycloak's own public dummy password for this store
+# (TruststoreBuilder.DUMMY_PASSWORD); it protects public certificates.
+list=$(inside "/usr/lib/temurin-jre/bin/keytool -list -storetype PKCS12 -storepass keycloakchangeit -keystore $V/keycloak/data/keycloak-truststore.p12 2>&1")
+printf '%s\n' "$list" | sed 's/^/    /'
+check "TC-974-17 the written truststore holds exactly one entry" "$(yes_if contains 'Your keystore contains 1 entry' "$list")" "$list"
+fp_store=$(printf '%s\n' "$list" | sed -n 's/.*(SHA-256): //p' | tr -d ' \r' | tr 'a-f' 'A-F')
+fp_mesh=$(inside "openssl x509 -in /pki/mesh-ca.pem -noout -fingerprint -sha256" | sed 's/.*=//' | tr -d ' \r' | tr 'a-f' 'A-F')
+check "TC-974-17 its SHA-256 fingerprint ($fp_store) is mesh-ca.pem's ($fp_mesh)" \
+	"$({ [ -n "$fp_mesh" ] && [ "$fp_store" = "$fp_mesh" ]; } && echo 0 || echo 1)"
+
+echo
+echo "38. pgjdbc on the PKCS-8 key, over TLS 1.3 (TC-974-18)"
+rows=$(psql_kc "SELECT s.ssl, s.version, s.client_dn FROM pg_stat_ssl s JOIN pg_stat_activity a ON a.pid = s.pid WHERE a.application_name = 'PostgreSQL JDBC Driver'")
+printf '%s\n' "$rows" | sed 's/^/    /'
+n=$(printf '%s\n' "$rows" | grep -c .)
+bad=$(printf '%s\n' "$rows" | grep . | grep -vxF 't|TLSv1.3|/CN=keycloak' || true)
+check "TC-974-18 every PostgreSQL JDBC Driver backend ($n) is ssl=t, TLSv1.3, client_dn=/CN=keycloak" \
+	"$({ [ "$n" -gt 0 ] && [ -z "$bad" ]; } && echo 0 || echo 1)" "$rows"
 reset
 
 echo

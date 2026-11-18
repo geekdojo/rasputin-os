@@ -9,7 +9,11 @@
 # returns the list as a bare JSON array. So "ready" is a 200 whose array holds
 # no such id. Signing in to read it is test/lib/api-session.sh.
 #
+#   alerts_verdict PREFIX CODE BODYFILE
+#       The verdict below for any backend whose alerts' ids start PREFIX
+#       (geekdojo/geekdojo-brain#974: "identity:" too, in identity-ready.sh).
 #   store_ready_verdict CODE BODYFILE
+#       alerts_verdict for "secret-store:".
 #       Prints one label and returns 0 only for "ready". The status code is
 #       read before the body:
 #         ready                 200, an array of objects with string ids, none
@@ -30,9 +34,10 @@
 #       ran, "signin" when the sign-in failed with REASON, and "wait" once the
 #       wait ran and returned WAIT_RC. Returns 0 only for a wait that returned 0.
 
-store_ready_verdict() {
-	_sr_code=$1
-	_sr_body=$2
+alerts_verdict() {
+	_sr_prefix=$1
+	_sr_code=$2
+	_sr_body=$3
 	case "$_sr_code" in
 		'' | 000) echo "no-answer"; return 1 ;;
 		200) ;;
@@ -50,12 +55,14 @@ store_ready_verdict() {
 	if ! jq -e 'all(.[]; type == "object" and (.id | type) == "string")' "$_sr_body" >/dev/null 2>&1; then
 		echo "unreadable: an alert has no string id"; return 1
 	fi
-	_sr_ids=$(jq -r '[.[] | .id | select(startswith("secret-store:"))] | join(", ")' "$_sr_body")
+	_sr_ids=$(jq -r --arg p "$_sr_prefix" '[.[] | .id | select(startswith($p))] | join(", ")' "$_sr_body")
 	if [ -n "$_sr_ids" ]; then
 		echo "not-ready: $_sr_ids"; return 1
 	fi
 	echo "ready"
 }
+
+store_ready_verdict() { alerts_verdict "secret-store:" "$1" "$2"; }
 
 store_ready_wait() {
 	_sr_tries=$1
