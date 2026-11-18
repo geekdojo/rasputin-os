@@ -54,6 +54,19 @@
                 }
               }
             }
+          },
+          {
+            "policy-rasputin-author": {
+              "operation": "update",
+              "path": "sys/policies/acl/rasputin-author",
+              "data": {
+                "policy": {
+                  "eval_type": "string",
+                  "eval_source": "file",
+                  "path": "/usr/share/rasputin/openbao-policy/rasputin-author.hcl"
+                }
+              }
+            }
           }
         ]
       }
@@ -145,6 +158,27 @@
                 ],
                 "token_policies": [
                   "rasputin-provisioner"
+                ],
+                "token_no_default_policy": true,
+                "token_ttl": "1h"
+              }
+            }
+          },
+          {
+            "role-rasputin-author": {
+              "operation": "update",
+              "path": "auth/cert/certs/rasputin-author",
+              "data": {
+                "certificate": {
+                  "eval_type": "string",
+                  "eval_source": "file",
+                  "path": "/run/credentials/openbao.service/store-ca.pem"
+                },
+                "allowed_common_names": [
+                  "rasputin-provisioner"
+                ],
+                "token_policies": [
+                  "rasputin-author"
                 ],
                 "token_no_default_policy": true,
                 "token_ttl": "1h"

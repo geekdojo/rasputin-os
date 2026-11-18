@@ -253,17 +253,21 @@ $(words "$D" Service ReadWritePaths)
 	_reqs=$(jq -r '.initialize[] | to_entries[] | .value.request[] | to_entries[] | .value | "\(.path)\t\(.operation)"' "$J" 2>&1)
 	# TC-805-24: four policies and three roles, the provisioner's added by
 	# geekdojo-brain#805 (the #805 PINS of TC-804-13); TC-802-15: then the
-	# audited job-id header, ADR-0010's one exception to the freeze (#802).
-	check "TC-804-13 TC-805-24 TC-802-15 init.json's requests are exactly the four policies, the mount, cert auth, the three roles and the audited job-id header, in order" \
+	# audited job-id header, ADR-0010's exception to the freeze (#802);
+	# TC-1084-33: plus the author's policy and role, ADR-0010's author
+	# amendment (#1084), and nothing else.
+	check "TC-804-13 TC-805-24 TC-802-15 TC-1084-33 init.json's requests are exactly the five policies, the mount, cert auth, the four roles and the audited job-id header, in order" \
 		"$(yes_if [ "$(printf '%s\n' "$_reqs" | cut -f1)" = 'sys/policies/acl/rasputin-api
 sys/policies/acl/rasputin-seal-rotate
 sys/policies/acl/rasputin-provisioner
 sys/policies/acl/rasputin-bindable
+sys/policies/acl/rasputin-author
 sys/mounts/rasputin-secrets
 sys/auth/cert
 auth/cert/certs/rasputin-api
 auth/cert/certs/rasputin-seal-rotate
 auth/cert/certs/rasputin-provisioner
+auth/cert/certs/rasputin-author
 sys/config/auditing/request-headers/x-rasputin-job-id' ])" "got: $(printf '%s' "$_reqs" | cut -f1 | tr '\n' '|')"
 	_ops=$(printf '%s\n' "$_reqs" | cut -f2 | sort -u)
 	check "TC-804-13 every request's operation is update" "$(yes_if [ "$_ops" = update ])" "got: $(printf '%s' "$_ops" | tr '\n' '|')"
@@ -283,9 +287,9 @@ sys/config/auditing/request-headers/x-rasputin-job-id' ])" "got: $(printf '%s' "
 	_jh=sys/config/auditing/request-headers/x-rasputin-job-id
 	check "TC-802-15 init.json has the audit record X-Rasputin-Job-Id in plain text: update $_jh with hmac false" \
 		"$(yes_if [ "$(req "$_jh")" = '{"hmac":false}' ])" "got: $(req "$_jh")"
-	for _p in rasputin-api rasputin-seal-rotate rasputin-provisioner rasputin-bindable; do
+	for _p in rasputin-api rasputin-seal-rotate rasputin-provisioner rasputin-bindable rasputin-author; do
 		_want_pol=$(jq -cn --arg p "/usr/share/rasputin/openbao-policy/$_p.hcl" '{policy: {eval_type: "string", eval_source: "file", path: $p}}')
-		check "TC-804-13 TC-805-24 policy $_p is read from /usr/share/rasputin/openbao-policy/$_p.hcl through a file source" \
+		check "TC-804-13 TC-805-24 TC-1084-33 policy $_p is read from /usr/share/rasputin/openbao-policy/$_p.hcl through a file source" \
 			"$(yes_if [ "$(req "sys/policies/acl/$_p")" = "$_want_pol" ])" "got: $(req "sys/policies/acl/$_p")"
 	done
 	for _p in rasputin-api rasputin-seal-rotate rasputin-provisioner; do
@@ -293,6 +297,14 @@ sys/config/auditing/request-headers/x-rasputin-job-id' ])" "got: $(printf '%s' "
 		check "TC-804-13 TC-805-24 role $_p: CN $_p only, policy $_p only, token_no_default_policy, token_ttl 1h, the store CA credential ($CA_PATH) as its certificate" \
 			"$(yes_if [ "$(req "auth/cert/certs/$_p")" = "$_want_role" ])" "got: $(req "auth/cert/certs/$_p")"
 	done
+	# TC-1084-33: the author's role admits only the provisioner's leaf and binds
+	# only rasputin-author, with no default policy and a 1 h token.
+	_want_role=$(jq -cn --arg ca "$CA_PATH" '{certificate: {eval_type: "string", eval_source: "file", path: $ca}, allowed_common_names: ["rasputin-provisioner"], token_policies: ["rasputin-author"], token_no_default_policy: true, token_ttl: "1h"}')
+	check "TC-1084-33 role rasputin-author: CN rasputin-provisioner only, policy rasputin-author only, token_no_default_policy, token_ttl 1h, the store CA credential ($CA_PATH) as its certificate" \
+		"$(yes_if [ "$(req auth/cert/certs/rasputin-author)" = "$_want_role" ])" "got: $(req auth/cert/certs/rasputin-author)"
+	_authors=$(jq -r '.initialize[] | to_entries[] | .value.request[] | to_entries[] | .value | select(((.data.token_policies // []) + (.data.policies // [])) | index("rasputin-author")) | .path' "$J" 2>&1)
+	check "TC-1084-33 rasputin-author is bound only by its own role" \
+		"$(yes_if [ "$_authors" = auth/cert/certs/rasputin-author ])" "bound by: $(printf '%s' "$_authors" | tr '\n' '|')"
 	_binders=$(jq -r '.initialize[] | to_entries[] | .value.request[] | to_entries[] | .value | select(((.data.token_policies // []) + (.data.policies // [])) | index("rasputin-seal-rotate")) | .path' "$J" 2>&1)
 	check "TC-804-13 rasputin-seal-rotate is bound only by its own role" \
 		"$(yes_if [ "$_binders" = auth/cert/certs/rasputin-seal-rotate ])" "bound by: $(printf '%s' "$_binders" | tr '\n' '|')"
@@ -300,7 +312,7 @@ sys/config/auditing/request-headers/x-rasputin-job-id' ])" "got: $(printf '%s' "
 	check "TC-805-24 rasputin-bindable is bound by no init.json role (only the provisioner's roles bind it)" \
 		"$(yes_if [ -z "$_bindable" ])" "bound by: $(printf '%s' "$_bindable" | tr '\n' '|')"
 	_roles=$(jq -r '[.initialize[] | to_entries[] | .value.request[] | to_entries[] | .value | select(.path | startswith("auth/cert/certs/"))] | length' "$J" 2>&1)
-	check "TC-805-24 init.json has exactly three cert roles (got $_roles)" "$(yes_if [ "$_roles" = 3 ])"
+	check "TC-805-24 TC-1084-33 init.json has exactly four cert roles (got $_roles)" "$(yes_if [ "$_roles" = 4 ])"
 
 	echo "  -- init.json is frozen; later items are provision.tsv's (TC-805-24)"
 	_frozen=$(grep -c 'init.json is FROZEN from the store-arming' "$U" || true)
@@ -308,15 +320,24 @@ sys/config/auditing/request-headers/x-rasputin-job-id' ])" "got: $(printf '%s' "
 	_pt="$R/$REL_OVERLAY/etc/rasputin/openbao/provision.tsv"
 	_ptf=$(grep -c 'init.json beside this file is FROZEN from the store-arming release on' "$_pt" 2>/dev/null || true)
 	check "TC-805-24 provision.tsv's header says init.json is frozen from the store-arming release on" "$(yes_if [ "$_ptf" = 1 ])" "found ${_ptf:-0} in $_pt"
-	# TC-802-15: both name the one exception and the ADR-0010 amendment allowing it.
+	# TC-802-15: both name the job-id header exception and the ADR-0010
+	# amendment allowing it; TC-1084-33: and the dated author amendment.
 	_adr='geekdojo-brain/blob/main/projects/rasputin/adr/0010-secrets-store.md#the-initjson-job-header-exception-802'
+	_adr_author='geekdojo-brain/blob/main/projects/rasputin/adr/0010-secrets-store.md#the-initjson-author-amendment-1084'
 	for _f in "$U" "$_pt"; do
-		_ex=$(grep -c -e 'The one exception is the audited job-id header request' -e "$_adr" "$_f" 2>/dev/null || true)
-		check "TC-802-15 $(basename "$_f")'s FROZEN comment names the one exception, the job-id header, and links ADR-0010's amendment" \
-			"$(yes_if [ "$_ex" = 2 ])" "found ${_ex:-0} of the 2 lines in $_f"
+		_ex=$(grep -c -e 'Two exceptions, each allowed by a dated ADR-0010 amendment' -e 'the audited job-id header request (geekdojo/geekdojo-brain#802)' -e "$_adr" "$_f" 2>/dev/null || true)
+		check "TC-802-15 $(basename "$_f")'s FROZEN comment names the job-id header exception and links ADR-0010's amendment" \
+			"$(yes_if [ "$_ex" = 3 ])" "found ${_ex:-0} of the 3 lines in $_f"
+		_ax=$(grep -c -e 'the author identity, policy-rasputin-author and role-rasputin-author' -e '(geekdojo/geekdojo-brain#1084, amended 2026-11-15)' -e "$_adr_author" "$_f" 2>/dev/null || true)
+		check "TC-1084-33 $(basename "$_f")'s FROZEN comment names the author amendment, its date, and links ADR-0010's amendment" \
+			"$(yes_if [ "$_ax" = 3 ])" "found ${_ax:-0} of the 3 lines in $_f"
 	done
 	_items=$(grep -v -e '^#' -e '^[[:space:]]*$' "$_pt" 2>/dev/null || true)
-	check "TC-805-24 the shipped provision.tsv holds no entry" "$(yes_if eval '[ -f "$_pt" ] && [ -z "$_items" ]')" "entries: $(printf '%s' "$_items" | tr '\n' '|')"
+	_tab=$(printf '\t')
+	check "TC-805-24 TC-1084-33 the shipped provision.tsv holds exactly #1084's engine, policy and role" \
+		"$(yes_if eval '[ -f "$_pt" ] && [ "$_items" = "engine${_tab}rasputin-app-keys${_tab}transit
+policy${_tab}rasputin-app-keys
+role${_tab}rasputin-app-keys${_tab}rasputin-app-keys" ]')" "entries: $(printf '%s' "$_items" | tr '\n' '|')"
 	_stray=$(jq -r --arg ca "$CA_PATH" '[.. | objects | select(.eval_source? == "file") | .path | select((startswith("/usr/share/rasputin/openbao-policy/") or . == $ca) | not)] | join(",")' "$J" 2>&1)
 	check "TC-804-13 every file source is under /usr/share/rasputin/openbao-policy/ or is the store CA credential" \
 		"$(yes_if [ -z "$_stray" ])" "outside: $_stray"
@@ -482,7 +503,23 @@ tree; jqedit "$T/$INIT_REL" "$(prov_role '.token_ttl = "24h"')" \
 tree; jqedit "$T/$INIT_REL" "$(api_role '.token_policies = ["rasputin-api", "rasputin-bindable"]')" \
 	&& refused 'the api role binding rasputin-bindable' 'rasputin-bindable is bound by no init.json role' 'auth/cert/certs/rasputin-api'
 tree; edit "$T/$REL_OVERLAY/etc/rasputin/openbao/provision.tsv" append 'mount	rasputin-rel-x' \
-	&& refused 'an entry in the shipped provision.tsv' 'the shipped provision.tsv holds no entry' 'rasputin-rel-x'
+	&& refused 'an extra entry in the shipped provision.tsv' "the shipped provision.tsv holds exactly #1084's" 'rasputin-rel-x'
+# TC-1084-33: the author's role widened, a second binder, and an extra request.
+author_role() { printf '(.initialize[] | .auth? // empty | .request[] | ."role-rasputin-author"? // empty | .data) |= (%s)' "$1"; }
+tree; jqedit "$T/$INIT_REL" "$(author_role '.token_policies = ["rasputin-author", "rasputin-bindable"]')" \
+	&& refused 'TC-1084-33 the author role binding a second policy' 'role rasputin-author' '"token_policies":["rasputin-author","rasputin-bindable"]'
+tree; jqedit "$T/$INIT_REL" "$(author_role '.allowed_common_names = ["rasputin-api"]')" \
+	&& refused 'TC-1084-33 the author role admitting a CN other than rasputin-provisioner' 'role rasputin-author' '"allowed_common_names":["rasputin-api"]'
+tree; jqedit "$T/$INIT_REL" "$(author_role '.token_no_default_policy = false')" \
+	&& refused 'TC-1084-33 the author role keeping the default policy' 'role rasputin-author' '"token_no_default_policy":false'
+tree; jqedit "$T/$INIT_REL" "$(prov_role '.token_policies = ["rasputin-provisioner", "rasputin-author"]')" \
+	&& refused 'TC-1084-33 the provisioner role also binding rasputin-author' 'rasputin-author is bound only by its own role' 'auth/cert/certs/rasputin-provisioner'
+tree; jqedit "$T/$INIT_REL" '(.initialize[] | .auth? // empty | .request) += [{"role-rasputin-app-keys": {"operation": "update", "path": "auth/cert/certs/rasputin-app-keys", "data": {"allowed_common_names": ["rasputin-app-keys"]}}}]' \
+	&& refused 'TC-1084-33 an extra request (an app-key role at init)' "init.json's requests are exactly" 'auth/cert/certs/rasputin-app-keys'
+tree; jqedit "$T/$INIT_REL" '.initialize[0].policies.request[4]."policy-rasputin-author".data.policy.path = "/usr/share/rasputin/openbao-policy/rasputin-provisioner.hcl"' \
+	&& refused 'TC-1084-33 the author policy read from another file' 'policy rasputin-author is read from' 'rasputin-provisioner.hcl'
+tree; edit "$T/$REL_UNIT" 'replace:#   (geekdojo/geekdojo-brain#1084, amended 2026-11-15), for stores' '#   (geekdojo/geekdojo-brain#1084), for stores' \
+	&& refused "TC-1084-33 openbao.service's comment without the amendment's date" 'openbao.service' 'author amendment'
 tree; jqedit "$T/$INIT_REL" '.initialize[0].policies.request[1]."policy-rasputin-seal-rotate".data.policy.path = "/tmp/rasputin-seal-rotate.hcl"' \
 	&& refused 'a policy file source outside openbao-policy/' 'every file source is under /usr/share/rasputin/openbao-policy/' '/tmp/rasputin-seal-rotate.hcl'
 

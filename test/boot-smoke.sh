@@ -1076,10 +1076,13 @@ esac
 rm -f "$SR_JAR"
 store_ready_report "$SR_STAGE" "$SR_REASON" "$SR_RC" "$SR_LAST" "$SR_AT" || exit 1
 # The store's provisioner (geekdojo/geekdojo-brain#805, TC-805-35). After the
-# store's first start the provisioner runs once, and this release's
-# provision.tsv lists nothing, so its one line is outcome=unchanged. A failed
-# line fails the image; so does silence: then nothing provisioned, or nothing
-# recorded that it did.
+# store's first start the provisioner runs once. This release's provision.tsv
+# lists the app-key engine, its policy and its role (#1084, TC-1084-36), added
+# on a fresh store through the author identity init.json now makes, so its
+# first line is outcome=applied changed=3. A failed line fails the image; so
+# does silence: then nothing provisioned, or nothing recorded that it did. So
+# does unchanged: on a fresh store that means the author role is missing and
+# app keys are unavailable.
 PV_LINE="$(grep -ao 'rasputin-store-provision: outcome=.*' "$CONSOLE_LOG" | tr -d '\r' | head -1)"
 if grep -aq 'rasputin-store-provision: outcome=failed' "$CONSOLE_LOG"; then
   echo "::error::the secrets store's provisioner FAILED on a fresh control plane: $(grep -ao 'rasputin-store-provision: outcome=failed.*' "$CONSOLE_LOG" | tr -d '\r' | head -1)"
@@ -1089,16 +1092,16 @@ fi
 # (ledger F-805-28). On a fresh flash the store is condition-skipped until the
 # api mints its leaves; a provisioner job queued beside that skipped start
 # fails its Requisite= and prints this on every first boot, even though a
-# later run of the store still provisions and reports outcome=unchanged.
+# later run of the store still provisions and reports its outcome.
 PV_DEP="Dependency failed for .*Secrets store provisioner|rasputin-store-provision\\.service: Job .* failed with result 'dependency'"
 if grep -aqE "$PV_DEP" "$CONSOLE_LOG"; then
   echo "::error::systemd failed a secrets store provisioner job with result 'dependency' on a fresh control plane (F-805-28): something queued rasputin-store-provision.service beside a store start that never reached READY — openbao.service must start it only from its last ExecStartPost=: $(grep -aoE "$PV_DEP" "$CONSOLE_LOG" | tr -d '\r' | head -1)"
   exit 1
 fi
 case "$PV_LINE" in
-  "rasputin-store-provision: outcome=unchanged "*) echo "secrets store provisioner ran after the store's first start: ${PV_LINE%% reason=*}" ;;
+  "rasputin-store-provision: outcome=applied changed=3 "*) echo "secrets store provisioner ran after the store's first start: ${PV_LINE%% reason=*}" ;;
   "") echo "::error::no 'rasputin-store-provision: outcome=' line reached the serial console in ${SI_AT}s — the store's provisioner never ran after its first start, or openbao.service lost the ExecStartPost= that starts rasputin-store-provision.service."; exit 1 ;;
-  *) echo "::error::the secrets store's provisioner did not report outcome=unchanged on a fresh control plane: $PV_LINE"; exit 1 ;;
+  *) echo "::error::the secrets store's provisioner did not report outcome=applied changed=3 (the app-key engine, policy and role, geekdojo/geekdojo-brain#1084) on a fresh control plane: $PV_LINE"; exit 1 ;;
 esac
 
 [ "$api" = 1 ] \

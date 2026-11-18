@@ -60,6 +60,11 @@
 #      store's provisioner (#805, TC-805-36) recorded unchanged, its record
 #      0600 0:0 and exactly the four contract lines, with an unchanged line
 #      and no failed line this boot; the second start changes none of it.
+#      From a base with no store data, the store initialises from this
+#      image's init.json, which makes the author (#1084), so the provisioner's
+#      first run adds the app-key engine, policy and role and records applied,
+#      and the second start's unchanged; a base's store has no author and
+#      records unchanged both times.
 #      Then the token scan of every file under
 #      /var/lib/rasputin (but the container image stores) and every boot's
 #      journal (TC-804-22). The store runs as uid 990, its only socket is
@@ -660,14 +665,25 @@ if boot 2; then
 				expect "boot 2 $_w: (9) no rasputin-store-init: line this boot, the base had initialised the store" 0 "$(kv store_init_lines "$_t")"
 			fi
 			# TC-805-36: the store's provisioner (geekdojo/geekdojo-brain#805).
-			expect "boot 2 $_w: (12) the provisioner's record says unchanged" unchanged "$(kv prov_record_outcome "$_t")"
+			# #1084: a store this image initialised gets the app-key items on
+			# its first start (applied); every other run finds nothing to add.
+			_pw=unchanged
+			[ "$STORE_WANT" = empty ] && [ "$_w" = "first start" ] && _pw=applied
+			expect "boot 2 $_w: (12) the provisioner's record says $_pw" "$_pw" "$(kv prov_record_outcome "$_t")"
 			expect "boot 2 $_w: (12) the provisioner's record is 0600 root" "-rw------- 0 0" "$(kv prov_record_mode "$_t")"
 			expect "boot 2 $_w: (12) the provisioner's record holds exactly the four contract lines" "outcome,boot_id,run_id,reason," "$(kv prov_record_keys "$_t")"
-			_pu="$(kv prov_unchanged_lines "$_t")"
-			if [ "${_pu:-0}" -ge 1 ] 2>/dev/null; then pass "boot 2 $_w: (12) a rasputin-store-provision: outcome=unchanged line this boot ($_pu)"
-			else fail "boot 2 $_w: (12) no rasputin-store-provision: outcome=unchanged line this boot (got '${_pu:-<nothing>}')"; fi
+			_pu="$(kv "prov_${_pw}_lines" "$_t")"
+			if [ "${_pu:-0}" -ge 1 ] 2>/dev/null; then pass "boot 2 $_w: (12) a rasputin-store-provision: outcome=$_pw line this boot ($_pu)"
+			else fail "boot 2 $_w: (12) no rasputin-store-provision: outcome=$_pw line this boot (got '${_pu:-<nothing>}')"; fi
 			expect "boot 2 $_w: (12) no rasputin-store-provision: outcome=failed line this boot" 0 "$(kv prov_failed_lines "$_t")"
 		}
+		# The provisioner's run after this start has finished: its record
+		# exists and it has no job. It runs after the store's READY, so health
+		# 200 alone does not say it is done.
+		_i=0
+		while [ "$(guest_yes 'test -s /run/rasputin-store-provision/outcome && [ -z "$(systemctl show rasputin-store-provision.service -p Job --value)" ]')" != yes ] && [ "$_i" -lt "$STORE_TRIES" ]; do
+			_i=$((_i + 1)); sleep 2
+		done
 		S1="$(store_checks)"
 		assert_store "first start" "$S1"
 		# (10) A second start, pulled by the api: the store is stopped and the

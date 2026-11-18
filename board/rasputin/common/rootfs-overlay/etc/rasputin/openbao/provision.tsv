@@ -1,24 +1,47 @@
-# provision.tsv — the kv-v2 mounts and cert roles this release adds to a
-# secrets store an earlier release initialised (geekdojo/geekdojo-brain#805;
-# ADR-0010 S9). rasputin-store-provision.service reads it on every start of
-# the store and adds, logged in as the store's provisioner, only what is
-# missing. Nothing it finds present is changed, and nothing is ever removed.
+# provision.tsv — the mounts, engines, policies and cert roles this release
+# adds to a secrets store an earlier release initialised (geekdojo/geekdojo-brain#805,
+# #1084; ADR-0010 S9). rasputin-store-provision.service reads it on every
+# start of the store and adds only what is missing. Nothing it finds present
+# is changed, except a policy whose text differs from this image's, and
+# nothing is ever removed.
 #
 # init.json beside this file is FROZEN from the store-arming release on: a
 # store runs it once, on its first start, so an item added there would reach
 # fresh stores only. A later release adds mounts and roles HERE, and a fresh
 # store gets them here too, from the same provisioner, within its limits.
-# The one exception is the audited job-id header request
-# (geekdojo/geekdojo-brain#802), allowed by ADR-0010's amendment:
-# https://github.com/geekdojo/geekdojo-brain/blob/main/projects/rasputin/adr/0010-secrets-store.md#the-initjson-job-header-exception-802
+# Two exceptions, each allowed by a dated ADR-0010 amendment, reach only the
+# stores initialised from the release that carries them:
+#   the audited job-id header request (geekdojo/geekdojo-brain#802):
+#   https://github.com/geekdojo/geekdojo-brain/blob/main/projects/rasputin/adr/0010-secrets-store.md#the-initjson-job-header-exception-802
+#   the author identity, policy-rasputin-author and role-rasputin-author
+#   (geekdojo/geekdojo-brain#1084, amended 2026-11-15), for stores
+#   initialised from release 2026.11.3 on; the engine, policy and role items
+#   below are added through it:
+#   https://github.com/geekdojo/geekdojo-brain/blob/main/projects/rasputin/adr/0010-secrets-store.md#the-initjson-author-amendment-1084
 #
 # One item per line, its fields separated by one TAB:
-#   mount<TAB><name>               a kv-v2 mount at <name>
+#   mount<TAB><name>               a kv-v2 mount at <name>, in rasputin-rel-*
 #   role<TAB><name><TAB><policy>   a cert role <name> trusting the store CA,
-#                                  admitting only the CommonName <name>
-# <name> matches ^rasputin-rel-[a-z0-9-]+$, and <policy> is rasputin-bindable,
-# the one policy a provisioned role may bind. Anything else refuses the whole
+#                                  admitting only the CommonName <name>: in
+#                                  rasputin-rel-* binding rasputin-bindable,
+#                                  or in rasputin-app-* binding a
+#                                  rasputin-app-* policy
+#   engine<TAB><name><TAB>transit  a Transit engine at <name>, in rasputin-app-*
+#   policy<TAB><name>              the policy <name>, in rasputin-app-*, its
+#                                  text from
+#                                  /usr/share/rasputin/openbao-policy/<name>.hcl
+# A name is the namespace followed by lowercase letters, digits and hyphens.
+# The rasputin-rel-* items are added as the store's provisioner, the
+# rasputin-app-* ones as rasputin-author. Anything else refuses the whole
 # file, and the run is recorded failed. Lines starting with # and blank lines
 # are skipped.
 #
-# This release adds nothing.
+# A store initialised before release 2026.11.3 has no rasputin-author role:
+# its rasputin-app-* items are skipped and the run is recorded unchanged, with
+# a sentence saying so.
+#
+# This release adds the api's app-key engine, its policy and its role
+# (geekdojo/geekdojo-brain#1084).
+engine	rasputin-app-keys	transit
+policy	rasputin-app-keys
+role	rasputin-app-keys	rasputin-app-keys

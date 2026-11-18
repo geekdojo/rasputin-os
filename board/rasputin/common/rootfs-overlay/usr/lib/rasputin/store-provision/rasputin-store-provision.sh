@@ -1,16 +1,30 @@
 #!/bin/sh
 #
-# rasputin-store-provision.sh — add the kv-v2 mounts and cert roles a later
-# release lists to a secrets store an earlier release initialised, with no
-# root token (geekdojo/geekdojo-brain#805; ADR-0010 S9).
+# rasputin-store-provision.sh — add the mounts, engines, policies and cert
+# roles a later release lists to a secrets store an earlier release
+# initialised, with no root token (geekdojo/geekdojo-brain#805, #1084;
+# ADR-0010 S9).
 #
 # WHY. The store initialises itself once, from init.json, and init.json is
 # frozen from the store-arming release on: a store keeps what its first start
-# made. A later release's new mounts and roles come from provision.tsv, added
-# by the store's one fixed provisioner identity, rasputin-provisioner. Its
-# policy can add mounts and roles inside one namespace, rasputin-rel-*, and
-# bind those roles only to the pre-shipped rasputin-bindable policy. It
-# authors no policy and changes no fixed mount, role or policy.
+# made. A later release's new items come from provision.tsv, added by two
+# fixed identities that share the provisioner's leaf:
+#   rasputin-provisioner  adds kv-v2 mounts and roles inside rasputin-rel-*,
+#                         binding those roles only to the pre-shipped
+#                         rasputin-bindable policy. It authors no policy.
+#   rasputin-author       (#1084, in init.json for stores initialised from
+#                         release AUTHOR_RELEASE on) adds Transit engines,
+#                         policies and roles inside rasputin-app-*, binding
+#                         those roles only to rasputin-app-* policies.
+# Neither changes a fixed mount, role or policy, and neither deletes.
+#
+# A STORE WITH NO AUTHOR. Whether the store has the rasputin-author role is a
+# fact the provisioner reads from its role list. A store initialised before
+# AUTHOR_RELEASE has none, and never will through this step: its
+# rasputin-app-* items are skipped with no author login, and the run is
+# recorded unchanged (or applied, if rasputin-rel-* items changed) with a
+# sentence saying so, at <6>. Not failed: that would raise #833's alert on
+# every boot of every such store over a gap no boot can close.
 #
 # PHASES, in rasputin-store-provision.service's order. The unit is started by
 # openbao.service's last ExecStartPost=, once the store's run has reached
@@ -24,8 +38,12 @@
 #            no items it exits 0 at once. Otherwise it waits for THIS run of
 #            the store to report its unseal, and fails the start (so apply
 #            never runs) when the store reports it did not unseal.
-#   apply    ExecStart=        the store's user. Logs in as the provisioner
-#            and adds what is missing. Nothing it finds present is changed.
+#   apply    ExecStart=        the store's user. Logs in as the provisioner,
+#            adds what is missing in rasputin-rel-*, then, when the store has
+#            the author role, logs in as rasputin-author and does the same in
+#            rasputin-app-*. Nothing it finds present is changed, except a
+#            policy whose text differs from the image's file, which is
+#            rewritten: that is how a release changes provisioned policy text.
 #   record   ExecStartPost=-+  root. The record and the outcome line.
 #   stopped  ExecStopPost=-+   root. A run that ended before record ran (a
 #            failed wait or apply, the store stopping) is recorded failed, and
@@ -56,10 +74,12 @@
 # dropped the success line under its rate limit. Nothing polls on an interval.
 #
 # THE API'S WORST-CASE HOLD. With no items, none. With N items: at most 10 s
-# for the wait, 2 s for its one health ask, and then one login and at most two
-# calls per item, each bounded by BAO_CLIENT_TIMEOUT=2s with no retry:
-# 10 + 2 + 2 x (1 + 2N) seconds, 22 s for N = 2. On a healthy store it is the
-# unseal itself plus loopback calls in milliseconds.
+# for the wait, 2 s for its one health ask, and then at most two logins (the
+# author's only for rasputin-app-* items), one role list and two calls per
+# item, each bounded by BAO_CLIENT_TIMEOUT=2s with no retry:
+# 10 + 2 + 2 x (3 + 2N) seconds, 30 s for this release's N = 3. With only
+# rasputin-rel-* mounts, one login and no list: 10 + 2 + 2 x (1 + 2N). On a
+# healthy store it is the unseal itself plus loopback calls in milliseconds.
 #
 # STABLE CONTRACT. Readers depend on these; they do not change without them:
 #
@@ -82,12 +102,19 @@
 #
 #   provision.tsv, one tab-separated item per line; # comments and blank
 #   lines are skipped:
-#     mount <name>            a kv-v2 mount at <name>
+#     mount <name>            a kv-v2 mount at <name>, in rasputin-rel-*
 #     role <name> <policy>    a cert role <name> trusting the store CA,
 #                             admitting only the CommonName <name>, binding
-#                             only <policy>, token_no_default_policy, 1h ttl
-#   <name> matches ^rasputin-rel-[a-z0-9-]+$ and <policy> is rasputin-bindable.
-#   Anything else refuses the whole file before any store call.
+#                             only <policy>, token_no_default_policy, 1h ttl:
+#                             in rasputin-rel-* <policy> is rasputin-bindable,
+#                             in rasputin-app-* it is in rasputin-app-*
+#     engine <name> transit   a Transit engine at <name>, in rasputin-app-*
+#     policy <name>           the policy <name>, in rasputin-app-*, its text
+#                             from POLICY_DIR/<name>.hcl, which must be a
+#                             readable, non-empty file
+#   A name is its namespace (rasputin-rel- or rasputin-app-) followed by one
+#   or more of [a-z0-9-]. Anything else refuses the whole file before any
+#   store call.
 #
 # NEVER LOGGED: a token. It lives in BAO_TOKEN in apply's environment only.
 # A journal line quoted in a reason is cut to bao's error field.
@@ -114,9 +141,15 @@ PENDING="$RUN/pending"
 RECORD="$RUN/outcome"
 RECORD_TMP="$RUN/.outcome.new"
 RESULT="$WORK/result"
+POLICY_DIR="${RASPUTIN_STOREPROV_POLICY_DIR:-/usr/share/rasputin/openbao-policy}"
 NS=rasputin-rel-
+APP_NS=rasputin-app-
 BINDABLE=rasputin-bindable
+AUTHOR=rasputin-author
+# The first release whose init.json makes the author role (#1084).
+AUTHOR_RELEASE=2026.11.3
 NOT_ADDED="so this release's mounts and roles were not added."
+NO_AUTHOR="This secrets store was initialised before release $AUTHOR_RELEASE, so it has no identity that can add the app-key engine; app keys are unavailable on it."
 
 # The store client: the listener in openbao.hcl, the store CA and the
 # provisioner's leaf from this unit's credentials, one bounded try per call.
@@ -166,20 +199,22 @@ http_code() {
 	if [ -n "$_hc" ]; then printf 'HTTP %s' "$_hc"; else printf 'no answer'; fi
 }
 
-# valid_name NAME — NAME matches ^rasputin-rel-[a-z0-9-]+$.
-valid_name() {
-	case "$1" in "$NS"*) ;; *) return 1 ;; esac
-	_vn=${1#"$NS"}
+# in_ns NAMESPACE NAME — NAME is NAMESPACE followed by one or more of [a-z0-9-].
+in_ns() {
+	case "$2" in "$1"*) ;; *) return 1 ;; esac
+	_vn=${2#"$1"}
 	[ -n "$_vn" ] || return 1
 	case "$_vn" in *[!a-z0-9-]*) return 1 ;; esac
 	return 0
 }
 
-# parse — read provision.tsv into MOUNTS and ROLES (one name per line) and
-# ITEMS (their count). Every refusal is a failed result naming the line or
-# the file, and exit 1, before any store call.
+# parse — read provision.tsv into MOUNTS and ROLES (rasputin-rel-*, one name
+# per line), ENGINES, POLICIES and AROLES (rasputin-app-*; AROLES one
+# name:policy per line), ITEMS (their count) and AITEMS (the rasputin-app-*
+# count). Every refusal is a failed result naming the line or the file, and
+# exit 1, before any store call.
 parse() {
-	MOUNTS="" ROLES="" ITEMS=0
+	MOUNTS="" ROLES="" ENGINES="" POLICIES="" AROLES="" ITEMS=0 AITEMS=0
 	[ -f "$CONFIG" ] && [ -r "$CONFIG" ] \
 		|| fail "The provisioning file $CONFIG is missing or unreadable, $NOT_ADDED"
 	_tab=$(printf '\t')
@@ -187,6 +222,8 @@ parse() {
 	# The file is read once, into the shell, so a read error is the cat's.
 	_text=$(cat -- "$CONFIG" 2>/dev/null) \
 		|| fail "The provisioning file $CONFIG could not be read, $NOT_ADDED"
+	_outside="names something outside ${NS}<lowercase letters, digits and hyphens>"
+	_outside_app="names something outside ${APP_NS}<lowercase letters, digits and hyphens>"
 	while IFS= read -r _line || [ -n "$_line" ]; do
 		_n=$((_n + 1))
 		case "$_line" in ''|'#'*) continue ;; esac
@@ -201,24 +238,53 @@ parse() {
 			mount)
 				[ -n "$_rest" ] && [ "$_rest" = "$_f2" ] \
 					|| fail "Line $_n of $CONFIG is a mount with the wrong number of fields (want: mount, a name), $NOT_ADDED"
+				in_ns "$NS" "$_f2" || fail "Line $_n of $CONFIG $_outside, $NOT_ADDED"
 				;;
 			role)
 				[ -n "$_f2" ] && [ -n "$_f3" ] && [ "$_f3" = "${_f3%%"$_tab"*}" ] \
 					|| fail "Line $_n of $CONFIG is a role with the wrong number of fields (want: role, a name, a policy), $NOT_ADDED"
-				[ "$_f3" = "$BINDABLE" ] \
-					|| fail "Line $_n of $CONFIG binds a policy other than $BINDABLE, the only one a provisioned role may bind, $NOT_ADDED"
+				if in_ns "$APP_NS" "$_f2"; then
+					in_ns "$APP_NS" "$_f3" \
+						|| fail "Line $_n of $CONFIG binds the role $_f2 to a policy outside ${APP_NS}*, the only policies a ${APP_NS}* role may bind, $NOT_ADDED"
+				else
+					in_ns "$NS" "$_f2" || fail "Line $_n of $CONFIG $_outside, $NOT_ADDED"
+					[ "$_f3" = "$BINDABLE" ] \
+						|| fail "Line $_n of $CONFIG binds a policy other than $BINDABLE, the only one a provisioned role may bind, $NOT_ADDED"
+				fi
 				;;
-			*) fail "Line $_n of $CONFIG has an unknown kind (want mount or role), $NOT_ADDED" ;;
+			engine)
+				[ -n "$_f2" ] && [ -n "$_f3" ] && [ "$_f3" = "${_f3%%"$_tab"*}" ] \
+					|| fail "Line $_n of $CONFIG is an engine with the wrong number of fields (want: engine, a name, transit), $NOT_ADDED"
+				[ "$_f3" = transit ] \
+					|| fail "Line $_n of $CONFIG asks for an engine of type $(clean "$_f3"), and transit is the only type an engine item may add, $NOT_ADDED"
+				in_ns "$APP_NS" "$_f2" || fail "Line $_n of $CONFIG $_outside_app, $NOT_ADDED"
+				;;
+			policy)
+				[ -n "$_rest" ] && [ "$_rest" = "$_f2" ] \
+					|| fail "Line $_n of $CONFIG is a policy with the wrong number of fields (want: policy, a name), $NOT_ADDED"
+				in_ns "$APP_NS" "$_f2" || fail "Line $_n of $CONFIG $_outside_app, $NOT_ADDED"
+				_pf="$POLICY_DIR/$_f2.hcl"
+				[ -f "$_pf" ] && [ -r "$_pf" ] && [ -s "$_pf" ] \
+					|| fail "The policy file $_pf, named by line $_n of $CONFIG, is missing, empty or unreadable, $NOT_ADDED"
+				;;
+			*) fail "Line $_n of $CONFIG has an unknown kind (want mount, role, engine or policy), $NOT_ADDED" ;;
 		esac
-		valid_name "$_f2" \
-			|| fail "Line $_n of $CONFIG names something outside ${NS}<lowercase letters, digits and hyphens>, $NOT_ADDED"
 		case "$_seen" in *"|$_f1 $_f2|"*)
 			fail "Line $_n of $CONFIG repeats the $_f1 $_f2, $NOT_ADDED" ;;
 		esac
 		_seen="$_seen|$_f1 $_f2|"
-		if [ "$_f1" = mount ]; then MOUNTS="$MOUNTS$_f2
-"; else ROLES="$ROLES$_f2
-"; fi
+		case "$_f1:$_f2" in
+			mount:*) MOUNTS="$MOUNTS$_f2
+" ;;
+			role:"$APP_NS"*) AROLES="$AROLES$_f2:$_f3
+"; AITEMS=$((AITEMS + 1)) ;;
+			role:*) ROLES="$ROLES$_f2
+" ;;
+			engine:*) ENGINES="$ENGINES$_f2
+"; AITEMS=$((AITEMS + 1)) ;;
+			policy:*) POLICIES="$POLICIES$_f2
+"; AITEMS=$((AITEMS + 1)) ;;
+		esac
 		ITEMS=$((ITEMS + 1))
 	done <<EOF_CONFIG
 $_text
@@ -340,26 +406,90 @@ phase_apply() {
 		_changed=$((_changed + 1))
 		printf '<6>%s: added the kv-v2 mount %s.\n' "$OUTCOME_TAG" "$_m"
 	done
-	if [ -n "$ROLES" ]; then
+	_list=""
+	if [ -n "$ROLES" ] || [ "$AITEMS" -gt 0 ]; then
 		_list=$("$BAO" list auth/cert/certs 2>"$_err") \
 			|| { _w=$(http_code "$_err"); rm -f "$_err"; fail "The secrets store did not list its cert roles to the provisioner ($_w), $NOT_ADDED"; }
-		for _r in $ROLES; do
-			if printf '%s\n' "$_list" | grep -qxF -- "$_r"; then continue; fi
-			"$BAO" write "auth/cert/certs/$_r" "certificate=@$CREDS/store-ca.pem" "allowed_common_names=$_r" \
-				"token_policies=$BINDABLE" token_no_default_policy=true token_ttl=1h >/dev/null 2>"$_err" \
-				|| { _w=$(http_code "$_err"); rm -f "$_err"; fail "The secrets store refused the provisioner's write to auth/cert/certs/$_r ($_w), $NOT_ADDED"; }
-			_changed=$((_changed + 1))
-			printf '<6>%s: added the cert role %s, bound to %s.\n' "$OUTCOME_TAG" "$_r" "$BINDABLE"
-		done
+	fi
+	for _r in $ROLES; do
+		if printf '%s\n' "$_list" | grep -qxF -- "$_r"; then continue; fi
+		"$BAO" write "auth/cert/certs/$_r" "certificate=@$CREDS/store-ca.pem" "allowed_common_names=$_r" \
+			"token_policies=$BINDABLE" token_no_default_policy=true token_ttl=1h >/dev/null 2>"$_err" \
+			|| { _w=$(http_code "$_err"); rm -f "$_err"; fail "The secrets store refused the provisioner's write to auth/cert/certs/$_r ($_w), $NOT_ADDED"; }
+		_changed=$((_changed + 1))
+		printf '<6>%s: added the cert role %s, bound to %s.\n' "$OUTCOME_TAG" "$_r" "$BINDABLE"
+	done
+	_noauthor=""
+	if [ "$AITEMS" -gt 0 ]; then
+		if printf '%s\n' "$_list" | grep -qxF -- "$AUTHOR"; then
+			apply_authored
+		else
+			_noauthor=1
+		fi
 	fi
 	rm -f "$_err"
 	BAO_TOKEN=""
-	if [ "$_changed" -eq 0 ]; then
-		result unchanged 0 "Every mount and role this release lists was already in the secrets store."
+	if [ -n "$_noauthor" ] && [ "$_changed" -eq 0 ]; then
+		result unchanged 0 "$NO_AUTHOR"
+	elif [ -n "$_noauthor" ]; then
+		result applied "$_changed" "The provisioner added this release's missing mounts and roles, but this secrets store was initialised before release $AUTHOR_RELEASE, so it has no identity that can add the app-key engine; app keys are unavailable on it."
+	elif [ "$_changed" -eq 0 ]; then
+		result unchanged 0 "Every mount, engine, policy and role this release lists was already in the secrets store."
 	else
-		result applied "$_changed" "The provisioner added this release's missing mounts and roles to the secrets store."
+		result applied "$_changed" "The provisioner added this release's missing mounts, engines, policies and roles to the secrets store."
 	fi
 	exit 0
+}
+
+# apply_authored — the rasputin-app-* items, logged in as rasputin-author with
+# the provisioner's leaf: engines, then policies, then roles, so a role's
+# policy is in place before the role binds it. Reads _list (the provisioner's
+# role list) and adds to _changed. Any refusal is a failed result naming the
+# item, and exit 1.
+apply_authored() {
+	# The provisioner's token stays out of the author's login.
+	BAO_TOKEN=$(BAO_TOKEN="" "$BAO" login -method=cert -token-only -no-store "name=$AUTHOR" 2>"$_err") && [ -n "$BAO_TOKEN" ] \
+		|| { BAO_TOKEN=""; _w=$(http_code "$_err"); rm -f "$_err"; fail "The secrets store refused the login as $AUTHOR ($_w), $NOT_ADDED"; }
+	export BAO_TOKEN
+	for _e in $ENGINES; do
+		if "$BAO" read "sys/mounts/$_e" >/dev/null 2>"$_err"; then continue; fi
+		if ! grep -q 'No secret engine mount at' "$_err" 2>/dev/null; then
+			_w=$(http_code "$_err"); rm -f "$_err"
+			fail "The secrets store did not say whether the engine $_e exists ($_w), $NOT_ADDED"
+		fi
+		"$BAO" write "sys/mounts/$_e" type=transit >/dev/null 2>"$_err" \
+			|| { _w=$(http_code "$_err"); rm -f "$_err"; fail "The secrets store refused $AUTHOR's write to sys/mounts/$_e ($_w), $NOT_ADDED"; }
+		_changed=$((_changed + 1))
+		printf '<6>%s: added the transit engine %s.\n' "$OUTCOME_TAG" "$_e"
+	done
+	for _p in $POLICIES; do
+		_pf="$POLICY_DIR/$_p.hcl"
+		_want=$(cat -- "$_pf" 2>/dev/null) && [ -n "$_want" ] \
+			|| fail "The policy file $_pf could not be read, $NOT_ADDED"
+		_verb=added
+		# Compared as the shell reads both, so a trailing newline alone is no
+		# difference.
+		if _have=$("$BAO" read -field=policy "sys/policies/acl/$_p" 2>"$_err"); then
+			[ "$_have" = "$_want" ] && continue
+			_verb=rewrote
+		elif ! grep -q 'No value found at' "$_err" 2>/dev/null; then
+			_w=$(http_code "$_err"); rm -f "$_err"
+			fail "The secrets store did not say whether the policy $_p exists ($_w), $NOT_ADDED"
+		fi
+		"$BAO" write "sys/policies/acl/$_p" "policy=@$_pf" >/dev/null 2>"$_err" \
+			|| { _w=$(http_code "$_err"); rm -f "$_err"; fail "The secrets store refused $AUTHOR's write to sys/policies/acl/$_p ($_w), $NOT_ADDED"; }
+		_changed=$((_changed + 1))
+		printf '<6>%s: %s the policy %s from %s.\n' "$OUTCOME_TAG" "$_verb" "$_p" "$_pf"
+	done
+	for _ar in $AROLES; do
+		_r=${_ar%%:*} _rp=${_ar#*:}
+		if printf '%s\n' "$_list" | grep -qxF -- "$_r"; then continue; fi
+		"$BAO" write "auth/cert/certs/$_r" "certificate=@$CREDS/store-ca.pem" "allowed_common_names=$_r" \
+			"token_policies=$_rp" token_no_default_policy=true token_ttl=1h >/dev/null 2>"$_err" \
+			|| { _w=$(http_code "$_err"); rm -f "$_err"; fail "The secrets store refused $AUTHOR's write to auth/cert/certs/$_r ($_w), $NOT_ADDED"; }
+		_changed=$((_changed + 1))
+		printf '<6>%s: added the cert role %s, bound to %s.\n' "$OUTCOME_TAG" "$_r" "$_rp"
+	done
 }
 
 # record OUTCOME CHANGED PRIORITY REASON — the record, the marker cleared, the
