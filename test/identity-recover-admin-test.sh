@@ -321,8 +321,18 @@ RASPUTIN_RECOVER_CLIENT_SECRET"
 		ok "TC-1131-09 (status $want_rc) the launcher exits with kc.sh's status" "$(yes_if test "$RC" = "$want_rc")" "rc=$RC"
 	done
 
-	# TC-1131-10: exec refuses empty input, no client id and root.
-	for case in "stdin at EOF" "an empty line" "no client id" "uid 0" "id fails"; do
+	# TC-1131-10: exec refuses empty input, no client id, root and an unknown
+	# uid. "uid not numeric" proves the guard's non-numeric arm on every shell.
+	# "id fails" plants a failing id on PATH, which only takes effect where the
+	# shell runs id from PATH: busybox built to prefer its own applets runs its
+	# id applet whatever PATH says (F-1131-19), so that row is dash and bash only.
+	cases='"stdin at EOF" "an empty line" "no client id" "uid 0" "uid not numeric"'
+	case "$SH" in
+		busybox_sh | busybox_applets) ;;
+		*) cases="$cases \"id fails\"" ;;
+	esac
+	eval "set -- $cases"
+	for case in "$@"; do
 		setup
 		EXTRA=""
 		PATH_FIRST=""
@@ -333,6 +343,8 @@ RASPUTIN_RECOVER_CLIENT_SECRET"
 			"no client id") go "$SECRET
 " exec ;;
 			"uid 0") EXTRA=RASPUTIN_KCRECOVER_UID=0; go "$SECRET
+" exec rasputin-recover-t10 ;;
+			"uid not numeric") EXTRA=RASPUTIN_KCRECOVER_UID=unknown; go "$SECRET
 " exec rasputin-recover-t10 ;;
 			# F-1131-13: id cannot run and the uid seam is unset, so the uid is
 			# unknown; the guard must refuse, not read the empty value as non-root.
