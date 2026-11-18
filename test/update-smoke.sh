@@ -440,6 +440,22 @@ case "$BASE_STATE" in
 	*" data") STORE_WANT=present ;;
 	*) STORE_WANT=empty ;;
 esac
+# What boot 2's identity database first-boot record must say (TC-974-27,
+# F-974-10), amd64 only: arm64 masks the identity units. A base that carries
+# keycloak.conf (a release with geekdojo/geekdojo-brain#974) already started
+# both units on this boot and created the database on the persistent
+# partition, so boot 2's init gate finds a cluster and writes `untouched`. A
+# base without it never ran the identity service, so boot 2 creates the
+# database. `refused`, or anything else, is never accepted.
+if [ "$ARCH" = amd64 ]; then
+	ID_BASE="$(ssh_guest 'if [ -e /etc/rasputin/identity/keycloak.conf ]; then echo conf; else echo noconf; fi' 2>/dev/null | tr -d '\r')"
+	echo "base identity config on $OLD_VERSION: ${ID_BASE:-<unread>}"
+	case "$ID_BASE" in
+		conf) IDDB_WANT=untouched ;;
+		noconf) IDDB_WANT=created ;;
+		*) die "whether the base $OLD_VERSION carries /etc/rasputin/identity/keycloak.conf could not be read over SSH (got '${ID_BASE:-<nothing>}'), so what boot 2's identity database record should say is unknown" ;;
+	esac
+fi
 poweroff_guest
 
 # ---------------------------------------------- 2: the updated slot (trial) --
@@ -485,7 +501,7 @@ if boot 2; then
 		done
 		expect "boot 2: systemctl --failed lists no identity unit" "" \
 			"$(ssh_guest 'systemctl --failed --no-legend --plain' 2>/dev/null | grep keycloak)"
-		expect "boot 2: the identity database's first-boot record says created" created \
+		expect "boot 2: the identity database's first-boot record says $IDDB_WANT (base identity config: $ID_BASE)" "$IDDB_WANT" \
 			"$(ssh_guest 'sed -n "s/^outcome=//p" /run/rasputin-identity-db-init/outcome' 2>/dev/null | tr -d '\r')"
 	fi
 	# The pre-update operator signs in after the update (#967). Before the
