@@ -24,7 +24,10 @@
 # rasputin-app-* items are skipped with no author login, and the run is
 # recorded unchanged (or applied, if rasputin-rel-* items changed) with a
 # sentence saying so, at <6>. Not failed: that would raise #833's alert on
-# every boot of every such store over a gap no boot can close.
+# every boot of every such store over a gap no boot can close. The record's
+# author line says which: the api rolls a store whose provisioning recorded
+# author=absent forward to this release's init.json (#1132), and the next
+# start's provisioning then adds the app-key items through the author.
 #
 # PHASES, in rasputin-store-provision.service's order. The unit is started by
 # openbao.service's last ExecStartPost=, once the store's run has reached
@@ -91,12 +94,18 @@
 #
 #   The outcome record (read by the api's outcome reader, #833):
 #     /run/rasputin-store-provision/outcome   0600 root, tmpfs: THIS BOOT ONLY
-#   exactly four lines, each KEY=VALUE, the value everything after the first =:
+#   exactly five lines, each KEY=VALUE, the value everything after the first =:
 #     outcome=<applied|unchanged|failed>
 #     boot_id=<the kernel's boot_id, or - if unreadable>
 #     run_id=<this run's INVOCATION_ID, or - if unset>
 #     reason=<one English sentence, starting with a capital, ending with ".">
-#   written to a temp file and renamed, and replaced on each run.
+#     author=<present|absent|->
+#   written to a temp file and renamed, and replaced on each run. author is
+#   present or absent only when apply read the store's role list in a run
+#   that then completed (#1132): whether the role list holds rasputin-author.
+#   A failed run, a stopped one, one that left no result, and one with no
+#   item that needs the list record -, so a login or list failure is never
+#   read as a store with no author.
 #   `systemctl start rasputin-store-provision.service` returns once the run
 #   in flight has finished.
 #
@@ -170,11 +179,12 @@ OUTCOME_TAG=rasputin-store-provision
 OUTCOME_KMSG="${RASPUTIN_STOREPROV_KMSG:-/dev/kmsg}"
 . "$(dirname "$0")/../outcome/outcome.sh"
 
-# result OUTCOME CHANGED REASON — the work directory's result, for record and
-# stopped. A write that fails is said on stderr (the journal); stopped then
-# records the run failed without its reason.
+# result OUTCOME CHANGED REASON [AUTHOR] — the work directory's result, for
+# record and stopped. AUTHOR is present, absent or - (the default). A write
+# that fails is said on stderr (the journal); stopped then records the run
+# failed without its reason.
 result() {
-	if ! { rm -f "$RESULT" && printf 'outcome=%s\nchanged=%s\nreason=%s\n' "$1" "$2" "$3" > "$RESULT"; } 2>/dev/null; then
+	if ! { rm -f "$RESULT" && printf 'outcome=%s\nchanged=%s\nreason=%s\nauthor=%s\n' "$1" "$2" "$3" "${4:--}" > "$RESULT"; } 2>/dev/null; then
 		printf '<4>%s: The result could not be written to %s.\n' "$OUTCOME_TAG" "$RESULT" >&2
 	fi
 }
@@ -419,9 +429,16 @@ phase_apply() {
 		_changed=$((_changed + 1))
 		printf '<6>%s: added the cert role %s, bound to %s.\n' "$OUTCOME_TAG" "$_r" "$BINDABLE"
 	done
+	# Whether the store has the author, once its role list has been read
+	# (#1132). Recorded only by a run that completes: every fail below
+	# records -.
+	_author=-
+	if [ -n "$ROLES" ] || [ "$AITEMS" -gt 0 ]; then
+		if printf '%s\n' "$_list" | grep -qxF -- "$AUTHOR"; then _author=present; else _author=absent; fi
+	fi
 	_noauthor=""
 	if [ "$AITEMS" -gt 0 ]; then
-		if printf '%s\n' "$_list" | grep -qxF -- "$AUTHOR"; then
+		if [ "$_author" = present ]; then
 			apply_authored
 		else
 			_noauthor=1
@@ -430,13 +447,13 @@ phase_apply() {
 	rm -f "$_err"
 	BAO_TOKEN=""
 	if [ -n "$_noauthor" ] && [ "$_changed" -eq 0 ]; then
-		result unchanged 0 "$NO_AUTHOR"
+		result unchanged 0 "$NO_AUTHOR" "$_author"
 	elif [ -n "$_noauthor" ]; then
-		result applied "$_changed" "The provisioner added this release's missing mounts and roles, but this secrets store was initialised before release $AUTHOR_RELEASE, so it has no identity that can add the app-key engine; app keys are unavailable on it."
+		result applied "$_changed" "The provisioner added this release's missing mounts and roles, but this secrets store was initialised before release $AUTHOR_RELEASE, so it has no identity that can add the app-key engine; app keys are unavailable on it." "$_author"
 	elif [ "$_changed" -eq 0 ]; then
-		result unchanged 0 "Every mount, engine, policy and role this release lists was already in the secrets store."
+		result unchanged 0 "Every mount, engine, policy and role this release lists was already in the secrets store." "$_author"
 	else
-		result applied "$_changed" "The provisioner added this release's missing mounts, engines, policies and roles to the secrets store."
+		result applied "$_changed" "The provisioner added this release's missing mounts, engines, policies and roles to the secrets store." "$_author"
 	fi
 	exit 0
 }
@@ -492,14 +509,15 @@ apply_authored() {
 	done
 }
 
-# record OUTCOME CHANGED PRIORITY REASON — the record, the marker cleared, the
-# line logged. A failed record write is logged by outcome_record; the line
-# still goes out.
+# record OUTCOME CHANGED PRIORITY REASON [AUTHOR] — the record, the marker
+# cleared, the line logged. AUTHOR is present, absent or - (the default). A
+# failed record write is logged by outcome_record; the line still goes out.
+# The line is unchanged by AUTHOR: it is the record's alone.
 record() {
 	# umask 077: a directory this makes is 0700.
 	mkdir -p "$RUN" 2>/dev/null
 	outcome_record "$RECORD" "$RECORD_TMP" "outcome=$1" \
-		"boot_id=$(outcome_boot_id "$BOOTID_SRC")" "run_id=${INVOCATION_ID:--}" "reason=$4" || :
+		"boot_id=$(outcome_boot_id "$BOOTID_SRC")" "run_id=${INVOCATION_ID:--}" "reason=$4" "author=${5:--}" || :
 	if ! rm -f "$PENDING" 2>/dev/null || [ -e "$PENDING" ]; then
 		outcome_log 4 "The marker $PENDING could not be removed, so a later stop may record a second outcome for this run."
 	fi
@@ -520,8 +538,11 @@ case "${1:-}" in
 	apply) phase_apply ;;
 	record)
 		_o=$(result_field outcome) _c=$(result_field changed) _r=$(result_field reason)
+		# Only the two values apply can write; anything else is -.
+		_a=$(result_field author)
+		case "$_a" in present|absent) ;; *) _a=- ;; esac
 		case "$_o" in
-			applied|unchanged) record "$_o" "${_c:-0}" 6 "$_r" ;;
+			applied|unchanged) record "$_o" "${_c:-0}" 6 "$_r" "$_a" ;;
 			failed) record failed 0 3 "$_r" ;;
 			*) record failed 0 3 "The provisioner's run left no result, so whether this release's mounts and roles were added is not known." ;;
 		esac

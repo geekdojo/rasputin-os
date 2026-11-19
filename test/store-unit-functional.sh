@@ -108,6 +108,18 @@
 #      identifier (13d, TC-801-34). Scenario 12's staged openbao-version is
 #      the live store's sys/health version (F-801-02), and every start in
 #      scenarios 1 to 12 passed the gate (TC-801-35)
+#  14  a store's roll-forward, the unit's third ExecStartPre=
+#      (geekdojo/geekdojo-brain#1132, TC-1132-13): a store initialised from
+#      the previous release's init.json holds one apps/<ID>/<name> and one
+#      apps/<ID>/_runtime/<name> entry; a request naming this boot and a
+#      restart move it aside (moved, under the unit's InvocationID), the
+#      store initialises itself and provision adds the Transit engine,
+#      policy and role through the author it now has; a restart with no
+#      commit puts the old tree back (restored), both entries read back
+#      byte-identical and provision says author=absent; the same again with
+#      both entries written back and commit written, then a restart, says
+#      finished, empties store-migrate/ and provision says unchanged with
+#      author=present. Values are compared by SHA-256 only.
 # The provisioner runs in every scenario from 2 on, as on a node: each start
 # of the store that reaches READY starts it. Scenario 3's first boot carries TC-805-27's
 # shipped provision.tsv half, which since #1084 adds the app-key items
@@ -148,6 +160,10 @@
 #   * scenario 13's drop-in ExecStartPre= after the shipped three, which
 #     hashes the data directory between the gate and bao, its pre-update copy
 #     built by the test in #800's layout, and its version markers;
+#   * scenario 14's previous-release init.json (scenario 10's), its two
+#     entries written through the api's role with the bao HTTP API, the
+#     request and commit files written as the api writes them, and the
+#     inspector's drop-in again;
 #   * `mount --make-rshared /`. A booted image gets a shared root from systemd
 #     itself (mount-setup); a container's root is private, and without this the
 #     credentials systemd mounts never reach the service.
@@ -180,6 +196,7 @@ STOREINIT="$OVERLAY/usr/lib/rasputin/store-init/rasputin-store-init.sh"
 STORERESTORE="$OVERLAY/usr/lib/rasputin/store-restore/rasputin-store-restore.sh"
 STOREROLLBACK="$OVERLAY/usr/lib/rasputin/store-rollback/rasputin-store-rollback.sh"
 STORESWAP="$OVERLAY/usr/lib/rasputin/store-swap/swap.sh"
+STOREMIGRATE="$OVERLAY/usr/lib/rasputin/store-migrate/rasputin-store-migrate.sh"
 APIUNIT="$OVERLAY/etc/systemd/system/rasputin-api.service"
 PUNIT="$OVERLAY/etc/systemd/system/rasputin-store-provision.service"
 PSCRIPT="$OVERLAY/usr/lib/rasputin/store-provision/rasputin-store-provision.sh"
@@ -201,7 +218,7 @@ for t in openssl make curl tar jq; do
 	command -v "$t" >/dev/null 2>&1 || { echo "FAILED: this test needs $t, and it is not on PATH."; exit 1; }
 done
 for f in "$UNIT" "$TMPFILES" "$POSTBUILD" "$PKG/openbao.mk" "$PKG/openbao.hash" "$TLS_REFUSAL" \
-	"$STOREINIT" "$STORERESTORE" "$STOREROLLBACK" "$STORESWAP" "$APIUNIT" "$OUTCOME_LIB" "$APIPKG/rasputin-api.mk" "$APIPKG/rasputin-api.hash" "$PUNIT" "$PSCRIPT" "$PTSV"; do
+	"$STOREINIT" "$STORERESTORE" "$STOREROLLBACK" "$STOREMIGRATE" "$STORESWAP" "$APIUNIT" "$OUTCOME_LIB" "$APIPKG/rasputin-api.mk" "$APIPKG/rasputin-api.hash" "$PUNIT" "$PSCRIPT" "$PTSV"; do
 	[ -f "$f" ] || { echo "FAILED: the file $f is missing."; exit 1; }
 done
 # The store's main config, which this test never writes for itself (TC-756-10).
@@ -280,6 +297,7 @@ fake_root() {
 		"$_r/board/rasputin/common/rootfs-overlay/usr/lib/rasputin/store-restore" \
 		"$_r/board/rasputin/common/rootfs-overlay/usr/lib/rasputin/store-rollback" \
 		"$_r/board/rasputin/common/rootfs-overlay/usr/lib/rasputin/store-swap" \
+		"$_r/board/rasputin/common/rootfs-overlay/usr/lib/rasputin/store-migrate" \
 		"$_r/board/rasputin/common/rootfs-overlay/usr/lib/rasputin/outcome" \
 		"$_r/board/rasputin/common/rootfs-overlay/usr/lib/rasputin/store-provision" \
 		"$_r/board/rasputin/common/rootfs-overlay/etc/rasputin/openbao"
@@ -292,6 +310,7 @@ fake_root() {
 	cp "$STORERESTORE" "$_r/board/rasputin/common/rootfs-overlay/usr/lib/rasputin/store-restore/"
 	cp "$STOREROLLBACK" "$_r/board/rasputin/common/rootfs-overlay/usr/lib/rasputin/store-rollback/"
 	cp "$STORESWAP" "$_r/board/rasputin/common/rootfs-overlay/usr/lib/rasputin/store-swap/"
+	cp "$STOREMIGRATE" "$_r/board/rasputin/common/rootfs-overlay/usr/lib/rasputin/store-migrate/"
 	cp "$OUTCOME_LIB" "$_r/board/rasputin/common/rootfs-overlay/usr/lib/rasputin/outcome/"
 	cp "$APIPKG/rasputin-api.mk" "$APIPKG/rasputin-api.hash" "$_r/package/rasputin-api/"
 	cp "$POSTBUILD" "$_r/board/rasputin/common/"
@@ -384,6 +403,7 @@ install -D -m 0644 /overlay/etc/rasputin/openbao/init.json /etc/rasputin/openbao
 install -D -m 0755 /overlay/usr/lib/rasputin/store-init/rasputin-store-init.sh /usr/lib/rasputin/store-init/rasputin-store-init.sh
 install -D -m 0755 /overlay/usr/lib/rasputin/store-restore/rasputin-store-restore.sh /usr/lib/rasputin/store-restore/rasputin-store-restore.sh
 install -D -m 0755 /overlay/usr/lib/rasputin/store-rollback/rasputin-store-rollback.sh /usr/lib/rasputin/store-rollback/rasputin-store-rollback.sh
+install -D -m 0755 /overlay/usr/lib/rasputin/store-migrate/rasputin-store-migrate.sh /usr/lib/rasputin/store-migrate/rasputin-store-migrate.sh
 install -D -m 0644 /overlay/usr/lib/rasputin/store-swap/swap.sh /usr/lib/rasputin/store-swap/swap.sh
 install -D -m 0644 /overlay/usr/lib/rasputin/outcome/outcome.sh /usr/lib/rasputin/outcome/outcome.sh
 # The store provisioner (#805): its unit, its script and the shipped
@@ -398,7 +418,7 @@ install -m 0644 /root/openbao-policy/*.hcl /usr/share/rasputin/openbao-policy/
 # TEST HARNESS: in a privileged container /dev/kmsg is the host's, so the
 # outcome writer's console line goes to a file the test reads instead.
 mkdir -p /etc/systemd/system/openbao.service.d
-printf '[Service]\nEnvironment=RASPUTIN_STOREINIT_KMSG=/run/store-init-console\nEnvironment=RASPUTIN_STORERESTORE_KMSG=/run/store-restore-console\nEnvironment=RASPUTIN_STOREROLLBACK_KMSG=/run/store-rollback-console\n' >/etc/systemd/system/openbao.service.d/harness-console.conf
+printf '[Service]\nEnvironment=RASPUTIN_STOREINIT_KMSG=/run/store-init-console\nEnvironment=RASPUTIN_STORERESTORE_KMSG=/run/store-restore-console\nEnvironment=RASPUTIN_STOREROLLBACK_KMSG=/run/store-rollback-console\nEnvironment=RASPUTIN_STOREMIGRATE_KMSG=/run/store-migrate-console\n' >/etc/systemd/system/openbao.service.d/harness-console.conf
 mkdir -p /etc/systemd/system/rasputin-store-provision.service.d
 printf '[Service]\nEnvironment=RASPUTIN_STOREPROV_KMSG=/run/store-provision-console\n' >/etc/systemd/system/rasputin-store-provision.service.d/harness-console.conf
 systemctl daemon-reload
@@ -804,6 +824,29 @@ case "$1" in
 		login api rasputin-api /root/api.token || { echo "login failed"; exit 1; }
 		c --cert /pki/api.pem --key /pki/api.key -H "@/root/api.token.hdr" -H "X-Rasputin-Job-Id: $2" -o /dev/null -w '%{http_code}' \
 			"$U/rasputin-secrets/data/apps/store-unit-test"
+		;;
+	put)
+		# put PATH — a fresh random value at rasputin-secrets/data/PATH
+		# through the api's role, kept in /root/val.<PATH with / as _> for
+		# scenario 14's write-back and comparison; prints the status.
+		login api rasputin-api /root/api.token || { echo "login failed"; exit 1; }
+		_f=/root/val.$(printf '%s' "$2" | tr / _)
+		[ "${3:-}" = again ] || od -An -N12 -tx1 /dev/urandom | tr -d ' \n' >"$_f"
+		c --cert /pki/api.pem --key /pki/api.key -H "@/root/api.token.hdr" -o /dev/null -w '%{http_code}' \
+			-X POST --data "{\"data\":{\"v\":\"$(cat "$_f")\"}}" "$U/rasputin-secrets/data/$2"
+		;;
+	same)
+		# same PATH — "match" when the value read back at PATH through the
+		# api's role has the kept value's SHA-256, else "differ" or the
+		# status. Only hashes are compared; no value is printed.
+		login api rasputin-api /root/api.token || { echo "login failed"; exit 1; }
+		_f=/root/val.$(printf '%s' "$2" | tr / _)
+		_code=$(c --cert /pki/api.pem --key /pki/api.key -H "@/root/api.token.hdr" -o /root/same.json -w '%{http_code}' "$U/rasputin-secrets/data/$2")
+		[ "$_code" = 200 ] || { echo "$_code"; exit 0; }
+		_got=$(sed -n 's/.*"data":{"v":"\([^"]*\)"}.*/\1/p' /root/same.json | tr -d '\n' | sha256sum | cut -c1-64)
+		_want=$(tr -d '\n' <"$_f" | sha256sum | cut -c1-64)
+		rm -f /root/same.json
+		if [ "$_got" = "$_want" ]; then echo match; else echo differ; fi
 		;;
 	read)
 		# read — the sentinel's status through the api's role; the body, when
@@ -1284,8 +1327,8 @@ api_restart
 pid1=$(pshow InvocationID); sid=$(show InvocationID)
 prec=$(inside "cat $PRECORD")
 pline=$(inside "cat /run/store-provision-console")
-check "TC-805-29 the record is exactly four lines, outcome=applied" \
-	"$(yes_if eval '[ "$(printf "%s\n" "$prec" | cut -d= -f1 | tr "\n" " ")" = "outcome boot_id run_id reason " ] && [ "$(pfield outcome "$prec")" = applied ]')" "$prec"
+check "TC-805-29 TC-1132-11 the record is exactly five lines, outcome=applied and author=present (#1132)" \
+	"$(yes_if eval '[ "$(printf "%s\n" "$prec" | cut -d= -f1 | tr "\n" " ")" = "outcome boot_id run_id reason author " ] && [ "$(pfield outcome "$prec")" = applied ] && [ "$(pfield author "$prec")" = present ]')" "$prec"
 check "TC-805-29 the record's run_id is the unit's InvocationID ($pid1)" "$(yes_if [ "$(pfield run_id "$prec")" = "$pid1" ])" "$prec"
 check "TC-805-29 the record is 0600 root" "$(yes_if [ "$(inside "stat -c '%a %u:%g' $PRECORD")" = "600 0:0" ])" "$(inside "stat -c '%a %u:%g' $PRECORD")"
 check "TC-805-29 the <6> line says applied changed=2" "$(yes_if contains '<6>rasputin-store-provision: outcome=applied changed=2 ' "$pline")" "$pline"
@@ -1639,7 +1682,7 @@ install -m 0644 /overlay/etc/systemd/system/rasputin-api.service /etc/systemd/sy
 mkdir -p /etc/systemd/system/rasputin-api.service.d
 printf '[Service]\nType=simple\nWatchdogSec=0\nExecStart=\nExecStart=/root/stub-api.sh\n' >/etc/systemd/system/rasputin-api.service.d/harness-stub.conf
 printf '[Unit]\nDescription=TEST HARNESS stand-in firstboot\n[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/usr/bin/true\n' >/etc/systemd/system/rasputin-firstboot.service
-printf '[Service]\nEnvironment=RASPUTIN_STOREINIT_KMSG=/run/store-init-console\nEnvironment=RASPUTIN_STORERESTORE_KMSG=/run/store-restore-console\nEnvironment=RASPUTIN_STOREROLLBACK_KMSG=/run/store-rollback-console\n' >/etc/systemd/system/openbao.service.d/harness-console.conf
+printf '[Service]\nEnvironment=RASPUTIN_STOREINIT_KMSG=/run/store-init-console\nEnvironment=RASPUTIN_STORERESTORE_KMSG=/run/store-restore-console\nEnvironment=RASPUTIN_STOREROLLBACK_KMSG=/run/store-rollback-console\nEnvironment=RASPUTIN_STOREMIGRATE_KMSG=/run/store-migrate-console\n' >/etc/systemd/system/openbao.service.d/harness-console.conf
 systemctl daemon-reload" >/dev/null 2>&1 || check "the shipped api unit, its stub drop-in and the stand-in firstboot are installed" 1
 want_sha=$(openssl dgst -sha256 -r "$APIUNIT" | cut -d' ' -f1)
 got_sha=$(inside "sha256sum /etc/systemd/system/rasputin-api.service" | cut -d' ' -f1)
@@ -1932,6 +1975,106 @@ check "TC-801-34 every gate outcome line carries SYSLOG_IDENTIFIER=rasputin-stor
 inside "systemctl reset-failed openbao.service $PROV 2>/dev/null
 rm -f /etc/systemd/system/openbao.service.d/harness-gate-hash.conf $COPYF $ASIDEF; rm -rf /root/copy-stage /root/aside-x /root/sentinel-p /root/sentinel-q
 printf '%s\n' '$PIN' >$MARK; systemctl daemon-reload" >/dev/null 2>&1
+
+echo
+echo "14. a store's roll-forward, the root step (TC-1132-13)"
+MREC=/run/rasputin-store-migrate/outcome
+MS=$V/store-migrate
+E1=apps/tc1132app/db-password
+E2=apps/tc1132app/_runtime/relay-token
+mfield() { inside "sed -n 's/^$1=//p' $MREC 2>/dev/null"; }
+prov() { pfield "$1" "$(inside "cat $PRECORD")"; }
+# shellcheck disable=SC2034 # read inside the eval strings below
+this_boot=$(inside "cat /proc/sys/kernel/random/boot_id")
+# store_restart LABEL — restart the store as the api does, then wait for the
+# facts: sys/health 200 and the provisioner's run for this start finished.
+store_restart() {
+	_sr_prev=$(pshow InvocationID)
+	inside "systemctl restart openbao.service" >/dev/null 2>&1
+	wait_for "$1: sys/health answers 200" "$HEALTH_200" || fails=$((fails + 1))
+	prov_settled "$_sr_prev" || fails=$((fails + 1))
+}
+# request_this_boot — request as the api writes it: boot_id and job_id, 0600.
+request_this_boot() { inside "printf 'boot_id=%s\njob_id=tc-1132-13\n' \"\$(cat /proc/sys/kernel/random/boot_id)\" >$MS/request && chmod 0600 $MS/request"; }
+# TEST HARNESS: a store initialised from the previous release's init.json
+# (scenario 10's), the inspector's drop-in so the test can read what
+# provision adds, and every record of this boot cleared.
+inside "systemctl stop rasputin-api.service openbao.service; systemctl reset-failed openbao.service $PROV 2>/dev/null
+rm -rf $V/openbao/* $V/openbao/.[!.]* $V/openbao-audit/* $MS/* /run/rasputin-store-init /run/rasputin-store-provision /run/rasputin-store-migrate /run/store-migrate-console
+install -m 0644 /root/init-previous.json /etc/rasputin/openbao/init.json
+install -m 0644 /overlay/etc/rasputin/openbao/provision.tsv /etc/rasputin/openbao/provision.tsv
+printf '[Service]\nExecStart=\nExecStart=%s -config=/etc/rasputin/openbao/test-inspector.json\n' '$SHIPPED_EXEC' >/etc/systemd/system/openbao.service.d/harness-inspector.conf
+systemctl daemon-reload" >/dev/null 2>&1 || check "the previous-release store is set up" 1
+check "TC-1132-13 tmpfiles made $MS 0700 root:root (got '$(inside "stat -c '%a %u:%g' $MS")')" \
+	"$(yes_if [ "$(inside "stat -c '%a %u:%g' $MS")" = "700 0:0" ])"
+store_restart "the previous-release store"
+check "TC-1132-13 precondition: provision says author=absent on the previous-release store (got '$(prov author)')" "$(yes_if [ "$(prov author)" = absent ])"
+check "TC-1132-13 precondition: the start with nothing to migrate wrote no migrate record" "$(yes_if inside "test ! -e $MREC")"
+for e in "$E1" "$E2"; do
+	code=$(inside "sh /root/store-read.sh put $e")
+	check "TC-1132-13 the api's role writes $e (got '$code')" "$(yes_if [ "$code" = 200 ])"
+done
+
+echo "  -- 14a the move-aside"
+inside "install -m 0644 /overlay/etc/rasputin/openbao/init.json /etc/rasputin/openbao/init.json; rm -rf /run/rasputin-store-init" >/dev/null 2>&1
+request_this_boot || check "the request is written" 1
+store_restart "the move-aside start"
+inv=$(show InvocationID)
+check "TC-1132-13 os.store_migrate says moved (got '$(mfield outcome)')" "$(yes_if [ "$(mfield outcome)" = moved ])"
+check "TC-1132-13 its run_id is the unit's InvocationID ($inv) and its boot_id this boot" \
+	"$(yes_if eval '[ "${#inv}" = 32 ] && [ "$(mfield run_id)" = "$inv" ] && [ "$(mfield boot_id)" = "$this_boot" ]')" "$(inside "cat $MREC")"
+check "TC-1132-13 the migrate step's <6> moved line reached its console sink" \
+	"$(yes_if contains '<6>rasputin-store-migrate: outcome=moved ' "$(inside "cat /run/store-migrate-console")")"
+check "TC-1132-13 store-init records initialised, this boot" \
+	"$(yes_if eval 'contains "outcome=initialised" "$(inside "cat $RECORD")" && contains "boot_id=$this_boot" "$(inside "cat $RECORD")"')" "$(inside "cat $RECORD")"
+check "TC-1132-13 provision records applied with author=present under this start's run ($(prov run_id))" \
+	"$(yes_if eval '[ "$(prov outcome)" = applied ] && [ "$(prov author)" = present ] && [ "$(prov run_id)" = "$(pshow InvocationID)" ]')" "$(inside "cat $PRECORD")"
+r14=$(inside "sh /root/store-read.sh inspect")
+check "TC-1132-13 the store holds the Transit engine rasputin-app-keys, its policy and its role" \
+	"$(yes_if eval '[ "$(field mounts "$r14" | jq -r ".data[\"rasputin-app-keys/\"].type")" = transit ] && field policies "$r14" | jq -e ".data.keys | index(\"rasputin-app-keys\")" >/dev/null && field roles "$r14" | jq -e ".data.keys | index(\"rasputin-app-keys\") and index(\"rasputin-author\")" >/dev/null')" \
+	"$(field roles "$r14") $(field policies "$r14")"
+check "TC-1132-13 aside.tar and attempt are in place, 0600 root, and request is gone" \
+	"$(yes_if [ "$(inside "stat -c '%a %u' $MS/aside.tar $MS/attempt; test ! -e $MS/request && echo norequest")" = "600 0
+600 0
+norequest" ])" "$(inside "ls -la $MS")"
+check "TC-1132-13 the new store does not hold $E1 (got '$(inside "sh /root/store-read.sh same $E1")')" \
+	"$(yes_if [ "$(inside "sh /root/store-read.sh same $E1")" = 404 ])"
+
+echo "  -- 14b a restart with no commit puts the old tree back"
+store_restart "the put-back start"
+inv=$(show InvocationID)
+check "TC-1132-13 os.store_migrate says restored under the new run ($inv)" \
+	"$(yes_if eval '[ "$(mfield outcome)" = restored ] && [ "$(mfield run_id)" = "$inv" ]')" "$(inside "cat $MREC")"
+for e in "$E1" "$E2"; do
+	got=$(inside "sh /root/store-read.sh same $e")
+	check "TC-1132-13 $e reads back byte-identical, by SHA-256 (got '$got')" "$(yes_if [ "$got" = match ])"
+done
+check "TC-1132-13 provision says author=absent (got '$(prov author)')" "$(yes_if [ "$(prov author)" = absent ])"
+own=$(inside "find $V/openbao ! -uid $BAO_UID | wc -l; find $V/openbao -name '.rasputin-migrate-*' | wc -l; ls -A $MS | wc -l")
+check "TC-1132-13 the data is owned by $BAO_UID, no work directory is left and store-migrate/ is empty (got '$(printf '%s' "$own" | tr '\n' ' ')')" \
+	"$(yes_if [ "$own" = "0
+0
+0" ])"
+
+echo "  -- 14c moved, written back, committed, then the next start"
+request_this_boot || check "the second request is written" 1
+store_restart "the second move-aside start"
+check "TC-1132-13 os.store_migrate says moved again (got '$(mfield outcome)')" "$(yes_if [ "$(mfield outcome)" = moved ])"
+for e in "$E1" "$E2"; do
+	code=$(inside "sh /root/store-read.sh put $e again")
+	check "TC-1132-13 $e is written back to the new store through the api's role (got '$code')" "$(yes_if [ "$code" = 200 ])"
+done
+inside "touch $MS/commit && chmod 0600 $MS/commit" || check "the commit is written" 1
+store_restart "the start after the commit"
+check "TC-1132-13 os.store_migrate says finished (got '$(mfield outcome)')" "$(yes_if [ "$(mfield outcome)" = finished ])"
+check "TC-1132-13 store-migrate/ is empty (got '$(inside "ls -A $MS" | tr '\n' ' ')')" "$(yes_if [ -z "$(inside "ls -A $MS")" ])"
+check "TC-1132-13 provision says unchanged with author=present" \
+	"$(yes_if eval '[ "$(prov outcome)" = unchanged ] && [ "$(prov author)" = present ]')" "$(inside "cat $PRECORD")"
+for e in "$E1" "$E2"; do
+	got=$(inside "sh /root/store-read.sh same $e")
+	check "TC-1132-13 $e reads back byte-identical on the migrated store, by SHA-256 (got '$got')" "$(yes_if [ "$got" = match ])"
+done
+inside "systemctl stop openbao.service; rm -f /etc/systemd/system/openbao.service.d/harness-inspector.conf /root/val.*; systemctl daemon-reload" >/dev/null 2>&1
 
 echo
 if [ "$fails" -eq 0 ]; then

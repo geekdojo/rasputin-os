@@ -169,6 +169,21 @@
 0600  optional  /var/lib/rasputin/openbao-rolled-back.tar
 0700  optional  /var/lib/rasputin/openbao/.rasputin-rollback-new       990  990
 0700  optional  /var/lib/rasputin/openbao/.rasputin-rollback-old
+# A store's roll-forward (geekdojo/geekdojo-brain#1132). The state directory
+# is root's and tmpfiles makes it on every boot. request and commit are the
+# api's, aside.tar and attempt the migrate step's, openbao.service's third
+# ExecStartPre=; each exists only during a migration. The work directories
+# exist only during that step's start, or after one that was interrupted:
+# the unpacked old tree belongs to the store's uid, as the data directory
+# does, and the moved-aside entries' directory is root's, as the restore and
+# rollback steps' are.
+0700  required  /var/lib/rasputin/store-migrate
+0600  optional  /var/lib/rasputin/store-migrate/request
+0600  optional  /var/lib/rasputin/store-migrate/attempt
+0600  optional  /var/lib/rasputin/store-migrate/aside.tar
+0600  optional  /var/lib/rasputin/store-migrate/commit
+0700  optional  /var/lib/rasputin/openbao/.rasputin-migrate-new        990  990
+0700  optional  /var/lib/rasputin/openbao/.rasputin-migrate-old
 # tls/ and the three leaf directories are root's, written by the api (the
 # provisioner's since #805). Each leaf
 # directory holds leaf.key and leaf.pem. leaf.pem is NOT declared, and the leaf

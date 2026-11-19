@@ -93,6 +93,25 @@ ExecStartPre=+/usr/lib/rasputin/store-restore/rasputin-store-restore.sh
 # never runs on data newer than itself. Restart=always runs it again on each
 # restart, until the start limit leaves the unit failed.
 ExecStartPre=+/usr/lib/rasputin/store-rollback/rasputin-store-rollback.sh
+# The root step of a store's roll-forward (geekdojo/geekdojo-brain#1132). A
+# store initialised before release 2026.11.3 has no author role and no way to
+# gain one, so the api rolls it forward: it reads the store's secrets into
+# memory, writes /var/lib/rasputin/store-migrate/request naming this boot, and
+# restarts the store. This step then moves the old tree aside to aside.tar, so
+# bao initialises itself from this image's init.json; the api writes every
+# secret back and writes commit. Any start before the commit puts the old tree
+# back from aside.tar; the start after it deletes aside.tar. A request from
+# another boot is refused, and a staged restore cancels the migration. Its
+# record /run/rasputin-store-migrate/outcome becomes the api's job check and,
+# when not moved or finished, its alert. Third: after the version gate, which
+# decides on the data the store last ran, and before the self-init hook's pre,
+# so that hook sees the empty directory the move-aside leaves. Nothing to do
+# is a silent no-op. `+` runs it as root outside this sandbox (the state
+# directory and the record are root's); no `-`, because a put-back that cannot
+# finish must fail the store's start, so bao never runs on a half-restored
+# tree. Restart=always runs it again on each restart, and each run rebuilds
+# from aside.tar alone, so an interrupted put-back converges.
+ExecStartPre=+/usr/lib/rasputin/store-migrate/rasputin-store-migrate.sh
 # The self-init outcome (#804): one console and journal line and the record
 # /run/rasputin-store-init/outcome, which #833's reader turns into a job and an
 # alert. pre notes a start that begins on an empty data directory; started

@@ -58,11 +58,15 @@ SEAL="${RASPUTIN_STORERESTORE_SEAL:-/var/lib/rasputin/openbao-seal}"
 
 umask 077
 
+# Both read by outcome.sh.
+# shellcheck disable=SC2034
 OUTCOME_TAG=rasputin-store-restore
+# shellcheck disable=SC2034
 OUTCOME_KMSG="${RASPUTIN_STORERESTORE_KMSG:-/dev/kmsg}"
 . "$(dirname "$0")/../outcome/outcome.sh"
-# present, move_entries and roll_back, shared with rasputin-store-rollback.sh
-# (geekdojo/geekdojo-brain#801).
+# present, move_entries, roll_back and data_owner, shared with
+# rasputin-store-rollback.sh (geekdojo/geekdojo-brain#801) and
+# rasputin-store-migrate.sh (#1132).
 . "$(dirname "$0")/../store-swap/swap.sh"
 
 MARK="$PENDING/applied"
@@ -150,13 +154,9 @@ for _m in seal-key seal.hcl; do
 done
 
 # --- 5. copy in ---------------------------------------------------------------
-# The data directory's own owner, read the way the at-rest audit reads it, so
-# no id is written here.
-_owner=$(ls -ldn "$DATA" 2>/dev/null | awk 'NR == 1 { print $3 ":" $4 }')
-case "$_owner" in
-	[0-9]*:[0-9]*) ;;
-	*) copy_failed "reads the owner of $DATA" ;;
-esac
+# The data directory's own owner (data_owner, swap.sh), so no id is written
+# here.
+_owner=$(data_owner "$DATA") || copy_failed "reads the owner of $DATA"
 rm -rf "$DNEW" "$SNEW" 2>/dev/null
 present "$DNEW" && copy_failed "removes the leftover $DNEW"
 present "$SNEW" && copy_failed "removes the leftover $SNEW"

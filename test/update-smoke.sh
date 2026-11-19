@@ -64,7 +64,22 @@
 #      image's init.json, which makes the author (#1084), so the provisioner's
 #      first run adds the app-key engine, policy and role and records applied,
 #      and the second start's unchanged; a base's store has no author and
-#      records unchanged both times.
+#      records unchanged both times. The provisioner's record carries a fifth
+#      line, author, which is present in every case boot 2 checks
+#      (geekdojo/geekdojo-brain#1132).
+#      A store's roll-forward (geekdojo/geekdojo-brain#1132, TC-1132-26):
+#      when the base's store has data and the base's init.json has no
+#      rasputin-author role (MIGRATE_WANT=yes, see THE BASE'S STORE STATE),
+#      the api rolls the store forward on boot 2. Before any store check the
+#      harness waits for the fact of that job's commit,
+#      /var/lib/rasputin/store-migrate/commit, and stops waiting on the fact
+#      that it will not come, a migrate record of restored, failed or
+#      superseded. The first start then shows the migrate record moved this
+#      boot, the store-init record initialised this boot with one line, and
+#      the provisioner applied with author=present; the api-pulled second
+#      start shows the migrate record finished, no commit and no aside.tar,
+#      the provisioner unchanged, and one self-init line this boot. Without a
+#      migration there is no migrate record.
 #      Then the token scan of every file under
 #      /var/lib/rasputin (but the container image stores) and every boot's
 #      journal (TC-804-22). The store runs as uid 990, its only socket is
@@ -111,7 +126,10 @@
 # store start records nothing. So the harness reads those two facts in boot 1,
 # after the install, with rasputin-api and openbao stopped so neither can
 # change before the power-off, and expects what the scripts decide from them.
-# Never from the base's version string.
+# A third fact says whether boot 2 rolls the store forward (#1132): the
+# base's store has data and the base's own init.json, which initialised it,
+# has no role-rasputin-author (MIGRATE_WANT). Never from the base's version
+# string.
 #
 # WHAT IT DOES NOT PROVE. `virt` is not a Pi: the EEPROM bootloader, config.txt
 # kernel selection and the real tryboot flag are emulated by reading the same
@@ -445,6 +463,19 @@ case "$BASE_STATE" in
 	*" data") STORE_WANT=present ;;
 	*) STORE_WANT=empty ;;
 esac
+# Whether boot 2 rolls the base's store forward (geekdojo/geekdojo-brain#1132):
+# a store with data, initialised from an init.json with no author role. grep's
+# status 1 is "no match"; anything else is an unread file, which fails the run
+# when the store has data.
+BASE_AUTHOR="$(ssh_guest 'f=/etc/rasputin/openbao/init.json
+if [ ! -e "$f" ]; then echo noinit; else grep -q role-rasputin-author "$f"; r=$?
+case "$r" in 0) echo author ;; 1) echo noauthor ;; *) echo unreadable ;; esac; fi' 2>/dev/null | tr -d '\r')"
+echo "base store author on $OLD_VERSION: ${BASE_AUTHOR:-<unread>}"
+case "$STORE_WANT:$BASE_AUTHOR" in
+	present:noauthor|present:noinit) MIGRATE_WANT=yes ;;
+	present:author|empty:*) MIGRATE_WANT=no ;;
+	*) die "the base $OLD_VERSION's init.json could not be read over SSH (got '${BASE_AUTHOR:-<nothing>}'), so whether boot 2 rolls its store forward is unknown" ;;
+esac
 # What boot 2's identity database first-boot record must say (TC-974-27,
 # F-974-10), amd64 only: arm64 masks the identity units. A base that carries
 # keycloak.conf (a release with geekdojo/geekdojo-brain#974) already started
@@ -656,7 +687,7 @@ if boot 2; then
 			if [ "${_h:-0}" -gt 0 ] 2>/dev/null; then pass "boot 2 $_w: (8) audit.log holds hmac-sha256: values ($_h lines)"
 			else fail "boot 2 $_w: (8) audit.log holds no hmac-sha256: value (got '${_h:-<nothing>}')"; fi
 			expect "boot 2 $_w: (8) audit.log does not hold the written value" 0 "$(kv audit_value "$_t")"
-			if [ "$STORE_WANT" = empty ]; then
+			if [ "$STORE_WANT" = empty ] || [ "$MIGRATE_WANT" = yes ]; then
 				expect "boot 2 $_w: (9) the outcome record says initialised" initialised "$(kv record_outcome "$_t")"
 				expect "boot 2 $_w: (9) the record is this boot's, three lines" "this 3" "$(kv record_boot "$_t") $(kv record_lines "$_t")"
 				expect "boot 2 $_w: (9) one rasputin-store-init: line this boot" 1 "$(kv store_init_lines "$_t")"
@@ -667,16 +698,46 @@ if boot 2; then
 			# TC-805-36: the store's provisioner (geekdojo/geekdojo-brain#805).
 			# #1084: a store this image initialised gets the app-key items on
 			# its first start (applied); every other run finds nothing to add.
+			# #1132: so does a store rolled forward on this boot, whose first
+			# start after the move-aside initialised it from this image.
 			_pw=unchanged
-			[ "$STORE_WANT" = empty ] && [ "$_w" = "first start" ] && _pw=applied
+			{ [ "$STORE_WANT" = empty ] || [ "$MIGRATE_WANT" = yes ]; } && [ "$_w" = "first start" ] && _pw=applied
 			expect "boot 2 $_w: (12) the provisioner's record says $_pw" "$_pw" "$(kv prov_record_outcome "$_t")"
 			expect "boot 2 $_w: (12) the provisioner's record is 0600 root" "-rw------- 0 0" "$(kv prov_record_mode "$_t")"
-			expect "boot 2 $_w: (12) the provisioner's record holds exactly the four contract lines" "outcome,boot_id,run_id,reason," "$(kv prov_record_keys "$_t")"
+			expect "boot 2 $_w: (12) the provisioner's record holds exactly the five contract lines" "outcome,boot_id,run_id,reason,author," "$(kv prov_record_keys "$_t")"
+			expect "boot 2 $_w: (12) the provisioner's record says author=present" present "$(kv prov_record_author "$_t")"
 			_pu="$(kv "prov_${_pw}_lines" "$_t")"
 			if [ "${_pu:-0}" -ge 1 ] 2>/dev/null; then pass "boot 2 $_w: (12) a rasputin-store-provision: outcome=$_pw line this boot ($_pu)"
 			else fail "boot 2 $_w: (12) no rasputin-store-provision: outcome=$_pw line this boot (got '${_pu:-<nothing>}')"; fi
 			expect "boot 2 $_w: (12) no rasputin-store-provision: outcome=failed line this boot" 0 "$(kv prov_failed_lines "$_t")"
+			# TC-1132-26: the roll-forward's record and state files.
+			if [ "$MIGRATE_WANT" = yes ]; then
+				_mw=finished
+				[ "$_w" = "first start" ] && _mw=moved
+				expect "boot 2 $_w: (13) the migrate record says $_mw, this boot" "$_mw this" "$(kv migrate_record_outcome "$_t") $(kv migrate_record_boot "$_t")"
+				if [ "$_w" != "first start" ]; then
+					expect "boot 2 $_w: (13) no commit and no aside.tar are left" "absent absent" "$(kv migrate_commit "$_t") $(kv migrate_aside "$_t")"
+				fi
+			else
+				expect "boot 2 $_w: (13) no migrate record: nothing to roll forward" absent "$(kv migrate_record_outcome "$_t")"
+			fi
 		}
+		# The roll-forward's commit (TC-1132-26): the api writes it once every
+		# secret is back in the new store. A migrate record of restored, failed
+		# or superseded is the fact that it will not come, and ends the wait.
+		if [ "$MIGRATE_WANT" = yes ]; then
+			MIGRATE_DONE="test -e /var/lib/rasputin/store-migrate/commit"
+			MIGRATE_LOST="grep -qxE 'outcome=(restored|failed|superseded)' /run/rasputin-store-migrate/outcome"
+			_i=0
+			while [ "$(guest_yes "$MIGRATE_DONE")" != yes ] && [ "$(guest_yes "$MIGRATE_LOST")" != yes ] && [ "$_i" -lt "$STORE_TRIES" ]; do
+				_i=$((_i + 1)); sleep 2
+			done
+			if [ "$(guest_yes "$MIGRATE_DONE")" = yes ]; then
+				pass "boot 2: the api rolled the base's store forward and committed after $((_i * 2))s"
+			else
+				fail "boot 2: the roll-forward of the base's store never committed in $((STORE_TRIES * 2))s: $(ssh_guest 'cat /run/rasputin-store-migrate/outcome; ls -A /var/lib/rasputin/store-migrate' 2>/dev/null | tr '\n' '|')"
+			fi
+		fi
 		# The provisioner's run after this start has finished: its record
 		# exists and it has no job. It runs after the store's READY, so health
 		# 200 alone does not say it is done.
@@ -697,7 +758,7 @@ if boot 2; then
 		S2="$(store_checks)"
 		assert_store "api-pulled second start" "$S2"
 		expect "boot 2: (10) the record is unchanged by the second start" "$(kv record_sum "$S1")" "$(kv record_sum "$S2")"
-		if [ "$STORE_WANT" = empty ]; then SELFINIT_WANT=1; else SELFINIT_WANT=0; fi
+		if [ "$STORE_WANT" = empty ] || [ "$MIGRATE_WANT" = yes ]; then SELFINIT_WANT=1; else SELFINIT_WANT=0; fi
 		expect "boot 2: (10) the api-pulled start ran no self-init ($SELFINIT_WANT '$SELFINIT_LINE' this boot, base: $BASE_STATE)" "$SELFINIT_WANT" \
 			"$(ssh_guest "journalctl -b -u openbao.service --no-pager -o cat | grep -c '$SELFINIT_LINE'" 2>/dev/null | tr -d '\r')"
 		# (11) The listener and the TLS refusals still hold.
