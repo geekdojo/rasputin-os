@@ -95,10 +95,14 @@ BOOTID_SRC="${RASPUTIN_STOREROLLBACK_BOOTID:-/proc/sys/kernel/random/boot_id}"
 
 umask 077
 
+# Both read by outcome.sh.
+# shellcheck disable=SC2034
 OUTCOME_TAG=rasputin-store-rollback
+# shellcheck disable=SC2034
 OUTCOME_KMSG="${RASPUTIN_STOREROLLBACK_KMSG:-/dev/kmsg}"
 . "$(dirname "$0")/../outcome/outcome.sh"
-# present, move_entries and roll_back, shared with rasputin-store-restore.sh.
+# present, move_entries, roll_back, tar_aside and data_owner, shared with
+# rasputin-store-restore.sh and rasputin-store-migrate.sh (#1132).
 . "$(dirname "$0")/../store-swap/swap.sh"
 
 DATA="$PERSIST/openbao"
@@ -108,7 +112,6 @@ HOLD="$PERSIST/openbao-version-hold"
 HOLD_TMP="$PERSIST/.openbao-version-hold.new"
 COPY="$PERSIST/openbao-preupdate.tar"
 ASIDE="$PERSIST/openbao-rolled-back.tar"
-ASIDE_TMP="$ASIDE.partial"
 STAGED="$PERSIST/restore-pending/store"
 DNEW="$DATA/.rasputin-rollback-new"
 DOLD="$DATA/.rasputin-rollback-old"
@@ -337,21 +340,16 @@ valid_version "$_cv" || refuse_copy "the version in $COPY could not be parsed"
 [ "$_cv" = "$B" ] || refuse_copy "$COPY is for version $_cv"
 
 # --- restore 1. keep the newer data aside ---------------------------------------
-# Only a complete new aside copy ever replaces the previous one.
-if ! { rm -f "$ASIDE_TMP" && tar -cf "$ASIDE_TMP" -C "$DATA" . && sync && mv -f "$ASIDE_TMP" "$ASIDE" && sync; }; then
-	rm -f "$ASIDE_TMP" 2>/dev/null
-	failed "Writing the newer secrets store data aside to $ASIDE failed, so the data was not rolled back and nothing was changed. $TRANSIENT"
-fi
+# Only a complete new aside copy ever replaces the previous one (tar_aside).
+tar_aside "$DATA" "$ASIDE" \
+	|| failed "Writing the newer secrets store data aside to $ASIDE failed, so the data was not rolled back and nothing was changed. $TRANSIENT"
 
 # --- restore 2. unpack the copy ---------------------------------------------------
-# The data directory's own owner, read the way the at-rest audit reads it, so
-# no id is written here. The copy has no directory members; tar makes the
-# leading directories itself.
-_owner=$(ls -ldn "$DATA" 2>/dev/null | awk 'NR == 1 { print $3 ":" $4 }')
-case "$_owner" in
-	[0-9]*:[0-9]*) ;;
-	*) failed "Reading the owner of $DATA failed, so the data was not rolled back; the newer data is kept in $ASIDE and nothing else was changed. $TRANSIENT" ;;
-esac
+# The data directory's own owner (data_owner, swap.sh), so no id is written
+# here. The copy has no directory members; tar makes the leading directories
+# itself.
+_owner=$(data_owner "$DATA") \
+	|| failed "Reading the owner of $DATA failed, so the data was not rolled back; the newer data is kept in $ASIDE and nothing else was changed. $TRANSIENT"
 if ! { mkdir "$DNEW" && tar -xf "$COPY" -C "$DNEW" && [ -d "$DNEW/store/data" ] && chown -R "$_owner" "$DNEW" && sync; }; then
 	rm -rf "$DNEW" 2>/dev/null
 	failed "Unpacking the copy $COPY into $DNEW failed, so the data was not rolled back; the newer data is kept in $ASIDE and nothing else was changed. $TRANSIENT"

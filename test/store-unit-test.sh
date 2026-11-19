@@ -60,6 +60,10 @@ PRE_HOOK='-+/usr/lib/rasputin/store-init/rasputin-store-init.sh pre'
 # `+` and no `-`, so a refused or failed gate fails the store's start before
 # bao runs.
 GATE_HOOK='+/usr/lib/rasputin/store-rollback/rasputin-store-rollback.sh'
+# TC-1132-12: the roll-forward's root step (geekdojo/geekdojo-brain#1132),
+# third, `+` and no `-`, so a put-back that cannot finish fails the store's
+# start before bao runs.
+MIGRATE_HOOK='+/usr/lib/rasputin/store-migrate/rasputin-store-migrate.sh'
 PROV_PULL='-+/usr/bin/systemctl --no-block start rasputin-store-provision.service'
 [ -n "${BAO_GID:-}" ] || { echo "FAILED: OPENBAO_USERS ('$USERS') has fewer than four fields."; exit 1; }
 
@@ -140,12 +144,14 @@ $(values "$D" "$1" "$2")
 	# as root outside the sandbox) with its phase (geekdojo-brain#804).
 	exactly Service ExecStart \
 		'/usr/bin/bao server -config=/etc/rasputin/openbao/openbao.hcl -config=/etc/rasputin/openbao/init.json -config=/run/credentials/openbao.service/seal.hcl'
-	# TC-766-14 and TC-801-26: exactly three ExecStartPre lines, the restore
-	# step first, the version gate second, the self-init hook's pre last.
+	# TC-766-14, TC-801-26 and TC-1132-12: exactly four ExecStartPre lines,
+	# the restore step first, the version gate second, the roll-forward's
+	# root step third, the self-init hook's pre last.
 	_pre=$(values "$D" Service ExecStartPre)
-	check "[Service] ExecStartPre=$RESTORE_HOOK then ExecStartPre=$GATE_HOOK then ExecStartPre=$PRE_HOOK, exactly these three, in this order" \
+	check "[Service] ExecStartPre=$RESTORE_HOOK then ExecStartPre=$GATE_HOOK then ExecStartPre=$MIGRATE_HOOK then ExecStartPre=$PRE_HOOK, exactly these four, in this order" \
 		"$(yes_if [ "$_pre" = "$RESTORE_HOOK
 $GATE_HOOK
+$MIGRATE_HOOK
 $PRE_HOOK" ])" "got: $(printf '%s' "$_pre" | tr '\n' '|')"
 	# TC-804-14 and TC-805-25 (F-805-28): the outcome hook, then the start of
 	# the provisioner, -+ (never fails the store; root, outside the sandbox)
@@ -188,6 +194,11 @@ $PROV_PULL" ])" "got: $(printf '%s' "$_post" | tr '\n' '|')"
 	check "TC-830-23 tmpfiles declares d /var/lib/rasputin/openbao-seal/rotation 0700 root root -" \
 		"$(yes_if awk '$1 == "d" && $2 == "/var/lib/rasputin/openbao-seal/rotation" && $3 == "0700" && $4 == "root" && $5 == "root" && $6 == "-" { found = 1 } END { exit !found }' "$TMPFILES")" \
 		"d lines: $(awk '$1 == "d" && $2 == "/var/lib/rasputin/openbao-seal/rotation"' "$TMPFILES" | tr '\n' '|')"
+	# TC-1132-12: the migrate step's state directory, root's 0700 on every
+	# boot.
+	check "TC-1132-12 tmpfiles declares d /var/lib/rasputin/store-migrate 0700 root root -" \
+		"$(yes_if awk '$1 == "d" && $2 == "/var/lib/rasputin/store-migrate" && $3 == "0700" && $4 == "root" && $5 == "root" && $6 == "-" { n++ } END { exit n != 1 }' "$TMPFILES")" \
+		"d lines: $(awk '$1 == "d" && $2 == "/var/lib/rasputin/store-migrate"' "$TMPFILES" | tr '\n' '|')"
 	exactly Service Restart always
 	exactly Service ProtectSystem strict
 	exactly Service ReadWritePaths '/var/lib/rasputin/openbao /var/lib/rasputin/openbao-audit'
@@ -437,6 +448,21 @@ refuses "the version gate before the restore step" "swap:ExecStartPre=$RESTORE_H
 refuses "the version gate after the outcome hook's pre" "swap:ExecStartPre=$GATE_HOOK|ExecStartPre=$PRE_HOOK" \
 	'' "ExecStartPre=$RESTORE_HOOK then"
 refuses "the version gate removed" "replace:ExecStartPre=$GATE_HOOK" '# removed' "ExecStartPre=$RESTORE_HOOK then"
+# TC-1132-12: the roll-forward's root step with a - prefix, which would start
+# bao on a half-restored tree; before the version gate, which would then
+# decide on an emptied directory; after the self-init hook's pre, which would
+# then see the old data; and removed.
+refuses "the migrate step with a -+ prefix" "replace:ExecStartPre=$MIGRATE_HOOK" \
+	"ExecStartPre=-$MIGRATE_HOOK" "ExecStartPre=$RESTORE_HOOK then"
+refuses "the migrate step before the version gate" "swap:ExecStartPre=$GATE_HOOK|ExecStartPre=$MIGRATE_HOOK" \
+	'' "ExecStartPre=$RESTORE_HOOK then"
+refuses "the migrate step after the outcome hook's pre" "swap:ExecStartPre=$MIGRATE_HOOK|ExecStartPre=$PRE_HOOK" \
+	'' "ExecStartPre=$RESTORE_HOOK then"
+refuses "the migrate step removed" "replace:ExecStartPre=$MIGRATE_HOOK" '# removed' "ExecStartPre=$RESTORE_HOOK then"
+refuses "TC-1132-12 the migrate state directory at 0755" \
+	'tmpfiles:d /var/lib/rasputin/store-migrate          0700 root root -' \
+	'd /var/lib/rasputin/store-migrate          0755 root root -' \
+	'tmpfiles declares d /var/lib/rasputin/store-migrate 0700 root root -'
 refuses "ExecStopPost without the + prefix" 'replace:ExecStopPost=-+/usr/lib/rasputin/store-init/rasputin-store-init.sh stopped' \
 	'ExecStopPost=-/usr/lib/rasputin/store-init/rasputin-store-init.sh stopped' '[Service] ExecStopPost=-+'
 refuses "ExecStart without init.json" \

@@ -38,7 +38,9 @@
 #
 # A store initialised before release 2026.11.3 has no rasputin-author role:
 # its rasputin-app-* items are skipped and the run is recorded unchanged, with
-# a sentence saying so.
+# a sentence saying so and author=absent. The api then rolls that store
+# forward to this release's init.json (geekdojo/geekdojo-brain#1132), and the
+# next start adds these items through the author it now has.
 #
 # This release adds the api's app-key engine, its policy and its role
 # (geekdojo/geekdojo-brain#1084).

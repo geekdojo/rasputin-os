@@ -442,6 +442,17 @@ jobs:
         env:
           REQUIRE_BUSYBOX: "1"
         run: sh test/store-rollback-test.sh
+      # A store's roll-forward, its root step (geekdojo/geekdojo-brain#1132):
+      # every decision of rasputin-store-migrate.sh against a scratch tree:
+      # nothing, the move-aside and a failure at each of its steps, the
+      # put-back over a newer tree, a kill at each point of either converging
+      # on the old tree, a held put-back, the commit, a restore superseding,
+      # a request from another boot, and swap.sh's skip list, under dash,
+      # bash, busybox ash and busybox's own applets, tar included.
+      - name: Store roll-forward step tests
+        env:
+          REQUIRE_BUSYBOX: "1"
+        run: sh test/store-migrate-test.sh
       # The boot smoke's check that the api reports the secrets store ready
       # (geekdojo/geekdojo-brain#834): the verdict on GET /api/alerts, the
       # wait, the post-kill report, the first-run sign-in through an injected
@@ -867,7 +878,10 @@ jobs:
       # marker; and the store's version gate (geekdojo/geekdojo-brain#801):
       # data with no marker adopted, equal versions left alone, newer data
       # rolled back to a pre-update copy before bao starts, and with no copy a
-      # store that never runs, keeps its data and stays stopped. Same job as
+      # store that never runs, keeps its data and stays stopped; and a store's
+      # roll-forward (geekdojo/geekdojo-brain#1132): a previous-release store
+      # moved aside, initialised and provisioned with the author, put back
+      # with its entries intact, then committed and finished. Same job as
       # the store paths: it builds the same image. It reads the pinned api
       # tarball's policy text (geekdojo/geekdojo-brain#804), so it is red until
       # the store-arming pin moves, by design; it is the job's last step, so

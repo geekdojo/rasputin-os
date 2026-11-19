@@ -625,8 +625,8 @@ record_cases() {
 	run record INVOCATION_ID=feedfacefeedfacefeedfacefeedface
 	ok "TC-805-22 record exits 0" "$(yes_if [ "$RC" = 0 ])" "rc=$RC"
 	ok "TC-805-22 record is 0600" "$(yes_if [ "$(perms "$RUN/outcome")" = -rw------- ])" "$(perms "$RUN/outcome")"
-	ok "TC-805-22 record holds exactly outcome, boot_id, run_id and reason, in order" \
-		"$(yes_if [ "$(cut -d= -f1 "$RUN/outcome" | tr '\n' ' ')" = "outcome boot_id run_id reason " ])" "$(cat "$RUN/outcome")"
+	ok "TC-805-22 TC-1132-11 record holds exactly outcome, boot_id, run_id, reason and author, in order" \
+		"$(yes_if [ "$(cut -d= -f1 "$RUN/outcome" | tr '\n' ' ')" = "outcome boot_id run_id reason author " ])" "$(cat "$RUN/outcome")"
 	ok "TC-805-22 record: outcome=applied, this boot, run_id is the INVOCATION_ID given" \
 		"$(yes_if eval '[ "$(rec outcome)" = applied ] && [ "$(rec boot_id)" = "$BOOT_ID" ] && [ "$(rec run_id)" = feedfacefeedfacefeedfacefeedface ]')" "$(cat "$RUN/outcome")"
 	ok "TC-805-22 record: no temp file, no pending" "$(yes_if eval '[ ! -e "$RUN/.outcome.new" ] && [ ! -e "$RUN/pending" ]')" "$(ls -A "$RUN")"
@@ -680,6 +680,45 @@ record_cases() {
 	ok "TC-805-22 an unknown phase exits 2 with a <3> line" "$(yes_if eval '[ "$RC" = 2 ] && contains "<3>$TAG:" "$OUT"')" "rc=$RC $OUT"
 }
 
+# --- TC-1132-11: the record's author line (geekdojo/geekdojo-brain#1132) ------
+# record_author LABEL WANT — the record is exactly five lines, the fifth
+# author=WANT, and the console line carries no author (its format is
+# unchanged).
+record_author() {
+	ok "$1: the record is exactly five lines: outcome, boot_id, run_id, reason, author=$2" \
+		"$(yes_if eval '[ "$(cut -d= -f1 "$RUN/outcome" | tr "\n" " ")" = "outcome boot_id run_id reason author " ] && [ "$(sed -n 5p "$RUN/outcome")" = "author=$_ra_want" ]')" \
+		"$(cat "$RUN/outcome" 2>&1 | tr '\n' '|')"
+	ok "$1: the line keeps its format: outcome, changed and reason, no author" \
+		"$(yes_if eval 'printf "%s\n" "$OUT" | grep -qE "^<[36]>$TAG: outcome=[a-z]+ changed=[0-9]+ reason=\".*\"\$" && ! contains author= "$OUT"')" "$OUT"
+}
+author_cases() {
+	for c in "a:the role list holds rasputin-author:present" "b:the role list lacks rasputin-author:absent" \
+		"c:the provisioner's login is refused:-" "d:the role list is refused:-"; do
+		_id=${c%%:*}; _rest=${c#*:}; _what=${_rest%:*}; _ra_want=${_rest##*:}
+		case "$_id" in
+			a) shipped_store "$NEW_ROLES" ;;
+			b|d) shipped_store "$OLD_ROLES" ;;
+			c) shipped_store "$NEW_ROLES"; FAKE_LOGIN=refuse ;;
+		esac
+		[ "$_id" = d ] && FAKE_LIST=error
+		run pre; run apply; run record INVOCATION_ID=$INV
+		record_author "TC-1132-11 ($_id) $_what" "$_ra_want"
+	done
+	# (e) the stopped phase, after a run that got as far as the list.
+	_ra_want=-
+	shipped_store "$NEW_ROLES"; run pre; FAKE_LIST=error; run apply; run stopped SERVICE_RESULT=exit-code EXIT_STATUS=1 INVOCATION_ID=$INV
+	record_author "TC-1132-11 (e) the stopped phase" -
+	# A result that says present from an earlier apply is not carried by stopped.
+	shipped_store "$NEW_ROLES"; run pre; run apply; run stopped SERVICE_RESULT=success EXIT_STATUS=TERM INVOCATION_ID=$INV
+	record_author "TC-1132-11 (e) the stopped phase after a completed apply" -
+	# (f) a run that left no result.
+	setup; run pre; rm -f "$WORK/result"; run record INVOCATION_ID=$INV
+	record_author "TC-1132-11 (f) no result" -
+	# A result whose author is not one of the two values apply writes.
+	setup; run pre; printf 'outcome=unchanged\nchanged=0\nreason=Nothing.\nauthor=yes\n' > "$WORK/result"; run record INVOCATION_ID=$INV
+	record_author "TC-1132-11 a result with author=yes" -
+}
+
 echo "store-provision tests, shells:$TEST_SHELLS"
 : > "$TMP/all-outputs"
 for SH in $TEST_SHELLS; do
@@ -688,6 +727,7 @@ for SH in $TEST_SHELLS; do
 	apply_cases
 	authored_cases
 	record_cases
+	author_cases
 done
 
 # --- TC-805-23: no token anywhere ----------------------------------------------

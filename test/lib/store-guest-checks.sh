@@ -38,6 +38,8 @@ OUT="${OUT:?OUT names a tmpfs directory for the tokens}"
 PERSIST="${PERSIST:-/var/lib/rasputin}"
 RECORD="${RECORD:-/run/rasputin-store-init/outcome}"
 PRECORD="${PRECORD:-/run/rasputin-store-provision/outcome}"
+MRECORD="${MRECORD:-/run/rasputin-store-migrate/outcome}"
+MSTATE="${MSTATE:-/var/lib/rasputin/store-migrate}"
 AUDIT_LOG="${AUDIT_LOG:-/var/lib/rasputin/openbao-audit/audit.log}"
 BOOTID_SRC="${BOOTID_SRC:-/proc/sys/kernel/random/boot_id}"
 mkdir -p "$OUT"
@@ -113,10 +115,22 @@ checks() {
 	echo "prov_record_mode=$(ls -ln "$PRECORD" 2>&1 | awk '{ print $1, $3, $4 }')"
 	echo "prov_record_keys=$(cut -d= -f1 "$PRECORD" 2>/dev/null | tr '\n' ',')"
 	echo "prov_record_outcome=$(sed -n 's/^outcome=//p' "$PRECORD" 2>&1)"
+	echo "prov_record_author=$(sed -n 's/^author=//p' "$PRECORD" 2>&1)"
 	_pj=$(journalctl -b -u rasputin-store-provision.service --no-pager -o cat 2>/dev/null)
 	echo "prov_unchanged_lines=$(printf '%s\n' "$_pj" | grep -c 'rasputin-store-provision: outcome=unchanged')"
 	echo "prov_applied_lines=$(printf '%s\n' "$_pj" | grep -c 'rasputin-store-provision: outcome=applied')"
 	echo "prov_failed_lines=$(printf '%s\n' "$_pj" | grep -c 'rasputin-store-provision: outcome=failed')"
+	# A store's roll-forward (geekdojo/geekdojo-brain#1132, TC-1132-26): the
+	# migrate step's record, whether it is this boot's, and the two state
+	# files that say a migration is in flight or done.
+	if [ -e "$MRECORD" ]; then
+		echo "migrate_record_outcome=$(sed -n 's/^outcome=//p' "$MRECORD" 2>&1)"
+	else
+		echo "migrate_record_outcome=absent"
+	fi
+	if [ -n "$_b" ] && grep -qx "boot_id=$_b" "$MRECORD" 2>/dev/null; then echo "migrate_record_boot=this"; else echo "migrate_record_boot=other"; fi
+	if [ -e "$MSTATE/commit" ]; then echo "migrate_commit=present"; else echo "migrate_commit=absent"; fi
+	if [ -e "$MSTATE/aside.tar" ]; then echo "migrate_aside=present"; else echo "migrate_aside=absent"; fi
 }
 
 # The token shapes: Vault's hv[sbr]. form, which the test plan names, and

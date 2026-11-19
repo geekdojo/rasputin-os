@@ -99,11 +99,11 @@ VAR_RASPUTIN=/var/lib/rasputin
 # openbao-seal/rotation is the seal-key rotation's staging directory
 # (geekdojo/geekdojo-brain#830, TC-830-24). The provisioner's leaf directory
 # and key are geekdojo-brain#805's (TC-805-26).
-STORE_DIRS="$VAR_RASPUTIN/openbao $VAR_RASPUTIN/openbao-audit $VAR_RASPUTIN/openbao-seal $VAR_RASPUTIN/openbao-seal/rotation $VAR_RASPUTIN/tls $VAR_RASPUTIN/tls/openbao-server $VAR_RASPUTIN/tls/openbao-client $VAR_RASPUTIN/tls/openbao-provisioner"
+STORE_DIRS="$VAR_RASPUTIN/openbao $VAR_RASPUTIN/openbao-audit $VAR_RASPUTIN/openbao-seal $VAR_RASPUTIN/openbao-seal/rotation $VAR_RASPUTIN/tls $VAR_RASPUTIN/tls/openbao-server $VAR_RASPUTIN/tls/openbao-client $VAR_RASPUTIN/tls/openbao-provisioner $VAR_RASPUTIN/store-migrate"
 STORE_FILES="$VAR_RASPUTIN/openbao-seal/seal-key $VAR_RASPUTIN/openbao-seal/seal.hcl $VAR_RASPUTIN/tls/openbao-server/leaf.key $VAR_RASPUTIN/tls/openbao-client/leaf.key $VAR_RASPUTIN/tls/openbao-provisioner/leaf.key"
 # The store's own uid owns these two; root owns every other store path.
 STORE_OWNED="$VAR_RASPUTIN/openbao $VAR_RASPUTIN/openbao-audit"
-STORE_ROOT_OWNED="$VAR_RASPUTIN/openbao-seal $VAR_RASPUTIN/openbao-seal/rotation $VAR_RASPUTIN/openbao-seal/seal-key $VAR_RASPUTIN/openbao-seal/seal.hcl $VAR_RASPUTIN/tls $VAR_RASPUTIN/tls/openbao-server $VAR_RASPUTIN/tls/openbao-server/leaf.key $VAR_RASPUTIN/tls/openbao-client $VAR_RASPUTIN/tls/openbao-client/leaf.key $VAR_RASPUTIN/tls/openbao-provisioner $VAR_RASPUTIN/tls/openbao-provisioner/leaf.key"
+STORE_ROOT_OWNED="$VAR_RASPUTIN/store-migrate $VAR_RASPUTIN/openbao-seal $VAR_RASPUTIN/openbao-seal/rotation $VAR_RASPUTIN/openbao-seal/seal-key $VAR_RASPUTIN/openbao-seal/seal.hcl $VAR_RASPUTIN/tls $VAR_RASPUTIN/tls/openbao-server $VAR_RASPUTIN/tls/openbao-server/leaf.key $VAR_RASPUTIN/tls/openbao-client $VAR_RASPUTIN/tls/openbao-client/leaf.key $VAR_RASPUTIN/tls/openbao-provisioner $VAR_RASPUTIN/tls/openbao-provisioner/leaf.key"
 OPENBAO_ID=990
 # The identity service's paths (geekdojo/geekdojo-brain#973, TC-973-06), as
 # literals. 992 is the postgres user, 991 the keycloak user.
@@ -182,9 +182,9 @@ world() {
 	: >"$V/bus/bus.key"; chmod 0600 "$V/bus/bus.key"
 	: >"$V/bus/agent.token"; chmod 0600 "$V/bus/agent.token"
 	: >"$V/bus/join.token"; chmod 0600 "$V/bus/join.token"
-	# The secrets store's eight directories and its five secret files
-	# (geekdojo/geekdojo-brain#754, #830; the provisioner's, #805), each at
-	# its declared mode.
+	# The secrets store's nine directories and its five secret files
+	# (geekdojo/geekdojo-brain#754, #830; the provisioner's, #805; the
+	# roll-forward's state directory, #1132), each at its declared mode.
 	for d in $STORE_DIRS; do
 		mkdir -p "$R$d"; chmod 0700 "$R$d"
 	done
@@ -503,10 +503,12 @@ store_cases() {
 	# #805 adds the provisioner's directory and key (TC-805-26), so 31.
 	# #973 adds the identity service's eleven required directories, and the
 	# sweep of identity/, which world() leaves empty (TC-973-06), so 42.
+	# #1132 adds the roll-forward's required state directory (TC-1132-12),
+	# so 43; its files and work directories are optional.
 	out=$(run_audit "$R"); rc=$?
 	ok "TC-754-05 TC-805-26 a correct tree with the store's paths passes" "$(yes_if [ "$rc" -eq 0 ])" "$out"
-	ok "TC-830-24 TC-805-26 TC-973-06 the verdict is exactly 'PASS checked=42'" \
-		"$(yes_if last_line_matches '^rasputin-atrest: PASS checked=42$' "$out")" "$out"
+	ok "TC-830-24 TC-805-26 TC-973-06 TC-1132-12 the verdict is exactly 'PASS checked=43'" \
+		"$(yes_if last_line_matches '^rasputin-atrest: PASS checked=43$' "$out")" "$out"
 
 	# TC-830-24: the rotation directory at 0755 fails naming it; a 0644 file
 	# inside it fails openbao-seal's sweep; a 0600 staged key passes; the
@@ -724,12 +726,12 @@ identity_cases() {
 	for f in $IDENTITY_FILES; do : >"$R$f"; chmod 0600 "$R$f"; done
 	umask 022
 	chgrp -R "$MYGID" "$R"
-	# 42 for the world, plus the eleven optional files, plus the sweep of
-	# identity/ visiting start-failures again: 54.
+	# 43 for the world, plus the eleven optional files, plus the sweep of
+	# identity/ visiting start-failures again: 55.
 	out=$(run_audit "$R"); rc=$?
 	ok "TC-973-06 a correct tree with every identity row passes" "$(yes_if passed "$rc" "$out")" "$out"
-	ok "TC-973-06 the verdict is exactly 'PASS checked=54'" \
-		"$(yes_if last_line_matches '^rasputin-atrest: PASS checked=54$' "$out")" "$out"
+	ok "TC-973-06 the verdict is exactly 'PASS checked=55'" \
+		"$(yes_if last_line_matches '^rasputin-atrest: PASS checked=55$' "$out")" "$out"
 	# The shipped inventory, unrewritten: the database's directories are held
 	# to 992 and the service's to 991, not to each other's or this user's.
 	out=$(audit_with "$INVENTORY" "$R" -u "$ME" -g "$MYGID"); rc=$?
@@ -1245,6 +1247,24 @@ openbao-rolled-back.tar 0600 optional 0 0 3
 openbao/.rasputin-rollback-new 0700 optional 990 990 5
 openbao/.rasputin-rollback-old 0700 optional 0 0 3
 EOF_RB
+# TC-1132-12: the roll-forward's rows (geekdojo/geekdojo-brain#1132): the
+# state directory required and as its d line says, root 0700; the four state
+# files root 0600; the unpacked old tree the store's, the moved-aside entries
+# root's.
+ok "TC-1132-12 tmpfiles.d declares $VAR_RASPUTIN/store-migrate once, 0700 0:0" \
+	"$(yes_if d_line_is "$VAR_RASPUTIN/store-migrate" 0700 0 0)" "d lines: $(tmpfiles_d "$VAR_RASPUTIN/store-migrate")"
+while read -r rel want; do
+	ok "TC-1132-12 the inventory declares $VAR_RASPUTIN/$rel as '$want'" \
+		"$(yes_if [ "$(inv_row "$VAR_RASPUTIN/$rel")" = "$want" ])" "inventory: $(inv_row "$VAR_RASPUTIN/$rel")"
+done <<'EOF_MG'
+store-migrate 0700 required 0 0 3
+store-migrate/request 0600 optional 0 0 3
+store-migrate/attempt 0600 optional 0 0 3
+store-migrate/aside.tar 0600 optional 0 0 3
+store-migrate/commit 0600 optional 0 0 3
+openbao/.rasputin-migrate-new 0700 optional 990 990 5
+openbao/.rasputin-migrate-old 0700 optional 0 0 3
+EOF_MG
 for p in "$VAR_RASPUTIN/openbao" "$VAR_RASPUTIN/tls" \
 	"$VAR_RASPUTIN/tls/openbao-server" "$VAR_RASPUTIN/tls/openbao-client"; do
 	ok "TC-754-02 $p is not swept" \
@@ -1318,9 +1338,10 @@ ok "TC-754-13 the harness inventory keeps every sweep line" \
 	"$(yes_if [ "$(grep '^sweep' "$INVENTORY")" = "$(grep '^sweep' "$HARNESS_INV")" ])"
 # Three since geekdojo-brain#804: the two directories and audit.log. Four
 # since #766: the restore's data copy, openbao/.rasputin-restore-new. Five
-# since #801: the gate's unpacked copy, openbao/.rasputin-rollback-new.
-ok "TC-754-13 the harness inventory rewrote all five store-owned rows" \
-	"$(yes_if [ "$(awk -v u="$ME" -v g="$MYGID" '$4 == u && $5 == g' "$HARNESS_INV" | grep -c 'rasputin/openbao')" -eq 5 ])" \
+# since #801: the gate's unpacked copy, openbao/.rasputin-rollback-new. Six
+# since #1132: the migrate step's unpacked tree, openbao/.rasputin-migrate-new.
+ok "TC-754-13 TC-1132-12 the harness inventory rewrote all six store-owned rows" \
+	"$(yes_if [ "$(awk -v u="$ME" -v g="$MYGID" '$4 == u && $5 == g' "$HARNESS_INV" | grep -c 'rasputin/openbao')" -eq 6 ])" \
 	"$(grep openbao "$HARNESS_INV")"
 ok "TC-754-13 the shipped inventory is untouched" \
 	"$(yes_if [ "$(cksum <"$INVENTORY")" = "$SHIPPED_SUM_BEFORE" ])"
