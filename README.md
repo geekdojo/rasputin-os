@@ -20,6 +20,11 @@ architectures (`rpi` arm64, `n100` amd64), one read-only rootfs whose role is
 chosen at provision time by a seed file — a compute node and a controlplane
 node run the same image.
 
+Not every board may take every role. A controlplane is a Pi 5, a CM5 or an
+amd64 machine, with 4 GB of RAM or more. The Cortex-A72 boards (Pi 4 Model B,
+Pi 400, CM4, CM4S) are compute-only since 2026-11-08. The image does not
+enforce this yet: first boot takes the role from the seed on any board.
+
 > **Status: alpha.** Rasputin is in its commodity-hardware proof phase.
 > Image layouts, partition schemes, and update formats change without notice.
 
@@ -68,7 +73,9 @@ this image — see
     boot current Pi 5 steppings). **Supported boards:** Pi 4 Model B,
     Pi 400, CM4 (eMMC and Lite), CM4S, Pi 5 (all revisions), Pi 500, CM5
     and CM5 Lite — the image carries the device tree each one boots with
-    (`board/rasputin/rpi/family-dtbs.txt`, checked on every build). A/B uses the Pi
+    (`board/rasputin/rpi/family-dtbs.txt`, checked on every build). The
+    Pi 4-family boards (Pi 4 Model B, Pi 400, CM4, CM4S) run as compute
+    nodes only. A/B uses the Pi
     firmware's one-shot `tryboot` flag via a custom RAUC backend. The firmware **cannot count
     boot attempts and won't auto-fall-back from a committed slot**, so the Pi
     relies on defense-in-depth: the one-shot trial, a systemd watchdog on the

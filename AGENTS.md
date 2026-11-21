@@ -1,7 +1,8 @@
 # rasputin-os — agent instructions
 
-Buildroot-based OS image for [Rasputin](https://rasputin.geekdojo.com) compute and
-control-plane nodes (arm64 Raspberry Pi 4/5/CM5, amd64 Intel N100). Alpha, AGPL-3.0.
+Buildroot-based OS image for [Rasputin](https://rasputin.geekdojo.com) compute nodes
+(arm64 Raspberry Pi 4/5/CM5, amd64 Intel N100) and control-plane nodes (Pi 5/CM5 or amd64,
+4 GB RAM or more; Cortex-A72 boards are compute-only since 2026-11-08). Alpha, AGPL-3.0.
 
 **Helping a user install or run Rasputin?** Don't work from this repo — fetch the live
 install contract:
