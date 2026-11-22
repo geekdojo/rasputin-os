@@ -21,8 +21,11 @@
 set -u
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
-LIB="$ROOT/board/rasputin/common/rootfs-overlay/usr/lib/rasputin/node-id/node-id.sh"
+LIBDIR="$ROOT/board/rasputin/common/rootfs-overlay/usr/lib/rasputin"
+LIB="$LIBDIR/node-id/node-id.sh"
+HOSTNAME_SCRIPT="$LIBDIR/hostname/rasputin-hostname.sh"
 [ -f "$LIB" ] || { echo "missing: $LIB" >&2; exit 2; }
+[ -f "$HOSTNAME_SCRIPT" ] || { echo "missing: $HOSTNAME_SCRIPT" >&2; exit 2; }
 
 if [ -z "${TEST_SHELLS:-}" ]; then
 	TEST_SHELLS=""
@@ -65,6 +68,49 @@ tab=$(printf '\t')
 cr=$(printf '\r')
 nl='
 '
+# Cluster ids either side of the 59-character limit (geekdojo/geekdojo-brain#996).
+id59=${first63%????}
+id60=${first63%???}
+[ "${#id59}" -eq 59 ] && [ "${#id60}" -eq 60 ] || { echo "bad test vectors" >&2; exit 2; }
+
+# The three refusal sentences of rasputin_cluster_id_check, written out here so
+# the test pins the exact text rather than re-deriving it from the helper.
+s1() { printf "The cluster id '%s' is %s characters, and a cluster id allows at most 59 so that its sign-in name, sso-<cluster id>.local, fits in one DNS label." "$1" "$2"; }
+s2() { printf "The cluster id '%s' starts with sso-, which is reserved for sign-in names: every cluster signs in at sso-<cluster id>.local, so this one would publish another cluster's sign-in name." "$1"; }
+s3() { printf "The cluster id '%s' is not a DNS label: it may hold only a-z, 0-9 and -, and must not start or end with -." "$1"; }
+
+# hostname SHELL NODE_ENV_FILE — run the real rasputin-hostname.sh through its
+# RASPUTIN_HOSTNAME_* overrides against a scratch kernel-hostname file and kmsg.
+# Sets HN_OUT (stdout+stderr) and HN_NAME (what it wrote as the hostname).
+hostname_run() {
+	_hd=$(mktemp -d "$TMP/hn.XXXXXX")
+	_ne=$2
+	printf 'rasputin-node' > "$_hd/hostname"
+	case "$1" in
+		busybox_sh) set -- busybox sh "$HOSTNAME_SCRIPT" ;;
+		*)          set -- "$1" "$HOSTNAME_SCRIPT" ;;
+	esac
+	HN_OUT=$(RASPUTIN_HOSTNAME_NODE_ENV="$_ne" \
+		RASPUTIN_HOSTNAME_LIBDIR="$LIBDIR" \
+		RASPUTIN_HOSTNAME_KERNEL="$_hd/hostname" \
+		RASPUTIN_HOSTNAME_KMSG="$_hd/kmsg" \
+		"$@" 2>&1)
+	HN_NAME=$(cat "$_hd/hostname")
+}
+
+has() { printf '%s\n' "$1" | grep -qF -- "$2"; }
+not_has() { if has "$1" "$2"; then return 1; else return 0; fi; }
+
+# check LABEL CONDITION... — count a pass when CONDITION succeeds.
+check() {
+	_label=$1; shift
+	if "$@"; then
+		pass=$((pass + 1))
+	else
+		fail=$((fail + 1))
+		printf '  FAIL [%s] %s\n' "$sh" "$_label" >&2
+	fi
+}
 
 for sh in $TEST_SHELLS; do
 	echo "== $sh"
@@ -102,6 +148,39 @@ for sh in $TEST_SHELLS; do
 	expect "$sh" "invalid newline"       "|rc=1"  $f "a${nl}b"
 	expect "$sh" "invalid non-ASCII"     "|rc=1"  $f "café"
 	expect "$sh" "invalid bracket"       "|rc=1"  $f "a[b]"
+
+	# ---- rasputin_cluster_id_check (TC-996-05) -----------------------------
+	# A new cluster's id: a DNS label of at most 59 characters that does not
+	# start with sso- (geekdojo/geekdojo-brain#996). Checked in order: length
+	# (S1), then the DNS-label rule (S3), then the prefix (S2).
+	f=rasputin_cluster_id_check
+	expect "$sh" "cluster id bench"          "|rc=0"  $f "bench"
+	expect "$sh" "cluster id rasputin"       "|rc=0"  $f "rasputin"
+	expect "$sh" "cluster id sso"            "|rc=0"  $f "sso"
+	expect "$sh" "cluster id sso1"           "|rc=0"  $f "sso1"
+	expect "$sh" "cluster id 59 chars"       "|rc=0"  $f "$id59"
+	expect "$sh" "cluster id sso-x (S2)"     "$(s2 sso-x)${nl}|rc=1"      $f "sso-x"
+	expect "$sh" "cluster id 60 chars (S1)"  "$(s1 "$id60" 60)${nl}|rc=1" $f "$id60"
+	expect "$sh" "cluster id a_b (S3)"       "$(s3 a_b)${nl}|rc=1"        $f "a_b"
+	expect "$sh" "cluster id home.lab (S3)"  "$(s3 home.lab)${nl}|rc=1"   $f "home.lab"
+	expect "$sh" "cluster id sso- (S3)"      "$(s3 sso-)${nl}|rc=1"       $f "sso-"
+	# The rule hostname.sh relies on is unchanged: both are still DNS labels.
+	expect "$sh" "label_valid still takes sso-x"     "|rc=0"  rasputin_label_valid "sso-x"
+	expect "$sh" "label_valid still takes 60 chars"  "|rc=0"  rasputin_label_valid "$id60"
+
+	# ---- upgrade path: rasputin-hostname.sh (TC-996-09) --------------------
+	# A controlplane node.env written by a firstboot that predates the cluster
+	# id rule keeps its hostname: rasputin-hostname.sh still checks only that
+	# the id is a DNS label, and does not fall back to "rasputin".
+	for cid in sso-x "$id60"; do
+		ne="$TMP/node.env.$$"
+		printf "RASPUTIN_NODE_ROLE='controlplane'\nRASPUTIN_NODE_ID='cp1'\nRASPUTIN_CLUSTER_ID='%s'\n" "$cid" > "$ne"
+		hostname_run "$sh" "$ne"
+		check "hostname keeps pre-rule cluster id '$cid'" test "$HN_NAME" = "$cid"
+		check "hostname: no WARNING for '$cid'" not_has "$HN_OUT" "WARNING"
+		check "hostname: no fallback to rasputin for '$cid'" not_has "$HN_OUT" "falling back to 'rasputin'"
+		check "hostname: logs the name set for '$cid'" has "$HN_OUT" "transient hostname set to $cid (role=controlplane)"
+	done
 done
 
 echo

@@ -382,6 +382,23 @@ if ! rasputin_label_valid "$NODE_ID"; then
 	exit 1
 fi
 
+# The cluster id is held to the rule rasputin-provision applies
+# (geekdojo/geekdojo-brain#996): a DNS label of at most 59 characters that does
+# not start with sso-, because every cluster signs in at sso-<cluster id>.local.
+# Lowercased and trimmed first, as the node id is; a blank value is the
+# "rasputin" default. Refused on every role, before anything is written, by the
+# same fail-loud path as an invalid node id: the unit fails, rasputin-agent
+# (Requires= this unit) does not start, and .provisioned stays unset.
+# rasputin-hostname.sh does not apply this rule, so a node.env written before
+# it keeps its name.
+CLUSTER_ID=$(rasputin_label_canon "$CLUSTER_ID")
+[ -n "$CLUSTER_ID" ] || CLUSTER_ID="rasputin"
+if ! CLUSTER_ID_PROBLEM=$(rasputin_cluster_id_check "$CLUSTER_ID"); then
+	log "ERROR: $CLUSTER_ID_PROBLEM"
+	log "Nothing was written. Re-generate the seed with rasputin-provision and a different --cluster-id, then reboot."
+	exit 1
+fi
+
 # --- bus TLS values must be exactly right, or nothing is written ---------------
 # Checked with the other fail-loud checks, BEFORE anything reaches node.env or
 # the bus directory, and before the BMC reboot below. Both failures would
