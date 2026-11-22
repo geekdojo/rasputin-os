@@ -46,16 +46,15 @@
 #
 # WHY THIS VALUE
 #
-# 2026.11.3-dev.218 is the firewall dev release of the 2026.11.3 dev chain
-# (control-plane PRs #549, #553, #555, #556, #557 and #558;
-# geekdojo/geekdojo-brain#1084 and #1132), built from firewall main 882f520e
-# (rasputin-openwrt-firewall PR #144, release run 44629791680). It carries
-# agent 2026.11.3-dev.232 -- the control-plane dev release this OS pins --
-# whose only agent change since the 2026.11.2 stable is the app relay serving
-# an app's own Transit keys (the firewall runs no catalog apps); nothing under
-# the agent changed from dev.231 to dev.232. Plus the Snort rules re-pin to
-# 0ea093e6 (Talos republish 2026-11-19) and the rolling OpenWrt 25.12.6 feed.
-# Dev bakes dev. The previous pin was 2026.11.3-dev.217 (agent dev.231).
+# 2026.11.3 is the STABLE firewall of the lockstep 2026.11.3 stable cut (the
+# app runtime secrets chain, geekdojo/geekdojo-brain#1077: control-plane PRs
+# #549, #553, #555, #556, #557 and #558), built from firewall main c3f4a57
+# (rasputin-openwrt-firewall PR #145, release run 44981157686). It carries
+# agent 2026.11.3 -- the control-plane stable v2026.11.3 this OS pins (CP main
+# 059a932d), with no functional agent change against dev.232 -- plus the Snort
+# rules pin 0ea093e6 and the rolling OpenWrt 25.12.6 feed (snort3 3.13.2.0,
+# libdaq3 3.0.29). Stable bakes stable. The previous pin was dev.218 of the
+# 2026.11.3 dev chain.
 #
 # History: 2026.09.4-dev.127 was the first pin -- the FIRST firewall release
 # that publishes manifest.json.sig (dev.126 and earlier ship no sig asset).
@@ -91,6 +90,6 @@
 # On the 2026.11.2 dev line: dev.211 (OS dev.376), dev.212 (OS dev.381,
 # dev.383).
 # 2026.11.2 (stable) was the pin of the 2026.11.2 stable OS.
-# On the 2026.11.3 dev line: dev.217 (OS dev.393).
+# On the 2026.11.3 dev line: dev.217 (OS dev.393), dev.218 (OS dev.394).
 #
-2026.11.3-dev.218
+2026.11.3
