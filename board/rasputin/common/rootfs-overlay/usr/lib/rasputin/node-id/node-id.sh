@@ -42,3 +42,31 @@ rasputin_label_canon() {
 	_rl_v=${_rl_v%"${_rl_v##*[!$_rl_ws]}"}
 	printf '%s' "$_rl_v" | LC_ALL=C tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz'
 }
+
+# rasputin_cluster_id_check VALUE
+#   Print nothing and exit 0 when VALUE (already canonical, see
+#   rasputin_label_canon) may be used as a NEW cluster's id. Otherwise print the
+#   one sentence naming the rule it breaks and exit 1. A cluster signs in at
+#   sso-<cluster id>.local, so a cluster id is held to 59 characters (that name
+#   must still fit in one DNS label) and may not itself start with sso-, or it
+#   would publish another cluster's sign-in name (geekdojo/geekdojo-brain#996).
+#   This is for provisioning only: rasputin-hostname.sh keeps
+#   rasputin_label_valid, so a node whose id was accepted before this rule keeps
+#   its name.
+rasputin_cluster_id_check() {
+	if [ "${#1}" -gt 59 ]; then
+		printf '%s\n' "The cluster id '$1' is ${#1} characters, and a cluster id allows at most 59 so that its sign-in name, sso-<cluster id>.local, fits in one DNS label."
+		return 1
+	fi
+	if ! rasputin_label_valid "$1"; then
+		printf '%s\n' "The cluster id '$1' is not a DNS label: it may hold only a-z, 0-9 and -, and must not start or end with -."
+		return 1
+	fi
+	case "$1" in
+		sso-*)
+			printf '%s\n' "The cluster id '$1' starts with sso-, which is reserved for sign-in names: every cluster signs in at sso-<cluster id>.local, so this one would publish another cluster's sign-in name."
+			return 1
+			;;
+	esac
+	return 0
+}

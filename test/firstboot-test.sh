@@ -544,6 +544,69 @@ CHECKED"
 	ok "cp, no node id: says why" "$(yes_if out_has "the controlplane must be named")" "$OUT"
 	ok "cp, no node id: nothing stamped" "$(yes_if not provisioned)"
 	ok "cp, no node id: no role marker" "$(yes_if not test -e "$P/role.controlplane")"
+
+	# 17. The cluster id rule (geekdojo/geekdojo-brain#996): a new cluster's id
+	#     is a DNS label of at most 59 characters that does not start with
+	#     sso-, because every cluster signs in at sso-<cluster id>.local.
+	#     Refused on every role, before anything is written or stamped.
+	cid63=abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabc
+	cid59=${cid63%????}
+	cid60=${cid63%???}
+	action="Nothing was written. Re-generate the seed with rasputin-provision and a different --cluster-id, then reboot."
+	s1="The cluster id '$cid60' is 60 characters, and a cluster id allows at most 59 so that its sign-in name, sso-<cluster id>.local, fits in one DNS label."
+	s2="The cluster id 'sso-x' starts with sso-, which is reserved for sign-in names: every cluster signs in at sso-<cluster id>.local, so this one would publish another cluster's sign-in name."
+	s3="The cluster id 'home.lab' is not a DNS label: it may hold only a-z, 0-9 and -, and must not start or end with -."
+
+	# TC-996-06: a controlplane seed is refused, through the agent's
+	# `seed check` (a stub that passes the seed through) and through the
+	# old-agent fallback (no agent), with the sentence naming the rule.
+	for agent in checked none; do
+		for row in "sso-x|$s2" "SSO-X|$s2" "$cid60|$s1" "home.lab|$s3"; do
+			cid=${row%%|*}; want=${row#*|}
+			setup
+			[ "$agent" = checked ] && agent_stub 'cat "$1"'
+			cp_seed "RASPUTIN_CLUSTER_ID=$cid" "RASPUTIN_BUS_PIN=$PIN" "RASPUTIN_BUS_KEY=$KEY"
+			fb
+			label="TC-996-06 cp cluster id '$cid' ($agent)"
+			ok "$label: fails" "$(yes_if test "$RC" != 0)" "$OUT"
+			ok "$label: no node.env" "$(yes_if not test -e "$P/node.env")" "$(ls -A "$P")"
+			ok "$label: nothing stamped" "$(yes_if not provisioned)"
+			ok "$label: no bus.key" "$(yes_if not test -e "$P/bus/bus.key")" "$(ls -A "$P")"
+			ok "$label: no role marker" "$(yes_if not test -e "$P/role.controlplane")" "$(ls -A "$P")"
+			ok "$label: says why, then what to do" "$(yes_if test "$(printf '%s\n' "$OUT" | grep -A1 -xF -- "rasputin-firstboot: ERROR: $want")" = "rasputin-firstboot: ERROR: $want
+rasputin-firstboot: $action")" "$OUT"
+			# The scratch kmsg is a plain file that log() rewrites per line (the
+			# real one is a device), so it holds the last line logged.
+			ok "$label: kmsg carries the action line" "$(yes_if has_line "$W/kmsg" "rasputin-firstboot: $action")" "$(cat "$W/kmsg")"
+		done
+	done
+
+	# TC-996-07: a compute seed is refused the same way, before the join token
+	# is written or scrubbed.
+	setup
+	seed "RASPUTIN_NODE_ROLE=compute" "RASPUTIN_NODE_ID=w1" "RASPUTIN_CLUSTER_ID=sso-x" \
+		"RASPUTIN_NATS_URL=nats://bench.local:4222" "RASPUTIN_CP_JOIN_TOKEN=tok-w1"
+	cp "$SEED" "$W/seed.before"; fb
+	label="TC-996-07 compute cluster id 'sso-x'"
+	ok "$label: fails" "$(yes_if test "$RC" != 0)" "$OUT"
+	ok "$label: says why" "$(yes_if out_has "rasputin-firstboot: ERROR: $s2")" "$OUT"
+	ok "$label: says what to do" "$(yes_if out_has "rasputin-firstboot: $action")" "$OUT"
+	ok "$label: no join.token" "$(yes_if not test -e "$P/bus/join.token")" "$(ls -A "$P")"
+	ok "$label: no node.env" "$(yes_if not test -e "$P/node.env")" "$(ls -A "$P")"
+	ok "$label: nothing stamped" "$(yes_if not provisioned)"
+	ok "$label: seed still holds the token" "$(yes_if has_line "$SEED" "RASPUTIN_CP_JOIN_TOKEN=tok-w1")" "$(cat "$SEED")"
+	ok "$label: seed untouched" "$(yes_if cmp -s "$W/seed.before" "$SEED")" "$(cat "$SEED")"
+
+	# TC-996-08: valid ids provision, and node.env carries the canonical value
+	# (lowercased; blank is the "rasputin" default). bench is every case above.
+	for row in "rasputin|rasputin" "$cid59|$cid59" "Bench|bench" "\"   \"|rasputin"; do
+		cid=${row%%|*}; want=${row#*|}
+		setup; cp_seed "RASPUTIN_CLUSTER_ID=$cid"; fb
+		label="TC-996-08 cp cluster id <$cid>"
+		ok "$label: provisions" "$RC" "$OUT"
+		ok "$label: stamped" "$(yes_if provisioned)"
+		ok "$label: node.env carries '$want'" "$(yes_if has_line "$P/node.env" "RASPUTIN_CLUSTER_ID='$want'")" "$(cat "$P/node.env" 2>&1)"
+	done
 }
 
 for SH in $TEST_SHELLS; do

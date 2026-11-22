@@ -24,18 +24,25 @@
 #
 set -eu
 
-NODE_ENV=/var/lib/rasputin/node.env
+# The RASPUTIN_HOSTNAME_* overrides exist for test/node-id-test.sh, which runs
+# this script against a scratch directory (the same pattern as
+# rasputin-firstboot.sh's RASPUTIN_FIRSTBOOT_*). The unit sets none of them, so
+# on a node every path is the real one below.
+NODE_ENV="${RASPUTIN_HOSTNAME_NODE_ENV:-/var/lib/rasputin/node.env}"
+LIBDIR="${RASPUTIN_HOSTNAME_LIBDIR:-/usr/lib/rasputin}"
+KERNEL_HOSTNAME="${RASPUTIN_HOSTNAME_KERNEL:-/proc/sys/kernel/hostname}"
+KMSG="${RASPUTIN_HOSTNAME_KMSG:-/dev/kmsg}"
 
 # Same kmsg mirroring as rasputin-firstboot.sh: printk reaches every
 # console= device, so these lines show on serial/HDMI and CI can grep them.
 log() {
 	echo "rasputin-hostname: $*"
-	echo "rasputin-hostname: $*" > /dev/kmsg 2>/dev/null || true
+	echo "rasputin-hostname: $*" > "$KMSG" 2>/dev/null || true
 }
 
 # DNS-label helpers shared with rasputin-firstboot.sh.
 # shellcheck source=/dev/null
-. /usr/lib/rasputin/node-id/node-id.sh
+. "$LIBDIR/node-id/node-id.sh"
 
 ROLE=""
 NODE_ID=""
@@ -53,7 +60,7 @@ else
 	# node.env means firstboot never completed. Keep the baked placeholder
 	# ("rasputin-node") rather than guessing — it deliberately collides
 	# with nothing.
-	log "no $NODE_ENV; keeping baked hostname $(cat /proc/sys/kernel/hostname)"
+	log "no $NODE_ENV; keeping baked hostname $(cat "$KERNEL_HOSTNAME")"
 	exit 0
 fi
 
@@ -93,7 +100,7 @@ else
 	# node.env's id to the bus, so a hostname that disagreed would mislead.
 	NAME=$(rasputin_label_canon "$NODE_ID")
 	if [ -n "$NAME" ] && ! rasputin_label_valid "$NAME"; then
-		log "WARNING: node id '$NODE_ID' in $NODE_ENV is not a valid DNS label (a-z 0-9 -, no leading/trailing -, <=63 chars); keeping baked hostname $(cat /proc/sys/kernel/hostname). This node cannot join the bus with that id — re-provision it with a valid RASPUTIN_NODE_ID."
+		log "WARNING: node id '$NODE_ID' in $NODE_ENV is not a valid DNS label (a-z 0-9 -, no leading/trailing -, <=63 chars); keeping baked hostname $(cat "$KERNEL_HOSTNAME"). This node cannot join the bus with that id — re-provision it with a valid RASPUTIN_NODE_ID."
 		exit 0
 	fi
 	if [ "$NAME" != "$NODE_ID" ]; then
@@ -106,5 +113,5 @@ if [ -z "$NAME" ]; then
 	exit 0
 fi
 
-printf '%s' "$NAME" > /proc/sys/kernel/hostname
+printf '%s' "$NAME" > "$KERNEL_HOSTNAME"
 log "transient hostname set to $NAME (role=$ROLE)"
