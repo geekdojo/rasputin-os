@@ -40,6 +40,8 @@ HOOK=/usr/lib/rasputin/identity/rasputin-keycloak-hooks.sh
 GATE=/usr/lib/rasputin/identity/identity-db-init-gate.sh
 INIT=/usr/lib/rasputin/identity/identity-db-init.sh
 STAGE=/usr/lib/rasputin/identity/identity-stage-import.sh
+# The deny-list staging hook (geekdojo/geekdojo-brain#1145).
+DENY=/usr/lib/rasputin/identity/identity-stage-denylist.sh
 ARMED=/usr/lib/rasputin/identity/armed.sh
 MK="$ROOT/package/rasputin-identity-db/rasputin-identity-db.mk"
 DEFCONFIGS="$ROOT/configs/rasputin_rpi_defconfig $ROOT/configs/rasputin_n100_defconfig"
@@ -218,9 +220,12 @@ MALLOC_ARENA_MAX=2
 "JAVA_OPTS_KC_HEAP=-Xms128m -Xmx384m"
 "JAVA_OPTS_APPEND='"$KC_APPEND"'"'
 	# TC-975-14: the stage step after the hold, as root, with no `-`.
+	# geekdojo/geekdojo-brain#1145: the deny list staged between them, the same.
 	lines Service ExecStartPre "+$HOOK hold
++$DENY
 +$STAGE"
 	check "TC-975-14 $STAGE ships executable in the overlay" "$(yes_if test -x "$OVERLAY$STAGE")"
+	check "#1145 $DENY ships executable in the overlay" "$(yes_if test -x "$OVERLAY$DENY")"
 	exactly Service ExecStart '/usr/lib/keycloak/bin/kc.sh --config-file=/etc/rasputin/identity/keycloak.conf start --optimized --import-realm'
 	lines Service ExecStartPost "+$HOOK wait"
 	lines Service ExecStopPost "-+$HOOK exit"
@@ -401,6 +406,20 @@ refuses verify_kc "$KC_UNIT" "TC-975-14 the stage step before the hold" "replace
 	"ExecStartPre=+$STAGE
 ExecStartPre=+$HOOK hold" "ExecStartPre lines"
 refuses verify_kc "$KC_UNIT" "TC-975-14 the stage step missing" "replace:ExecStartPre=+$STAGE" '' "ExecStartPre lines"
+# geekdojo/geekdojo-brain#1145: the deny-list step with a `-`, without `+`,
+# after the realm staging, or missing, each named.
+refuses verify_kc "$KC_UNIT" "#1145 the deny-list step with a -+ prefix" "replace:ExecStartPre=+$DENY" \
+	"ExecStartPre=-+$DENY" "ExecStartPre lines"
+refuses verify_kc "$KC_UNIT" "#1145 the deny-list step without +" "replace:ExecStartPre=+$DENY" \
+	"ExecStartPre=$DENY" "ExecStartPre lines"
+# The deny-list step and the realm staging swapped: both present, wrong order.
+awk -v a="ExecStartPre=+$DENY" -v b="ExecStartPre=+$STAGE" \
+	'$0 == a { print b; next } $0 == b { print a; next } { print }' "$KC_UNIT" >"$SCRATCH/s/keycloak.service"
+out=$(verify_kc "$SCRATCH/s/keycloak.service"); rc=$?
+check "#1145 the deny-list step after the realm staging: refused, naming 'ExecStartPre lines'" \
+	"$({ [ "$rc" -ne 0 ] && ! cmp -s "$KC_UNIT" "$SCRATCH/s/keycloak.service" \
+		&& printf '%s\n' "$out" | grep -A1 FAIL | grep -qF 'ExecStartPre lines'; } && echo 0 || echo 1)" "$out"
+refuses verify_kc "$KC_UNIT" "#1145 the deny-list step missing" "replace:ExecStartPre=+$DENY" '' "ExecStartPre lines"
 refuses verify_db "$DB_UNIT" "TC-973-01 KillMode=control-group" 'replace:KillMode=mixed' 'KillMode=control-group' '[Service] KillMode=mixed'
 # TC-973-02: one changed flag or hook prefix in keycloak.service, named.
 refuses verify_kc "$KC_UNIT" "TC-973-02 -Xmx512m" 'replace:Environment="JAVA_OPTS_KC_HEAP=-Xms128m -Xmx384m"' \

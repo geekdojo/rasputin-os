@@ -14,16 +14,11 @@
 #   unknown   refuse: whether sign-in was set up cannot be read.
 # The fact is `armed`, read through armed.sh as the database gate reads it.
 #
-# ROOT IN ANOTHER UID'S DIRECTORY. keycloak/data is the keycloak uid's. During
-# ExecStartPre= no process of the unit's uid runs (systemd empties the cgroup
-# before a start), so these static rules are enough. Before touching anything
-# it refuses when keycloak/data is not a real directory, import is present and
-# not a real directory, or the staged name is present and not a regular file
-# (a symlink is none of these). It removes names only with `rm -f`, which
-# unlinks a symlink and never follows it; creates only names it has just
-# removed or found absent; and runs `chown -h` only on what it created. The
-# copy goes in by a rename, which replaces the name and never writes through
-# it.
+# ROOT IN ANOTHER UID'S DIRECTORY. keycloak/data is the keycloak uid's; the
+# rules for writing in it are kcdata-stage.sh's, shared with
+# identity-stage-denylist.sh. Before touching anything it refuses when
+# keycloak/data is not a real directory, import is present and not a real
+# directory, or the staged name is present and not a regular file.
 #
 # EXIT STATUS. 0 to go on, 1 on any refusal or failure (no `-` in the unit, so
 # Keycloak does not start), each with a <3> line.
@@ -39,7 +34,6 @@ KCDATA="${RASPUTIN_KCSTAGE_DATA:-/var/lib/rasputin/keycloak/data}"
 OWNER="${RASPUTIN_KCSTAGE_OWNER:-991:991}"
 IMPORT="$KCDATA/import"
 STAGED="$IMPORT/realm-baseline.json"
-STAGED_TMP="$STAGED.tmp"
 
 umask 077
 
@@ -49,19 +43,21 @@ OUTCOME_KMSG="${RASPUTIN_KCSTAGE_KMSG:-/dev/kmsg}"
 . "$(dirname "$0")/../outcome/outcome.sh"
 # shellcheck source=SCRIPTDIR/armed.sh
 . "$(dirname "$0")/armed.sh"
+# shellcheck source=SCRIPTDIR/kcdata-stage.sh
+. "$(dirname "$0")/kcdata-stage.sh"
 
 fail() {
 	outcome_log 3 "$1"
 	exit 1
 }
 
-if [ -L "$KCDATA" ] || [ ! -d "$KCDATA" ]; then
+if ! kcdata_real_dir "$KCDATA"; then
 	fail "The identity service's data directory $KCDATA is missing or not a real directory, so the realm baseline was not staged."
 fi
-if [ -L "$IMPORT" ] || { [ -e "$IMPORT" ] && [ ! -d "$IMPORT" ]; }; then
+if ! kcdata_dir_ok "$IMPORT"; then
 	fail "$IMPORT is not a real directory, so the identity service's import directory was not touched."
 fi
-if [ -L "$STAGED" ] || { [ -e "$STAGED" ] && [ ! -f "$STAGED" ]; }; then
+if ! kcdata_file_ok "$STAGED"; then
 	fail "$STAGED is not a regular file, so the staged realm baseline was not touched."
 fi
 
@@ -82,15 +78,10 @@ if [ ! -f "$BASELINE" ] || [ ! -r "$BASELINE" ]; then
 	fail "The realm baseline $BASELINE cannot be read, so it was not staged."
 fi
 if [ ! -e "$IMPORT" ]; then
-	{ mkdir -m 0700 "$IMPORT" && chown -h "$OWNER" "$IMPORT"; } \
+	kcdata_mkdir "$IMPORT" "$OWNER" \
 		|| fail "The import directory $IMPORT could not be created, so the realm baseline was not staged."
 fi
-if ! { rm -f "$STAGED_TMP" && cp "$BASELINE" "$STAGED_TMP" && chmod 0600 "$STAGED_TMP" \
-	&& chown -h "$OWNER" "$STAGED_TMP" && mv -f "$STAGED_TMP" "$STAGED"; }; then
-	# Best effort, its error dropped on purpose: the failure is logged next, and
-	# the next start begins by removing it.
-	rm -f "$STAGED_TMP" 2>/dev/null
-	fail "The realm baseline could not be staged as $STAGED."
-fi
+kcdata_install "$BASELINE" "$STAGED" "$OWNER" \
+	|| fail "The realm baseline could not be staged as $STAGED."
 outcome_log 6 "The realm baseline was staged as $STAGED for the identity service's import."
 exit 0

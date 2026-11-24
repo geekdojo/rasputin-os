@@ -67,6 +67,12 @@ Environment="JAVA_OPTS_APPEND=-XX:-UsePerfData -XX:ErrorFile=/dev/null -XX:-Crea
 # that never reached /health/started. `+` runs it as root outside this
 # sandbox; no `-`, so a refusal fails the start.
 ExecStartPre=+/usr/lib/rasputin/identity/rasputin-keycloak-hooks.sh hold
+# geekdojo/geekdojo-brain#1145: copies the release's password deny list into
+# this unit's data directory, where the realm's password policy reads it. `+`
+# runs it as root; it refuses a link or an unexpected file type there. No
+# `-`: a refusal fails the start, because a realm whose policy names a list
+# Keycloak cannot find cannot be loaded at all.
+ExecStartPre=+/usr/lib/rasputin/identity/identity-stage-denylist.sh
 # Identity 2.7 (geekdojo/geekdojo-brain#975): stages the realm baseline for
 # --import-realm only while sign-in is not set up, and removes it once it is.
 # `+` runs it as root; it refuses a link or an unexpected file type in this
