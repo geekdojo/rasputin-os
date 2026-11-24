@@ -38,6 +38,13 @@ KNOWN_PAGES = {
     "login-error": "error",
 }
 
+# The api sign-in door's own pages, which are not Keycloak's and have no
+# fixture in the vectors: the breached-password warning
+# (geekdojo/geekdojo-brain#1145), with its Keep form rasputin-keep-form.
+DOOR_WARNING = "rasputin-door-warning"
+DOOR_PAGES = {DOOR_WARNING: "breached-password warning"}
+_ALL_PAGES = {**KNOWN_PAGES, **DOOR_PAGES}
+
 # Pages that are a second step: their presence after a sign-in form means
 # the second step ran.
 SECOND_STEP_PAGES = frozenset({
@@ -103,7 +110,7 @@ class Page:
 
     def __init__(self, page_id, forms, text_by_id, raw):
         self.page_id = page_id
-        self.step = KNOWN_PAGES[page_id]
+        self.step = _ALL_PAGES[page_id]
         self.forms = forms
         self.text_by_id = text_by_id
         self.raw = raw
@@ -126,7 +133,7 @@ def page_id(body):
     if not match or not match.group(1):
         raise Inconclusive("The page has no data-page-id, so the client cannot tell which page it is.")
     found = match.group(1)
-    if found not in KNOWN_PAGES:
+    if found not in _ALL_PAGES:
         raise Inconclusive(f"The page {found} is not one the client knows.", page_id=found)
     return found
 

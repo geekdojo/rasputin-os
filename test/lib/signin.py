@@ -7,6 +7,7 @@
     signin.py sign-in password|password-totp|password-passkey|passkey|recovery-code
     signin.py sign-out
     signin.py reset-password passkey
+    signin.py set-password --new-password-file F [--then-sign-in]   (same options)
     signin.py negative bad-origin|bad-rpid|no-up|no-uv|bad-signature|bad-challenge|
                        replay|admin-password-alone|no-app-access|
                        pkce-wrong-verifier|pkce-absent
@@ -18,6 +19,15 @@ and --ca FILE, and optionally --server-name, --connect ADDR:PORT,
 --client-cert and --client-key, --timeout and --stock-theme. --doors names a
 JSON file: {"home": {"origin", "realm", "client_id", "redirect_uri",
 "post_logout_uri"}, "app": {...}}. No option takes a secret.
+
+set-password signs in with the current password the account's state file
+holds (an administrator's temporary one), and at UPDATE_PASSWORD posts the
+password read from --new-password-file: a regular file, mode 0600, not
+empty, one trailing newline dropped. When the api's door answers with its
+breached-password warning, it submits the page's own Keep form. With
+--then-sign-in it then signs in with the new password. The new password is
+never printed, logged or written down (the state file keeps the old one as
+old_password); the stdout line names only its length.
 
 Stdout is exactly one line, `signin <verb> PASS|FAIL|INCONCLUSIVE <fact>`.
 Exit 0: the fact held. 1: a named fact failed. 2: the run could not tell
@@ -34,6 +44,7 @@ import http.cookiejar
 import json
 import os
 import shutil
+import stat
 import sys
 import time
 import urllib.parse
@@ -85,6 +96,9 @@ def build_parser():
     verbs.add_parser("sign-in", parents=[keycloak]).add_argument("what", choices=flows.SIGN_IN_METHODS)
     verbs.add_parser("sign-out", parents=[keycloak])
     verbs.add_parser("reset-password", parents=[keycloak]).add_argument("what", choices=("passkey",))
+    setpw = verbs.add_parser("set-password", parents=[keycloak])
+    setpw.add_argument("--new-password-file", required=True, help="a 0600 file holding the new password")
+    setpw.add_argument("--then-sign-in", action="store_true", help="sign in with the new password after")
     verbs.add_parser("negative", parents=[keycloak]).add_argument("what", choices=sorted(flows.NEGATIVES))
     for verb in LEGACY_VERBS:
         verbs.add_parser(verb, parents=[old])
@@ -99,6 +113,31 @@ def load_doors(path):
                                  d["post_logout_uri"]) for name, d in raw.items()}
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as err:
         raise Inconclusive(f"The doors file {path} could not be read ({type(err).__name__}).") from err
+
+
+def read_password_file(path):
+    """The password in a regular 0600 file, less one trailing newline. Any
+    other mode, an empty file or an unreadable one is Inconclusive, and the
+    sentence never carries the file's content."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as err:
+        raise Inconclusive(f"The password file {path} could not be opened ({type(err).__name__}).") from err
+    with os.fdopen(fd, "rb") as f:
+        info = os.fstat(f.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            raise Inconclusive(f"The password file {path} is not a regular file.")
+        if stat.S_IMODE(info.st_mode) != 0o600:
+            raise Inconclusive(f"The password file {path} is mode {stat.S_IMODE(info.st_mode):04o}, not 0600.")
+        raw = f.read()
+    try:
+        password = raw.decode("utf-8")
+    except UnicodeDecodeError as err:
+        raise Inconclusive(f"The password file {path} is not UTF-8.") from err
+    password = password.removesuffix("\n")
+    if not password:
+        raise Inconclusive(f"The password file {path} is empty.")
+    return password
 
 
 def connect_address(value):
@@ -116,7 +155,7 @@ def https_opener(args):
                        connect_address(args.connect), args.server_name, args.timeout)
 
 
-def run_verb(args, clock, rng, passkeys, opener_factory, state, log, trace):
+def run_verb(args, clock, rng, passkeys, opener_factory, state, log, trace, held_secrets):
     soft = passkey.load_soft_passkey(args.soft_passkey)
     jar = http.cookiejar.CookieJar()
     if args.verb in LEGACY_VERBS:
@@ -124,6 +163,10 @@ def run_verb(args, clock, rng, passkeys, opener_factory, state, log, trace):
         transport = Transport(opener_factory(args), {urllib.parse.urlsplit(base).hostname}, jar, state, log)
         old = legacy.Legacy(transport, state, soft, passkeys, rng, jar)
         return old.register(base, args.name) if args.verb == "legacy-register" else old.sign_in(base, args.name)
+    if args.verb == "set-password":
+        # Held in memory for the log's redaction, never in the needles file.
+        new_password = read_password_file(args.new_password_file)
+        held_secrets.add(new_password)
     doors = load_doors(args.doors)
     transport = Transport(opener_factory(args), {d.host for d in doors.values()}, jar, state, log)
     verbs = flows.Flows(transport, doors, state, soft, passkeys, clock, rng, log)
@@ -138,6 +181,8 @@ def run_verb(args, clock, rng, passkeys, opener_factory, state, log, trace):
         verbs.sign_out(trace, args.label, args.door)
     elif args.verb == "reset-password":
         verbs.reset_password_passkey(trace, args.label, args.door)
+    elif args.verb == "set-password":
+        detail = f"{verbs.set_password(trace, args.label, args.door, new_password, args.then_sign_in)}; "
     else:
         detail = f"refused: {verbs.negative(trace, args.what, args.label, args.door)}; "
     return f"{detail}pages={','.join(trace.page_ids) or '-'}"
@@ -147,7 +192,8 @@ def main(argv, env, stdout, stderr, clock, rng, signer_factory, opener_factory):
     """Run one verb; print its one stdout line; return its exit code."""
     verb = argv[0] if argv and not argv[0].startswith("-") else "-"
     held = {}
-    log = Log(stderr, lambda: held["state"].needles() if "state" in held else set())
+    held_secrets = set()
+    log = Log(stderr, lambda: (held["state"].needles() if "state" in held else set()) | held_secrets)
     trace = None
     try:
         args = build_parser().parse_args(argv)
@@ -156,7 +202,8 @@ def main(argv, env, stdout, stderr, clock, rng, signer_factory, opener_factory):
             raise Inconclusive("openssl is not on PATH, so the client cannot make or use a passkey.")
         held["state"] = State(args.state, os.getuid())
         log.info("start", verb=verb)
-        fact = run_verb(args, clock, rng, signer_factory(), opener_factory, held["state"], log, trace)
+        fact = run_verb(args, clock, rng, signer_factory(), opener_factory, held["state"], log, trace,
+                       held_secrets)
         code = EXIT_PASS
     except SigninError as err:
         code, fact = err.exit_code, err.sentence
