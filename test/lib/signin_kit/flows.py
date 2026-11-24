@@ -372,6 +372,40 @@ class Flows:
         outcome, verifier = self._sign_in(trace, door, account, self._method_for(account))
         self._finish(door, outcome, verifier, account)
 
+    def set_password(self, trace, label, door_name, new_password, then_sign_in):
+        """Sign in with the account's current password (an administrator's
+        temporary one), which Keycloak answers with UPDATE_PASSWORD, and post
+        the caller's chosen password there. When the api's door answers with
+        its breached-password warning (geekdojo/geekdojo-brain#1145), submit
+        the page's own Keep form as rendered: its action, resolved against
+        the URL just posted to, and its hidden fields, nothing built here.
+        The new password is held in memory only: it is never put in the
+        account's state file or the needles file. Returns the outcome."""
+        door = self.door(door_name)
+        account = self._state.load(label)
+        outcome, verifier = self._sign_in(trace, door, account, self._method_for(account))
+        page = self._expect(outcome, "login-login-update-password")
+        update = page.form("kc-passwd-update-form")
+        outcome = self._post(trace, update, {"password-new": new_password, "password-confirm": new_password})
+        warned = not isinstance(outcome, Redirect) and outcome.page_id == pages.DOOR_WARNING
+        if warned:
+            keep = outcome.form("rasputin-keep-form")
+            outcome = trace.see(self._t.navigate("POST", urllib.parse.urljoin(update.action, keep.action),
+                                                 dict(keep.fields)))
+        self._finish(door, outcome, verifier, account)
+        # The current password is spent; the new one is not written down.
+        account["old_password"] = account.pop("password")
+        self._state.save(label, account)
+        result = ("breach warning shown, Keep followed, new password set" if warned
+                  else "no breach warning, relayed, new password set")
+        result += f" (length {len(new_password)})"
+        if then_sign_in:
+            outcome, verifier = self._sign_in(trace, door, account, self._method_for(account),
+                                              password=new_password)
+            self._finish(door, outcome, verifier, account)
+            result += "; the new password signs in"
+        return result
+
     def negative(self, trace, name, label, door_name):
         expected = NEGATIVES[name]
         door = self.door(door_name)

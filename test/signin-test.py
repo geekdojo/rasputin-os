@@ -169,6 +169,7 @@ class KeycloakFake:
         self.pending = None
         self.post_errors = []
         self.posted_forms = []
+        self.posts = []
         self.counter = 0
 
     def script(self, bodies):
@@ -199,7 +200,8 @@ class KeycloakFake:
         if self.current is None:
             self.post_errors.append(f"a post to {url} with no page served")
             return
-        same_action = [f for f in self.current.forms if f.action == url]
+        # A form's action may be relative, as the door's Keep form's is.
+        same_action = [f for f in self.current.forms if urllib.parse.urljoin(url, f.action) == url]
         if not same_action:
             self.post_errors.append(f"a post to an action no form on {self.current.page_id} has")
             return
@@ -237,6 +239,7 @@ class KeycloakFake:
                 "id_token": f"eyJhbGciOiJub25lIn0.{claims}.id-token-{self.counter:08d}"}).encode()
         if method == "POST":
             self._check_post(url, form)
+            self.posts.append((url, form))
             return self._next()
         return 404, [], b"not found"
 
@@ -919,6 +922,138 @@ class Units(unittest.TestCase):
             Redirect("https://c.test/cb?error=access_denied").code()
         with self.assertRaises(FactFailed):
             Redirect("https://c.test/cb#state=x").code()
+
+
+# ------------------------------------------------------------------ #1145 set-password
+
+KC = "https://sso-kc959.local:19591/realms/rasputin/login-actions"
+LOGIN_PAGE = (f'<html><body data-page-id="login-login" data-rasputin-theme="rasputin">'
+              f'<form id="kc-form-login" action="{KC}/authenticate?session_code=s1" method="post">'
+              '<input name="username"><input name="password"></form></body></html>').encode()
+UPDATE_ACTION = f"{KC}/required-action?session_code=s2&execution=UPDATE_PASSWORD"
+UPDATE_PAGE = (f'<html><body data-page-id="login-login-update-password" data-rasputin-theme="rasputin">'
+               f'<form id="kc-passwd-update-form" action="{UPDATE_ACTION.replace("&", "&amp;")}" method="post">'
+               '<input type="password" name="password-new"><input type="password" name="password-confirm">'
+               '<input type="checkbox" name="logout-sessions" value="on" checked></form></body></html>').encode()
+
+
+def warning_page(fields):
+    """The door's warning page as pages.html.tmpl renders it at
+    rasputin-control-plane d3fb7170: the Keep form posts to the original
+    request URI (relative), carrying every original field and the marker."""
+    import html as _html
+    keep = "/realms/rasputin/login-actions/required-action?session_code=s2&execution=UPDATE_PASSWORD"
+    hidden = "".join(f'<input type="hidden" name="{_html.escape(k)}" value="{_html.escape(v)}">\n'
+                     for k, v in sorted(fields.items()))
+    return ('<!DOCTYPE html>\n<html class="rasp-signin" lang="en">\n<head><title>Password found in a data breach'
+            '</title></head>\n<body class="rasp-body" data-page-id="rasputin-door-warning" '
+            'data-rasputin-theme="rasputin">\n<main class="rasp-card">\n'
+            '<div id="kc-feedback" class="rasp-alert rasp-alert-error" role="alert"><span class="rasp-alert-text">'
+            'This password has appeared in a data breach.</span></div>\n'
+            f'<form id="rasputin-keep-form" method="post" action="{_html.escape(keep)}">\n{hidden}'
+            '<input type="hidden" name="rasputin-keep-password" value="keep">\n<div class="rasp-buttons">\n'
+            '<a class="rasp-btn rasp-btn-block" id="rasputin-choose-another" '
+            'href="/realms/rasputin/login-actions/required-action?execution=UPDATE_PASSWORD">Choose a different '
+            'password</a>\n<button class="rasp-link" id="rasputin-keep" type="submit">Keep this password</button>\n'
+            '</div>\n</form>\n</main>\n</body>\n</html>\n').encode()
+
+
+class SetPassword(unittest.TestCase):
+    """The set-password verb for TC-1145-41's bench run (geekdojo/geekdojo-brain#1145):
+    the temporary password reaches UPDATE_PASSWORD, the chosen password is
+    posted, and the door's warning is answered with its own Keep form."""
+
+    CHOSEN = "chosen-phrase-for-the-unit-test-1145"
+    TEMP = "temporary-admin-set-password"
+
+    def setUp(self):
+        self.state = state_dir(self)
+        State(self.state, os.getuid()).save("t", {"label": "t", "username": "t-user", "password": self.TEMP})
+        self.pwdir = tempfile.mkdtemp(prefix="signin-pw-")
+        self.addCleanup(shutil.rmtree, self.pwdir, True)
+        self.outputs = []
+
+    def pwfile(self, content, mode=0o600):
+        path = os.path.join(self.pwdir, "pw")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+        os.chmod(path, mode)
+        return path
+
+    def go(self, fake, path, *extra):
+        code, out, err = run(["set-password", "--state", self.state, "--doors", write_doors(), "--ca", "/unused",
+                              "--label", "t", "--new-password-file", path, *extra], fake)
+        self.outputs.append(out + err)
+        self.assertRegex(out, LINE)
+        return code, out
+
+    def update_fields(self):
+        return {"password-new": self.CHOSEN, "password-confirm": self.CHOSEN, "logout-sessions": "on"}
+
+    def assert_password_absent(self):
+        text = "".join(self.outputs)
+        self.assertNotIn(self.CHOSEN, text)
+        for name in os.listdir(self.state):
+            with open(os.path.join(self.state, name), encoding="utf-8", errors="replace") as f:
+                self.assertNotIn(self.CHOSEN, f.read(), f"the state file {name} holds the new password")
+
+    def test_warning_then_keep_sets_the_password_and_it_signs_in(self):
+        fake = KeycloakFake()
+        fake.script([LOGIN_PAGE, UPDATE_PAGE, warning_page(self.update_fields()), None, LOGIN_PAGE])
+        code, out = self.go(fake, self.pwfile(self.CHOSEN + "\n"), "--then-sign-in")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out, "signin set-password PASS breach warning shown, Keep followed, new password set "
+                              f"(length {len(self.CHOSEN)}); the new password signs in; pages=login-login,"
+                              "login-login-update-password,rasputin-door-warning,login-login\n")
+        self.assertEqual(fake.post_errors, [])
+        (login_url, login), (update_url, update), (keep_url, keep), (again_url, again) = fake.posts
+        self.assertEqual(login["password"], self.TEMP)
+        self.assertEqual(update_url, UPDATE_ACTION)
+        self.assertEqual((update["password-new"], update["password-confirm"]), (self.CHOSEN, self.CHOSEN))
+        # Keep is the page's own form: its relative action, resolved, and its hidden fields.
+        self.assertEqual(keep_url, UPDATE_ACTION)
+        self.assertEqual(keep, dict(self.update_fields(), **{"rasputin-keep-password": "keep"}))
+        self.assertEqual(again["password"], self.CHOSEN)
+        saved = State(self.state, os.getuid()).load("t")
+        self.assertEqual(saved["old_password"], self.TEMP)
+        self.assertNotIn("password", saved)
+        self.assert_password_absent()
+
+    def test_no_warning_is_relayed_and_named(self):
+        fake = KeycloakFake()
+        fake.script([LOGIN_PAGE, UPDATE_PAGE, None])
+        code, out = self.go(fake, self.pwfile(self.CHOSEN))
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out, "signin set-password PASS no breach warning, relayed, new password set "
+                              f"(length {len(self.CHOSEN)}); pages=login-login,login-login-update-password\n")
+        self.assertEqual(len(fake.posts), 2)
+        self.assertNotIn("rasputin-keep-password", fake.posts[1][1])
+        self.assert_password_absent()
+
+    def test_bad_file_mode_is_refused_before_any_call(self):
+        fake = KeycloakFake()
+        fake.script([LOGIN_PAGE, UPDATE_PAGE, None])
+        code, out = self.go(fake, self.pwfile(self.CHOSEN, 0o644))
+        self.assertEqual(code, 2, out)
+        self.assertIn("mode 0644, not 0600", out)
+        self.assertEqual(fake.served, [])
+        self.assert_password_absent()
+
+    def test_empty_file_is_refused(self):
+        for content in ("", "\n"):
+            with self.subTest(content=content):
+                code, out = self.go(KeycloakFake(), self.pwfile(content))
+                self.assertEqual(code, 2, out)
+                self.assertIn("is empty", out)
+
+    def test_failed_update_keeps_the_temporary_password_and_prints_no_password(self):
+        refused = UPDATE_PAGE.replace(b"</form>", b'</form><span id="input-error">Invalid password.</span>')
+        fake = KeycloakFake()
+        fake.script([LOGIN_PAGE, UPDATE_PAGE, refused])
+        code, out = self.go(fake, self.pwfile(self.CHOSEN))
+        self.assertEqual(code, 1, out)
+        self.assertEqual(State(self.state, os.getuid()).load("t")["password"], self.TEMP)
+        self.assert_password_absent()
 
 
 if __name__ == "__main__":
