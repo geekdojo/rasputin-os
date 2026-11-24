@@ -361,11 +361,17 @@ jobs:
       # initdb flags and bootstrap checks against a fake initdb and postgres,
       # the realm stage step, refusals of planted links and unexpected file
       # types, and armed.sh, under dash, bash, busybox ash and busybox's own
-      # applets.
+      # applets. Then the password deny list's staging hook
+      # (geekdojo/geekdojo-brain#1145): staged at 0600 in a 0700 directory
+      # beside the realm staging, a stale copy replaced by a rename, an older
+      # api tarball leaving an existing copy alone, and each refusal writing
+      # nothing through a link and leaving no temp file.
       - name: Identity first-boot script tests
         env:
           REQUIRE_BUSYBOX: "1"
-        run: sh test/identity-db-init-test.sh
+        run: |
+          sh test/identity-db-init-test.sh
+          sh test/identity-stage-denylist-test.sh
       # The secrets store's main config, openbao.hcl, and its enablement
       # (geekdojo/geekdojo-brain#756): the exact keys of each scope, the
       # listener on 127.0.0.1:8200 with a required client certificate and the

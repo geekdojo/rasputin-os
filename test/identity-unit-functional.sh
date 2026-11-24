@@ -80,6 +80,12 @@
 #   40  with the database stopped too, the run fails, leaves no root-owned
 #       file and frees the unit name, and Keycloak starts; a second run then
 #       succeeds (TC-1131-14, TC-1131-15)
+#   The password deny list (geekdojo/geekdojo-brain#1145):
+#   41  with a list in the release's password-blacklists/, the unit stages it
+#       in data/password-blacklists/ at 0600 991:991 in a 0700 991:991
+#       directory, byte-equal, and Keycloak reaches /health/started; with
+#       the directory absent (an older api tarball) the unit still reaches
+#       started, logs the <6> line and leaves the copy (TC-1145-13)
 #
 # TEST HARNESS, not from the image, and labelled where it is done:
 #   * the keycloak (991) and postgres (992) users, which mkusers creates on the
@@ -94,6 +100,9 @@
 #     recipe (the image's JRE ships one; the extracted tarball does not);
 #   * the realm baseline, copied from the pinned api tarball's identity/ to
 #     the path the api package installs it at;
+#   * scenario 41's deny list, a two-line harness file at the path the api
+#     package installs the release's list at (the pinned api tarball may
+#     predate the list), removed again for its second half;
 #   * a throwaway identity CA and its leaves (test/lib/test-pki.sh) standing
 #     in for the ones the api mints (#977), and a mesh CA;
 #   * drop-ins Environment= pointing the hooks' console lines at files,
@@ -151,6 +160,7 @@ for f in "$SYSD/$KC" "$SYSD/$DB" "$OVERLAY/$HOOK_REL" "$OVERLAY/etc/rasputin/ide
 	"$OVERLAY/etc/rasputin/identity/postgresql.conf" "$OVERLAY/etc/rasputin/identity/pg_hba.conf" "$ROOT/board/rasputin/common/post-build.sh" "$OVERLAY/usr/lib/rasputin/outcome/outcome.sh" \
 	"$OVERLAY/$ID_REL/armed.sh" "$OVERLAY/$ID_REL/identity-db-init-gate.sh" "$OVERLAY/$ID_REL/identity-db-init.sh" \
 	"$OVERLAY/$ID_REL/identity-stage-import.sh" "$OVERLAY/$ID_REL/rasputin-keycloak-recover-admin.sh" \
+	"$OVERLAY/$ID_REL/kcdata-stage.sh" "$OVERLAY/$ID_REL/identity-stage-denylist.sh" \
 	"$OVERLAY/usr/lib/tmpfiles.d/rasputin.conf" "$OVERLAY/usr/lib/rasputin/atrest/inventory" \
 	"$OVERLAY/usr/lib/rasputin/atrest/rasputin-atrest-audit.sh" "$KCPKG/keycloak.mk" "$KCPKG/keycloak.hash" \
 	"$JREPKG/temurin-jre.mk" "$JREPKG/temurin-jre.hash"; do
@@ -294,7 +304,8 @@ install -D -m 0644 /overlay/usr/lib/rasputin/outcome/outcome.sh /usr/lib/rasputi
 # Identity 2.7's gate, init and stage steps and armed.sh, and Identity 2.9's
 # recovery launcher, verbatim.
 install -m 0644 /overlay/$ID_REL/armed.sh /$ID_REL/armed.sh
-for s in identity-db-init-gate.sh identity-db-init.sh identity-stage-import.sh rasputin-keycloak-recover-admin.sh; do
+install -m 0644 /overlay/$ID_REL/kcdata-stage.sh /$ID_REL/kcdata-stage.sh
+for s in identity-db-init-gate.sh identity-db-init.sh identity-stage-import.sh identity-stage-denylist.sh rasputin-keycloak-recover-admin.sh; do
 	install -m 0755 /overlay/$ID_REL/\$s /$ID_REL/\$s
 done
 # The realm baseline where the api package installs it.
@@ -311,7 +322,7 @@ rm -f /usr/lib/temurin-jre/lib/security/jssecacerts
 /usr/lib/temurin-jre/bin/keytool -list \$J 2>/dev/null | grep -qx 'Your keystore contains 0 entries'
 # TEST HARNESS: in a privileged container /dev/kmsg is the host's.
 mkdir -p /etc/systemd/system/$KC.d
-printf '[Service]\nEnvironment=RASPUTIN_KCHOOK_KMSG=/run/kchook-console\nEnvironment=RASPUTIN_KCSTAGE_KMSG=/run/kcstage-console\n' >/etc/systemd/system/$KC.d/harness-console.conf
+printf '[Service]\nEnvironment=RASPUTIN_KCHOOK_KMSG=/run/kchook-console\nEnvironment=RASPUTIN_KCSTAGE_KMSG=/run/kcstage-console\nEnvironment=RASPUTIN_KCDENY_KMSG=/run/kcdeny-console\n' >/etc/systemd/system/$KC.d/harness-console.conf
 mkdir -p /etc/systemd/system/$DB.d
 printf '[Service]\nEnvironment=RASPUTIN_IDDBGATE_KMSG=/run/iddbgate-console\n' >/etc/systemd/system/$DB.d/harness-console.conf
 systemctl daemon-reload
@@ -1092,6 +1103,32 @@ check "TC-1131-15 the unit name is reused: a second run exits 0 (got $RC)" "$(ye
 collected "TC-1131-15 after the second run"
 kc_up "TC-1131-15 after the second run"
 admin_works "TC-1131-15" rasputin-recover-tc40b "$S40B"
+reset
+
+echo
+echo "41. the password deny list staged under real systemd (TC-1145-13)"
+DENYSRC=/usr/share/rasputin/identity/password-blacklists
+DENYDIR=$V/keycloak/data/password-blacklists
+DENYLIST=rasputin-common-passwords.txt
+# TEST HARNESS: a list where the api package installs the release's.
+inside "install -d -m 0755 $DENYSRC && printf 'harness-listed-password-one\nharness-listed-password-two\n' >$DENYSRC/$DENYLIST && chmod 0644 $DENYSRC/$DENYLIST && rm -rf $DENYDIR"
+c=$(cursor)
+kc_up "TC-1145-13 with the list shipped"
+st=$(inside "stat -c '%a %u:%g' $DENYDIR $DENYDIR/$DENYLIST | tr '\n' ' '")
+check "TC-1145-13 the staged directory is 0700 991:991 and the list 0600 991:991 (got '$st')" "$(yes_if [ "$st" = "700 991:991 600 991:991 " ])"
+check "TC-1145-13 the staged list is byte-equal to the shipped one" \
+	"$(yes_if inside "[ \"\$(sha256sum <$DENYSRC/$DENYLIST)\" = \"\$(sha256sum <$DENYDIR/$DENYLIST)\" ]")"
+check "TC-1145-13 the journal holds the hook's <6> staged line" \
+	"$(yes_if inside "journalctl --after-cursor='$c' -u $KC -p 6..6 -o cat --no-pager | grep -q '^identity-stage-denylist: The password deny list was staged'")" \
+	"$(inside "journalctl --after-cursor='$c' -u $KC -o cat --no-pager | grep identity-stage-denylist")"
+before=$(inside "sha256sum <$DENYDIR/$DENYLIST")
+inside "systemctl stop $KC; rm -rf $DENYSRC"
+c=$(cursor)
+kc_up "TC-1145-13 with no list shipped"
+check "TC-1145-13 with no list shipped the journal holds the hook's <6> line" \
+	"$(yes_if inside "journalctl --after-cursor='$c' -u $KC -p 6..6 -o cat --no-pager | grep -q '^identity-stage-denylist: This release ships no password deny list'")" \
+	"$(inside "journalctl --after-cursor='$c' -u $KC -o cat --no-pager | grep identity-stage-denylist")"
+check "TC-1145-13 with no list shipped the earlier copy is kept" "$(yes_if [ "$(inside "sha256sum <$DENYDIR/$DENYLIST")" = "$before" ])"
 reset
 
 echo
