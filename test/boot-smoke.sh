@@ -37,18 +37,19 @@ mkdir -p "$WORK"
 # Seed lookup, OVMF and the per-arch QEMU line, shared with test/update-smoke.sh.
 . "$(dirname "$0")/lib/qemu-common.sh"
 # The store readiness check (geekdojo/geekdojo-brain#834): the verdict on the
-# api's report, the wait and the post-kill report; and the first-run sign-in
-# that reading the report needs, with the soft passkey it runs.
+# api's report, the wait and the post-kill report.
 # shellcheck source=test/lib/store-ready.sh
 . "$(dirname "$0")/lib/store-ready.sh"
-# shellcheck source=test/lib/api-session.sh
-. "$(dirname "$0")/lib/api-session.sh"
+# The first-run sign-in through the console (geekdojo/geekdojo-brain#993):
+# the signin.py wrapper and the facts it waits on. Its session is the one the
+# store and identity reports are read with.
+# shellcheck source=test/lib/smoke-signin.sh
+. "$(dirname "$0")/lib/smoke-signin.sh"
 # The identity service's readiness (geekdojo/geekdojo-brain#974): the realm
 # wait and the verdict on the api's identity report.
 # shellcheck source=test/lib/identity-ready.sh
 . "$(dirname "$0")/lib/identity-ready.sh"
 LIBDIR="$(dirname "$0")/lib"
-SOFT_PASSKEY="$(dirname "$0")/lib/soft-passkey.py"
 
 # Host-side forwards into the guest. The same numbers serve both arches: the two
 # smoke jobs run on separate runners, so they never collide.
@@ -108,10 +109,33 @@ SSH_PORT=12222
 # failed. The poll ends the moment HTTPS answers, normally on its first read;
 # its worst case adds 120s to the ceilings above, still inside the qemu
 # timeout for the reason given there.
+# The first-run sign-in (geekdojo/geekdojo-brain#993, amd64 only), after the
+# realm wait, waits on three facts, each polled 2s apart and ended the moment
+# it holds:
+#   DOOR_TRIES  the console's /api/auth/signup reaching the door's themed
+#               registration form: converge has applied the console client's
+#               redirect URI and opened registration. Converge is submitted at
+#               a scheduler check every 60s once migrations are applied, so
+#               the ceiling is 60 reads, 120s: one check interval, the run and
+#               a margin.
+#   SYNC_TRIES  the guest's clock-sync marker, then the realm offering
+#               CONFIGURE_TOTP (converge enables it only on a run that read
+#               the marker): 30 reads, 60s, normally the first.
+#   GRANT_TRIES GET /api/auth/me on the authenticator enrolment's session
+#               answering 401: the grant ends the account's sessions (C23).
+#               30 reads, 60s, normally within a few.
+# Each signin.py call is bounded by --timeout 20 per HTTP call, and a code
+# sign-in waits at most 30s for the next TOTP step. Projected from SP-1 the
+# phase adds about 263s on a fresh image (base 154 + fresh ready 22.0 + verb
+# subset 87.1; identity-evidence/959/index.md:33,127); its ceilings (120 + 60
+# + 60 plus the verbs) sit on top of the polls above, which by then end on
+# their first read, so a stuck fact is reported by its own ::error:: line
+# rather than by QEMU's 900s bound killing the guest under the script.
 # The arm64 identity masks (prepare_arm64 says why); the growpart leg's boot
 # carries them too.
 ARM64_ID_MASKS="systemd.mask=keycloak.service systemd.mask=keycloak-db.service"
 BOOT_BUDGET=900 ; MU_TRIES=120 ; FB_TRIES=60 ; API_TRIES=48 ; HS_TRIES=60 ; ATREST_TRIES=60 ; TS_TRIES=30 ; KM_TRIES=30 ; SI_TRIES=30 ; SR_TRIES=30
+DOOR_TRIES=60 ; SYNC_TRIES=30 ; GRANT_TRIES=30
 case "$ARCH" in
   amd64|arm64) ;;
   *) echo "::error::unknown arch '$ARCH' (expected amd64 or arm64)"; exit 1 ;;
@@ -150,7 +174,8 @@ GROW_IMG="$WORK/grow.img"
 rm -f "$KEY" "$KEY.pub" "$GROW_IMG"
 smoke_cleanup() {
   [ -n "${QPID:-}" ] && kill "$QPID" 2>/dev/null && wait "$QPID" 2>/dev/null
-  rm -f "$KEY" "$KEY.pub" "$GROW_IMG"
+  # The sign-in's synthetic credentials, keys and session jars (#993).
+  rm -rf "$KEY" "$KEY.pub" "$GROW_IMG" "$WORK/signin"
 }
 trap smoke_cleanup EXIT
 ssh-keygen -q -t ed25519 -N '' -C boot-smoke -f "$KEY" \
@@ -346,7 +371,7 @@ FB_AT=$(( $(date +%s) - START ))
 # HTTP-only) or a redirect to the HTTPS origin (api with native TLS treats :80
 # as a bootstrap/redirect surface) — accept both so the smoke doesn't break
 # across the api's HTTPS rollout.
-api=0 ui=0 https=0 NSUDP="" NSTCP="" RPID="" HS_FIRST=""
+api=0 ui=0 https=0 NSUDP="" NSTCP="" HS_FIRST=""
 if [ "$fb" = 1 ]; then
   i=0
   while [ "$i" -lt "$API_TRIES" ]; do
@@ -370,25 +395,14 @@ if [ "$fb" = 1 ]; then
       die_if_qemu_gone "the api's HTTPS listener to answer /healthz"
       i=$((i + 1)); sleep 2
     done
-    # Capture the api's WebAuthn RP ID while the VM is STILL RUNNING. It is
-    # asserted further down with the console checks, but it can only be
-    # COLLECTED here: everything below runs after the qemu kill, so an HTTP call
-    # there talks to a dead machine and returns nothing — which reads exactly
-    # like a failed derivation.
-    # HTTPS because :80 is only the bootstrap/redirect surface; -k because the
-    # leaf is signed by the per-installation Mesh CA. Unauthenticated on
-    # purpose: first-user registration is open until a user exists, which is
-    # this freshly-provisioned box.
-    [ "$https" = 1 ] && RPID=$(curl -sk --max-time 10 -X POST "https://127.0.0.1:${HTTPS_PORT}/api/auth/register/begin" \
-      -H 'Content-Type: application/json' \
-      -d '{"name":"smoke","displayName":"Smoke Test"}' | jq -r '.publicKey.rp.id // empty')
     # CP nameserver (ADR-0004 §3/§8): ask the guest's own :53 for the cluster
     # zone apex over BOTH transports, via the hostfwd on the qemu line.
-    # Collected here for the same reason as RPID.
+    # Collected here, while the VM is still running: everything below the
+    # qemu kill talks to a dead machine.
     #
     # Queried rather than grepped from the console because the api logs to the
     # journal — its "nameserver authoritative for ..." line is not on the serial
-    # console. As with RPID, asking is the stronger check anyway: it proves the
+    # console. Asking is the stronger check anyway: it proves the
     # responder ANSWERS, not that something printed.
     #
     # UDP and TCP are asked SEPARATELY on purpose. The api binds the two
@@ -513,60 +527,145 @@ if [ "$api" = 1 ]; then
 fi
 SI_AT=$(( $(date +%s) - START ))
 
-# The api reports the secrets store ready (geekdojo/geekdojo-brain#834). Its
-# only report is GET /api/alerts, which needs a session: a store in any state
-# but ready raises a "secret-store:" alert there. The smoke signs in through
-# first-run registration, open on this fresh control plane, then polls the
-# list here, before the kill, and the outcome is asserted after it. Only once
-# the store-init line is in: until then there is nothing to ask about.
-#
-# The SR_ variables are set before the gate because this script runs under
-# set -u, and the report reads all of them on every path.
-SR_STAGE="" SR_REASON="" SR_RC="" SR_LAST="" SR_AT=""
-SR_JAR="$WORK/store-ready.jar"
-# smoke_post URL BODYFILE OUTFILE JAR — api_session's POST.
-smoke_post() {
-  curl -sk -c "$4" -b "$4" --max-time 10 -H 'Content-Type: application/json' \
-    --data-binary "@$2" -o "$3" -w '%{http_code}' "$1" || true
-}
-# smoke_fetch — store_ready_wait's FETCH: prints the code and the body's path.
-smoke_fetch() {
-  rm -f "$WORK/alerts.body"
-  printf '%s %s\n' "$(curl -sk -b "$SR_JAR" --max-time 5 -o "$WORK/alerts.body" -w '%{http_code}' \
-    "https://127.0.0.1:${HTTPS_PORT}/api/alerts" || true)" "$WORK/alerts.body"
-}
-if [ "$sirep" = 1 ]; then
-  (umask 077; : > "$SR_JAR")
-  mkdir -p "$WORK/store-ready"
-  SR_STAGE="signin"
-  if SR_REASON=$(api_session smoke_post "https://127.0.0.1:${HTTPS_PORT}" "https://${RPID}" "$SR_JAR" "$WORK/store-ready" "$SOFT_PASSKEY"); then
-    SR_STAGE="wait"
-    store_ready_wait "$SR_TRIES" 2 smoke_fetch die_if_qemu_gone
-    SR_RC=$?
-  fi
-fi
-SR_AT=$(( $(date +%s) - START ))
-
-# The identity service is ready (geekdojo/geekdojo-brain#974, amd64 only: the
-# arm64 smoke masks both identity units, see prepare_arm64). After the store
-# check, in this order, each read before the kill and asserted after it:
+# The identity service is ready (geekdojo/geekdojo-brain#974), and the first
+# account is made and signed in through the console (#993), amd64 only: the
+# arm64 smoke masks both identity units, see prepare_arm64. In this order, each
+# read before the kill and asserted after it:
 #   (a) the realm wait (test/lib/identity-ready.sh): realm rasputin's
 #       discovery document answering 200 over mutual TLS with the api's
 #       identity client leaf, stopped early by a failed unit or the start-hold
 #       record, and bounded only by QEMU's budget through die_if_qemu_gone;
-#   (b) one GET /api/alerts on the store check's session: no identity: id.
-#       One read is enough, because the api's monitor computes on each read.
+#   the first-run sign-in (below), whose password-and-code sign-in's session
+#       is the jar every report after it is read with;
+#   the store's readiness (geekdojo/geekdojo-brain#834): its only report is
+#       GET /api/alerts, which needs a session, where a store in any state but
+#       ready raises a "secret-store:" alert; polled once the store-init line
+#       is in, since until then there is nothing to ask about;
+#   (b) one GET /api/alerts on that session: no identity: id. One read is
+#       enough, because the api's monitor computes on each read.
 # The image facts (c), the guest checks (d), the memory record (e) and the
 # role gate (f) follow below, after the facts reads.
+#
+# The SR_ variables are set before the gate because this script runs under
+# set -u, and the report reads all of them on every path.
+SR_STAGE="" SR_REASON="" SR_RC="" SR_LAST="" SR_AT=""
+SG_DIR="$WORK/signin"
+SR_JAR="$SG_DIR/admin.jar"
+MESH_CA_PEM="$SG_DIR/mesh-ca.pem"
+CONSOLE_HOST="${CLUSTER_ID}.local"
+APP_HOST="signin.${CLUSTER_ID}.internal"
+# smoke_fetch — store_ready_wait's FETCH: prints the code and the body's path.
+# The console's own name, its certificate checked against the cluster's CA.
+smoke_fetch() {
+  rm -f "$WORK/alerts.body"
+  printf '%s %s\n' "$(curl -s --connect-to "${CONSOLE_HOST}:443:127.0.0.1:${HTTPS_PORT}" --cacert "$MESH_CA_PEM" \
+    -b "$SR_JAR" --max-time 5 -o "$WORK/alerts.body" -w '%{http_code}' \
+    "https://${CONSOLE_HOST}/api/alerts" || true)" "$WORK/alerts.body"
+}
+# me_status — GET /api/auth/me's status on the authenticator enrolment's
+# session, for the grant wait.
+me_status() {
+  curl -s -o /dev/null -w '%{http_code}' --connect-to "${CONSOLE_HOST}:443:127.0.0.1:${HTTPS_PORT}" \
+    --cacert "$MESH_CA_PEM" -b "$SG_DIR/enrol.jar" --max-time 5 "https://${CONSOLE_HOST}/api/auth/me" || true
+}
+sync_probe() { ss_sync_probe ssh_guest; }
+grant_probe() { ss_grant_probe me_status; }
+
+# The first-run sign-in (geekdojo/geekdojo-brain#993, issue TC-01 to TC-03):
+# the customer's path, through the console at https://smoke1.local and its
+# home door https://sso-smoke1.local, every name sent to the HTTPS hostfwd
+# with its certificate checked against the cluster's CA. The account is made
+# on the door's pages; nothing enrols through the Admin API. Each step needs
+# the one before it, so the first failure stops the sequence: SG_FAIL names
+# it, and the assertion after the kill reports it.
+#
+# Run here: create-account (and its recovery codes); the authenticator app and
+# a passkey through #1150's launcher, each after a fresh sign-in; the grant;
+# sign-out; password and code, passkey alone, and a recovery code; the
+# password alone refused; and the WebAuthn negatives at the home door, last.
+# Not run here, by decision (dev-records 993 README, 2026-11-25):
+# pkce-wrong-verifier and pkce-absent, because the api holds the PKCE verifier
+# and a client cannot send a wrong or absent one (S256 and the exchange are
+# covered in rasputin-control-plane's identity/client/exchange_test.go and
+# converge/backchannel_test.go, and by SP-1 against stock Keycloak); and
+# no-app-access, which needs an app-door client, and so a full app-door
+# sign-in, with #1027. The app door's own name and certificate are checked
+# through its discovery document instead.
 IR_RC="" IR_LAST="" IR_SECONDS="" ID_REPORT=""
+SG_FAIL="" SG_AT="" SG_ROLES="" SG_RPID="" SG_RPID2="" SG_NEG="" APP_CODE="" APP_ISSUER=""
+SS_SIGNIN="$LIBDIR/signin.py" SS_STATE="$SG_DIR/state" SS_DOORS="$SG_DIR/doors.json" SS_CA="$MESH_CA_PEM"
+SS_CONNECT="127.0.0.1:${HTTPS_PORT}" SS_LABEL=owner
+# sg_fail SENTENCE — the first failure, kept; every later step is skipped.
+sg_fail() { [ -n "$SG_FAIL" ] || SG_FAIL=$1; }
+# sg STEP... — one smoke_signin step, run only while nothing has failed.
+sg() { [ -z "$SG_FAIL" ] || return 1; smoke_signin "$@" || { sg_fail "signin.py $* did not pass"; return 1; }; }
+# sg_field KEY — KEY's value in the last signin.py line, e.g. rp_id or roles.
+sg_field() { printf '%s\n' "$SS_LINE" | tr ' ' '\n' | sed -n "s/^$1=\\(.*\\);\$/\\1/p" | head -1; }
+sign_in_sequence() {
+  rm -rf "$SG_DIR"
+  (umask 077 && mkdir -p "$SS_STATE") || { sg_fail "the sign-in's state directory could not be made"; return; }
+  chmod 700 "$SS_STATE"
+  ssh_guest 'cat /var/lib/rasputin/trust/mesh-ca.pem' </dev/null >"$MESH_CA_PEM" 2>/dev/null && [ -s "$MESH_CA_PEM" ] \
+    || { echo "::error::the cluster's CA /var/lib/rasputin/trust/mesh-ca.pem could not be read over SSH"; sg_fail "no mesh CA"; return; }
+  cat >"$SS_DOORS" <<EOF
+{"home": {"origin": "https://sso-${CONSOLE_HOST}", "realm": "rasputin", "client_id": "rasputin-console",
+          "redirect_uri": "https://${CONSOLE_HOST}/api/auth/callback",
+          "console": {"origin": "https://${CONSOLE_HOST}", "methods_route": "/api/me/sign-in-methods",
+                      "methods": {"totp": "authenticator_app", "passkey": "passkey",
+                                  "passkey-2fa": "security_key", "recovery-codes": "recovery_codes"}}},
+ "app": {"origin": "https://${APP_HOST}", "realm": "rasputin", "client_id": "no-app-client-until-1027",
+         "redirect_uri": "https://app.${CLUSTER_ID}.internal/callback"}}
+EOF
+  # The app door is named only as the negatives' wrong origin and RP ID.
+  ss_wait "the console's sign-up reaching the door's registration form" "$DOOR_TRIES" 2 ss_door_probe die_if_qemu_gone \
+    || { sg_fail "the door never showed its registration form"; return; }
+  sg create-account || return
+  case ",$(sg_field roles)," in *,admin,*) echo "::error::the account was made an administrator at creation, before any second step: $SS_LINE"; sg_fail "admin at creation"; return ;; esac
+  ss_wait "the clock-sync marker, then the realm offering CONFIGURE_TOTP" "$SYNC_TRIES" 2 sync_probe die_if_qemu_gone \
+    || { sg_fail "the authenticator app was never offered"; return; }
+  sg enrol totp --jar "$SG_DIR/enrol.jar" || return
+  ss_wait "the grant ending the enrolment's console session" "$GRANT_TRIES" 2 grant_probe die_if_qemu_gone \
+    || { sg_fail "the grant never ended the enrolment's session"; return; }
+  sg enrol passkey || return
+  SG_RPID=$(sg_field rp_id)
+  sg sign-out || return
+  sg sign-in password-totp --jar "$SR_JAR" || return
+  SG_ROLES=$(sg_field roles)
+  sg sign-in passkey || return
+  SG_RPID2=$(sg_field rp_id)
+  sg negative admin-password-alone || return
+  sg sign-in recovery-code || return
+  rm -f "$WORK/app-door.json"
+  APP_CODE=$(curl -s --max-time 10 --connect-to "${APP_HOST}:443:127.0.0.1:${HTTPS_PORT}" --cacert "$MESH_CA_PEM" \
+    -o "$WORK/app-door.json" -w '%{http_code}' "https://${APP_HOST}/realms/rasputin/.well-known/openid-configuration" || true)
+  APP_ISSUER=$(jq -r '.issuer // empty' "$WORK/app-door.json" 2>/dev/null)
+  for n in bad-origin bad-rpid no-up no-uv bad-signature bad-challenge replay; do
+    sg negative "$n" || return
+    SG_NEG="$SG_NEG $n"
+  done
+}
 if [ "$ARCH" = amd64 ] && [ "$ok" = 1 ] && [ "$fb" = 1 ]; then
   identity_realm_wait 2 ssh_guest die_if_qemu_gone
   IR_RC=$?
-  if [ "$IR_RC" = 0 ] && [ "$SR_STAGE" = wait ]; then
-    _f=$(smoke_fetch)
-    ID_REPORT=$(identity_report_verdict "${_f%% *}" "${_f#* }")
+  if [ "$IR_RC" = 0 ]; then
+    sign_in_sequence
+    SG_AT=$(( $(date +%s) - START ))
+    if [ "$sirep" = 1 ]; then
+      if [ -s "$SR_JAR" ]; then
+        SR_STAGE="wait"
+        store_ready_wait "$SR_TRIES" 2 smoke_fetch die_if_qemu_gone
+        SR_RC=$?
+      else
+        SR_STAGE="signin" SR_REASON="${SG_FAIL:-the password-and-code sign-in wrote no session jar}"
+      fi
+    fi
+    if [ "$SR_STAGE" = wait ]; then
+      _f=$(smoke_fetch)
+      ID_REPORT=$(identity_report_verdict "${_f%% *}" "${_f#* }")
+    fi
   fi
 fi
+SR_AT=$(( $(date +%s) - START ))
 ID_AT=$(( $(date +%s) - START ))
 
 TOTAL=$(( $(date +%s) - START ))
@@ -583,10 +682,13 @@ TOTAL=$(( $(date +%s) - START ))
 guest_diag_needed() {
   [ "$api" = 1 ] || return 0
   [ "$https" = 1 ] || return 0
-  [ "$RPID" = "${CLUSTER_ID}.local" ] || return 0
   [ "$sirep" = 1 ] || return 0
   grep -aq 'rasputin-store-init: outcome=initialised' "$CONSOLE_LOG" || return 0
   grep -aqE 'rasputin-store-(init|provision): outcome=failed' "$CONSOLE_LOG" && return 0
+  # The sign-in and the store read run on amd64 only (identity is masked on
+  # arm64), so only there can they call for the journal.
+  [ "$ARCH" = amd64 ] || return 1
+  [ -z "$SG_FAIL" ] || return 0
   [ "$SR_STAGE" = wait ] && [ "$SR_RC" = 0 ] || return 0
   return 1
 }
@@ -734,7 +836,8 @@ kill "$QPID" 2>/dev/null || true
 echo "----- last 60 lines of console -----"; tail -60 "$CONSOLE_LOG" || true
 echo "----- $ARCH smoke timings (seconds from qemu start) -----"
 echo "https /healthz on its first read after :80 answered: HTTP ${HS_FIRST:-not asked}"
-echo "multi-user=${MU_AT}s firstboot=${FB_AT}s api+ui+dns=${API_AT}s atrest-verdict=${ATREST_AT}s tailscale-report=${TS_AT}s kernel-match=${KM_AT}s store-init=${SI_AT}s store-ready=${SR_AT}s identity-ready=${ID_AT}s total(incl. 70s soak)=${TOTAL}s"
+SG_SHOW=${SG_AT:+${SG_AT}s}
+echo "multi-user=${MU_AT}s firstboot=${FB_AT}s api+ui+dns=${API_AT}s atrest-verdict=${ATREST_AT}s tailscale-report=${TS_AT}s kernel-match=${KM_AT}s store-init=${SI_AT}s signin=${SG_SHOW:-not-run} store-ready=${SR_AT}s identity-ready=${ID_AT}s total(incl. 70s soak)=${TOTAL}s"
 
 # ------------------------------------------------------------ assertions ------
 [ "$ok" = 1 ] || { echo "::error::$ARCH image did not reach multi-user in QEMU"; exit 1; }
@@ -770,16 +873,9 @@ if [ "$api" = 1 ] && [ "$https" != 1 ]; then
 fi
 [ "$api" = 1 ] && echo "api HTTPS listener answered /healthz on :443"
 
-# The api must DERIVE its WebAuthn identity from the same cluster id. This is
-# the assertion the naming work most needs: credentials bind to the RP ID, so a
-# wrong derivation does not error — it produces a cluster whose passkeys
-# silently cannot be used.
-if [ "$RPID" != "${CLUSTER_ID}.local" ]; then
-  echo "::error::the api's WebAuthn RP ID is '${RPID:-<no response>}', expected '${CLUSTER_ID}.local' — it did not derive from RASPUTIN_CLUSTER_ID. Every passkey would bind to the wrong origin."
-  grep -o "rasputin-api: cluster identity:.*" "$CONSOLE_LOG" || true
-  exit 1
-fi
-echo "api derived its WebAuthn RP ID from the cluster id ($RPID)"
+# The passkey RP ID's derivation from the cluster id is asserted with the
+# first-run sign-in below (amd64): the home door's registration and sign-in
+# pages must both name sso-<cluster>.local (geekdojo/geekdojo-brain#993).
 
 # The cluster zone must resolve over UDP *and* TCP. Both answers are the CP's
 # own LAN IP (the SLIRP guest address); the value is checked for shape rather
@@ -977,6 +1073,23 @@ if [ "$ARCH" = amd64 ]; then
   [ "$IR_RC" = 0 ] \
     || { echo "::error::realm rasputin never answered 200 on its discovery document over mutual TLS on the amd64 control plane; the realm wait ended after ${IR_SECONDS:-?} seconds on: ${IR_LAST:-the wait never ran, because the boot or firstboot did not complete}"; exit 1; }
   echo "realm rasputin answered 200 on its discovery document after $IR_SECONDS seconds"
+  # The first-run sign-in through the console (geekdojo/geekdojo-brain#993,
+  # issue TC-01 to TC-03). Each failed step printed its own ::error:: line
+  # before the kill, naming the fact; this is the verdict.
+  [ -z "$SG_FAIL" ] \
+    || { echo "::error::the first-run sign-in through the console stopped after ${SG_AT:-?}s: $SG_FAIL (the step's own error above names the fact)"; exit 1; }
+  # Credentials bind to the RP ID, so a wrong derivation does not error: it
+  # makes a cluster whose passkeys silently cannot be used.
+  [ "$SG_RPID" = "sso-${CONSOLE_HOST}" ] && [ "$SG_RPID2" = "sso-${CONSOLE_HOST}" ] \
+    || { echo "::error::the home door's passkey RP ID is '${SG_RPID:-none}' at enrolment and '${SG_RPID2:-none}' at sign-in, expected 'sso-${CONSOLE_HOST}': it did not derive from RASPUTIN_CLUSTER_ID"; exit 1; }
+  case ",$SG_ROLES," in
+    *,admin,*) ;;
+    *) echo "::error::the password-and-code sign-in after the grant holds the console roles '${SG_ROLES:-none}', with no admin: the first account did not become administrator"; exit 1 ;;
+  esac
+  [ "$APP_CODE" = 200 ] && [ "$APP_ISSUER" = "https://${APP_HOST}/realms/rasputin" ] \
+    || { echo "::error::the app door's discovery document at https://${APP_HOST} answered HTTP ${APP_CODE:-000} with the issuer '${APP_ISSUER:-none}', expected 200 and https://${APP_HOST}/realms/rasputin over a certificate the cluster's CA verifies"; exit 1; }
+  echo "first-run sign-in in ${SG_AT}s: the account was made with its recovery codes, added an authenticator app and a passkey through the launcher (RP ID $SG_RPID), became administrator only after the grant ended its sessions (roles $SG_ROLES), signed out, and signed in by password and code, by passkey (RP ID $SG_RPID2) and by recovery code; its password alone was refused, and the home door refused$SG_NEG"
+  echo "the app door answered its discovery document by its own name with the issuer $APP_ISSUER"
   # (b) The api's identity report (TC-974-21).
   [ "$ID_REPORT" = ready ] \
     || { echo "::error::the api does not report the identity service ready after realm rasputin answered: GET /api/alerts said '${ID_REPORT:-nothing, because the store check had no session to read it with}'"; exit 1; }
@@ -1021,7 +1134,7 @@ else
     [ "$(id_fact "${u}_load")" = masked ] \
       || { echo "::error::$u.service is LoadState '$(id_fact "${u}_load")' on the arm64 image, expected masked by the cmdline's systemd.mask"; exit 1; }
   done
-  echo "identity units masked on arm64 (identity never runs emulated); curl with OpenSSL and https, api and agent at -950, hook executable"
+  echo "identity units masked on arm64 (identity never runs emulated); curl with OpenSSL and https, api and agent at -950, hook executable; no sign-in runs here (arm64 sign-in is the bench walk, geekdojo/geekdojo-brain#998)"
 fi
 
 # The booted kernel is one this rootfs was built for (geekdojo/geekdojo-brain#807).
@@ -1072,9 +1185,16 @@ esac
 
 # The api reports the store ready (geekdojo/geekdojo-brain#834), polled above,
 # before the kill. store_ready_report names the fact that never came true: the
-# check never ran, the sign-in failed, or the store never read ready.
+# check never ran, the sign-in failed, or the store never read ready. Read on
+# amd64 only: the report needs a session, and the sign-in that makes one runs
+# where identity does (#993). arm64's store proves itself above and below by
+# outcome=initialised and outcome=applied changed=3.
 rm -f "$SR_JAR"
-store_ready_report "$SR_STAGE" "$SR_REASON" "$SR_RC" "$SR_LAST" "$SR_AT" || exit 1
+if [ "$ARCH" = amd64 ]; then
+  store_ready_report "$SR_STAGE" "$SR_REASON" "$SR_RC" "$SR_LAST" "$SR_AT" || exit 1
+else
+  echo "the api's store report is read on amd64 only, where the sign-in runs (identity is masked on arm64)"
+fi
 # The store's provisioner (geekdojo/geekdojo-brain#805, TC-805-35). After the
 # store's first start the provisioner runs once. This release's provision.tsv
 # lists the app-key engine, its policy and its role (#1084, TC-1084-36), added

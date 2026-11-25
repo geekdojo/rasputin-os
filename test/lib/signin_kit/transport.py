@@ -10,14 +10,17 @@ while the URL keeps its logical host, and bounds each call with a timeout.
 
 A redirect to a host the client does not know (a client's redirect_uri) is
 never fetched: it is returned as a Redirect, and the authorization code is
-read from its Location. Every cookie value and code the client receives goes
-into the state's needles.
+read from its Location. So is a redirect to one of the transport's stops, a
+known host's page the client reads as an answer rather than fetches (the
+console's callback and launcher, geekdojo/geekdojo-brain#993). Every cookie
+value and code the client receives goes into the state's needles.
 
 Sentences name a call by method, host and path, never a URL with a query,
 which can carry a code or a state.
 """
 
 import http.client
+import http.cookiejar
 import socket
 import ssl
 import urllib.parse
@@ -98,14 +101,17 @@ class Transport:
     jar      an http.cookiejar.CookieJar
     secrets  the State, given every cookie value and code received
     log      the Log
+    stops    scheme://host/path targets on known hosts a redirect is never
+             followed to: it is returned as a Redirect
     """
 
-    def __init__(self, opener, hosts, jar, secrets, log):
+    def __init__(self, opener, hosts, jar, secrets, log, stops=()):
         self._opener = opener
         self._hosts = frozenset(hosts)
         self._jar = jar
         self._secrets = secrets
         self._log = log
+        self._stops = frozenset(stops)
 
     def is_known(self, url):
         return urllib.parse.urlsplit(url).hostname in self._hosts
@@ -160,13 +166,23 @@ class Transport:
                 raise Inconclusive(f"{describe(method, url)} redirected with no Location.",
                                    call=describe(method, url), http_status=response.status)
             location = urllib.parse.urljoin(response.url, location)
-            if not self.is_known(location):
+            if not self.is_known(location) or Redirect(location).target in self._stops:
                 redirect = Redirect(location)
                 self._secrets.add_needles(redirect.params.get("code"))
                 return redirect
             response = self._checked(self.request("GET", location), "GET", location)
         raise Inconclusive(f"{describe(method, url)} redirected more than {MAX_HOPS} times.",
                            call=describe(method, url))
+
+    def add_cookie(self, host, name, value):
+        """Put a cookie a person's browser kept between visits back in the
+        jar: host-only, Secure, Path=/, as the api's __Host- cookies are."""
+        self._jar.set_cookie(http.cookiejar.Cookie(
+            0, name, value, None, False, host, False, False, "/", True, True, None, True, None, None, {}))
+
+    def cookies(self, host):
+        """The jar's cookies for exactly `host`, as http.cookiejar.Cookie."""
+        return [c for c in self._jar if c.domain == host]
 
     @staticmethod
     def _checked(response, method, url):

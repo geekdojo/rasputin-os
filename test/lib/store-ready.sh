@@ -7,7 +7,8 @@
 # (rasputin-control-plane #760): every state other than ready raises an alert
 # whose id starts "secret-store:", and GET /api/alerts, behind a session,
 # returns the list as a bare JSON array. So "ready" is a 200 whose array holds
-# no such id. Signing in to read it is test/lib/api-session.sh.
+# no such id. The session it is read with is the boot smoke's first-run sign-in
+# through the console (test/lib/smoke-signin.sh, geekdojo/geekdojo-brain#993).
 #
 #   alerts_verdict PREFIX CODE BODYFILE
 #       The verdict below for any backend whose alerts' ids start PREFIX

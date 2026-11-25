@@ -1325,6 +1325,633 @@ class ResetPasswordRecoveryCode(unittest.TestCase):
                             "--ca", "/unused", "--label", "r"], ResetFake(HOME))
         self.assertEqual(code, 2, out)
 
+# ------------------------------------------------- #993 the console's path
+
+CONSOLE = "https://c993.local"
+DOOR993 = "https://sso-c993.local"
+KC993 = f"{DOOR993}/realms/rasputin/login-actions"
+RP993 = "sso-c993.local"
+METHODS993 = {"totp": "authenticator_app", "passkey": "passkey", "passkey-2fa": "security_key",
+              "recovery-codes": "recovery_codes"}
+KC_FOR = {"add_authenticator_app": "CONFIGURE_TOTP", "add_passkey": "webauthn-register-passwordless",
+          "add_security_key": "webauthn-register", "add_recovery_codes": "CONFIGURE_RECOVERY_AUTHN_CODES"}
+SESSION993 = "__Host-rasputin-session"
+PENDING993 = "__Host-rasputin-pending"
+CLOCK_SENTENCE = ("Authenticator apps can be added once Rasputin's clock is set. Add a passkey or security key "
+                  "now, or try again later.")
+
+
+def console_doors(console="default", home_extra=None):
+    """A doors file whose home door is the console's (#993); the app door is
+    named for the negatives' other origin and RP ID only."""
+    CLEANUP.append(tempfile.mkdtemp(prefix="signin-doors-"))
+    path = os.path.join(CLEANUP[-1], "doors.json")
+    home = {"origin": DOOR993, "realm": "rasputin", "client_id": "rasputin-console",
+            "redirect_uri": CONSOLE + "/api/auth/callback"}
+    if console == "default":
+        home["console"] = {"origin": CONSOLE, "methods_route": "/api/me/sign-in-methods", "methods": METHODS993}
+    elif console is not None:
+        home["console"] = console
+    home.update(home_extra or {})
+    app = {"origin": "https://signin.c993.internal", "realm": "rasputin", "client_id": "no-app-client",
+           "redirect_uri": "https://app.c993.internal/callback"}
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"home": home, "app": app}, f)
+    return path
+
+
+def tpage(page_id, forms=(), extra="", theme=True):
+    """A themed door page: forms are (form id, {input: value})."""
+    body = f'<html><body data-page-id="{page_id}"' + (' data-rasputin-theme="rasputin"' if theme else "") + ">"
+    for fid, fields in forms:
+        inputs = "".join(f'<input type="hidden" name="{n}" value="{v}">' for n, v in fields.items())
+        body += f'<form id="{fid}" action="{KC993}/authenticate?f={fid}" method="post">{inputs}</form>'
+    return (body + extra + "</body></html>").encode()
+
+
+WEBAUTH_FIELDS = {n: "" for n in ("clientDataJSON", "authenticatorData", "signature", "credentialId", "userHandle", "error")}
+P993 = {
+    "register": tpage("login-register", [("kc-register-form", {"username": "", "email": "", "password": "",
+                                                               "password-confirm": ""})]),
+    "codes": tpage("login-login-recovery-authn-code-config", [("kc-recovery-codes-settings-form", {
+        "generatedRecoveryAuthnCodes": "rc-aaaa-0001,rc-bbbb-0002,rc-cccc-0003", "generatedAt": "1"})]),
+    # The theme's sign-in page: WebAuthn arguments as data- attributes.
+    "login": tpage("login-login", [("kc-form-login", {"username": "", "password": ""}), ("webauth", WEBAUTH_FIELDS)],
+                   f'<button id="authenticateWebAuthnButton" data-challenge="Y2hhbGxlbmdlLTk5Mw" '
+                   f'data-rp-id="{RP993}">Use a passkey</button>'),
+    "otp": tpage("login-login-otp", [("kc-otp-login-form", {"otp": ""})]),
+    "config-totp": tpage("login-login-config-totp", [("kc-totp-settings-form", {
+        "totp": "", "userLabel": "", "totpSecret": os.urandom(10).hex()})]),
+    "register-passkey": tpage("login-webauthn-register", [("register", {
+        n: "" for n in ("clientDataJSON", "attestationObject", "publicKeyCredentialId", "authenticatorLabel",
+                        "transports", "authenticatorAttachment", "error")})],
+        f'<div id="rasputin-passkey" data-challenge="VzVgrW-dTEig7tCOC9EwFQ" data-userid="dXNlcg" '
+        f'data-rp-id="{RP993}"></div>'),
+    "webauthn-error": tpage("login-webauthn-error"),
+    "error": tpage("login-error"),
+    "not-ready": tpage("rasputin-door-not-ready"),
+    "refusal": tpage("rasputin-door-refusal", extra='<p class="kc-feedback-text">This sign-in step wasn&#39;t '
+                                                    'started by Rasputin, so it was refused.</p>'),
+}
+
+
+class ConsoleFake:
+    """The console at c993.local (its start, #1150's launcher, its callback,
+    /me and logout) and the home door at sso-c993.local, whose pages are
+    scripted: each authorization request and form post takes the next body,
+    and once they are spent, or at a None, the door redirects to the
+    console's callback with a code."""
+
+    def __init__(self):
+        self.queue, self.requests, self.auths, self.posts = [], [], [], []
+        self.launch_bodies, self.action_gets, self.callbacks, self.logouts = [], [], [], []
+        self.sessions, self.ended = {}, set()
+        self.counter, self.me_calls = 0, 0
+        self.username, self.state, self.in_action, self.pending_action = None, None, False, None
+        self.roles = []
+        # Knobs for the refusals.
+        self.start_refusal = self.callback_key = self.launch = self.me_status = self.me_name = None
+        self.no_session = self.action_sets_session = self.grant_on_action = False
+        self.action_status = "success"
+        self.end_on_logout = True
+
+    def script(self, bodies):
+        self.queue = list(bodies)
+
+    @staticmethod
+    def jar_of(headers):
+        out = {}
+        for part in (headers.get("Cookie") or "").split(";"):
+            if "=" in part:
+                k, v = part.strip().split("=", 1)
+                out[k] = v
+        return out
+
+    def _door_page(self):
+        if self.queue and self.queue[0] is not None:
+            body = self.queue.pop(0)
+            refused = b"rasputin-door-refusal" in body or b'"login-error"' in body
+            self.counter += 1
+            return (400 if refused else 200), [
+                ("Set-Cookie", f"KC_RESTART=restart-{self.counter:08d}; Path=/realms/rasputin/; Secure")], body
+        if self.queue:
+            self.queue.pop(0)
+        self.counter += 1
+        q = {"code": f"code-{self.counter:08d}-{os.urandom(4).hex()}", "state": self.state,
+             "iss": DOOR993 + "/realms/rasputin"}
+        if self.in_action:
+            q["kc_action_status"] = self.action_status
+        return 302, [("Location", CONSOLE + "/api/auth/callback?" + urllib.parse.urlencode(q))], b""
+
+    def _to_door(self, prompt, kc_action=None, set_pending=True):
+        self.counter += 1
+        self.state = f"console-state-{self.counter}"
+        q = {"client_id": "rasputin-console", "redirect_uri": CONSOLE + "/api/auth/callback",
+             "response_type": "code", "scope": "openid", "state": self.state, "code_challenge": "held-by-the-api",
+             "code_challenge_method": "S256", "prompt": prompt}
+        if kc_action:
+            q["kc_action"] = kc_action
+        headers = [("Location", f"{DOOR993}/realms/rasputin/protocol/openid-connect/auth?" + urllib.parse.urlencode(q))]
+        if set_pending:
+            headers.append(("Set-Cookie", f"{PENDING993}=pending-{self.counter:08d}; Path=/; Secure; HttpOnly"))
+        return 303, headers, b""
+
+    def __call__(self, method, url, headers, body):
+        split = urllib.parse.urlsplit(url)
+        q = dict(urllib.parse.parse_qsl(split.query))
+        cookies = self.jar_of(headers)
+        self.requests.append((method, split.hostname, split.path, q, cookies))
+        if split.hostname == "c993.local":
+            return self._console(method, split.path, q, cookies, body)
+        if split.hostname != "sso-c993.local":
+            return 404, [], b"not found"
+        if split.path.endswith("/protocol/openid-connect/auth"):
+            self.auths.append(q)
+            return self._door_page()
+        if method == "POST":
+            form = dict(urllib.parse.parse_qsl(body.decode(), keep_blank_values=True))
+            if form.get("username"):
+                self.username = form["username"]
+            self.posts.append(form)
+            return self._door_page()
+        return 404, [], b"not found"
+
+    def _console(self, method, path, q, cookies, body):
+        def launcher(key=None):
+            return 303, [("Location", "/login" + (f"?signin={key}" if key else ""))], b""
+        session = cookies.get(SESSION993)
+        live = session in self.sessions and session not in self.ended
+        if method == "GET" and path in ("/api/auth/signin", "/api/auth/signup") and "action" not in q:
+            if self.start_refusal:
+                return launcher(self.start_refusal)
+            self.in_action = False
+            return self._to_door("create" if path.endswith("signup") else "login")
+        if method == "POST" and path == "/api/me/sign-in-methods":
+            self.launch_bodies.append((json.loads(body), headers_ct(body)))
+            if not live:
+                return 401, [], b'{"error":"auth required"}'
+            if self.launch:
+                return self.launch[0], [], json.dumps(self.launch[1]).encode()
+            self.pending_action = "add_" + json.loads(body)["method"]
+            self.counter += 1
+            return 200, [("Set-Cookie", f"{PENDING993}=prepared-{self.counter:08d}; Path=/; Secure; HttpOnly")], \
+                json.dumps({"next": f"/api/auth/signin?action={self.pending_action}"}).encode()
+        if method == "GET" and path == "/api/auth/signin":
+            self.action_gets.append((q["action"], cookies.get(PENDING993, "")))
+            if not live or not cookies.get(PENDING993, "").startswith("prepared-") or q["action"] != self.pending_action:
+                return launcher("action-failed")
+            self.in_action = True
+            return self._to_door("login", KC_FOR[q["action"]], set_pending=False)
+        if path == "/api/auth/callback":
+            self.callbacks.append((q, cookies.get(PENDING993, "")))
+            if self.callback_key:
+                return launcher(self.callback_key)
+            headers = [("Location", "/login"), ("Set-Cookie", f"{PENDING993}=; Path=/; Max-Age=0; Secure")]
+            if self.in_action and self.grant_on_action:
+                self.ended |= set(self.sessions)
+            if (not self.in_action and not self.no_session) or (self.in_action and self.action_sets_session):
+                self.counter += 1
+                value = f"session-{self.counter:08d}-{os.urandom(6).hex()}"
+                self.sessions[value] = self.username
+                headers.append(("Set-Cookie", f"{SESSION993}={value}; Path=/; Secure; HttpOnly; SameSite=Lax"))
+            return 303, headers, b""
+        if path == "/api/auth/me":
+            self.me_calls += 1
+            if self.me_status:
+                return self.me_status, [], b'{"error":"x"}'
+            if not live:
+                return 401, [], b'{"error":"auth required"}'
+            return 200, [], json.dumps({"sub": "u-1", "name": self.me_name or self.sessions[session],
+                                        "roles": self.roles, "capabilities": []}).encode()
+        if method == "POST" and path == "/api/auth/logout":
+            self.logouts.append(session)
+            if self.end_on_logout and session:
+                self.ended.add(session)
+            return 200, [("Set-Cookie", f"{SESSION993}=; Path=/; Max-Age=0; Secure")], b'{"status":"ok"}'
+        return 404, [], b"not found"
+
+
+def headers_ct(body):
+    return "json" if body and body.startswith(b"{") else "none"
+
+
+class ConsolePath(unittest.TestCase):
+    """geekdojo/geekdojo-brain#993: the console's start, callback, /me,
+    #1150's launcher, sign-out, --jar and door-page, on the scripted fake."""
+
+    def setUp(self):
+        self.state = state_dir(self)
+        self.doors = console_doors()
+        self.fake = ConsoleFake()
+        self.clock = FixedClock()
+        self.outputs = []
+
+    def go(self, *verb, label="o", doors=None, fake=None, extra=()):
+        code, out, err = run([*verb, "--state", self.state, "--doors", doors or self.doors, "--ca", "/unused",
+                              "--label", label, *extra], fake or self.fake, clock=self.clock)
+        self.outputs.append(out + err)
+        self.assertRegex(out, LINE)
+        self.assertEqual(out.count("\n"), 1)
+        return code, out
+
+    def create(self):
+        self.fake.script([P993["register"], P993["codes"], None])
+        code, out = self.go("create-account")
+        self.assertEqual(code, 0, out)
+        return out
+
+    def account(self, label="o"):
+        return State(self.state, os.getuid()).load(label)
+
+    # TC-993-01: the start is the console's, followed to the door.
+    def test_tc_993_01_create_and_sign_in_start_at_the_console(self):
+        self.create()
+        first = self.fake.requests[0]
+        self.assertEqual(first[:3], ("GET", "c993.local", "/api/auth/signup"))
+        self.assertEqual(self.fake.auths[0]["prompt"], "create")
+        self.fake.script([P993["login"], None])
+        code, out = self.go("sign-in", "password")
+        self.assertEqual(code, 0, out)
+        starts = [r[:3] for r in self.fake.requests if r[1] == "c993.local" and r[2].startswith("/api/auth/sign")]
+        self.assertEqual(starts, [("GET", "c993.local", "/api/auth/signup"), ("GET", "c993.local", "/api/auth/signin")])
+        self.assertEqual(self.fake.auths[1]["prompt"], "login")
+        # Every authorization request is the console's own: its state, its
+        # challenge; the client built none and called no token endpoint.
+        for auth in self.fake.auths:
+            self.assertTrue(auth["state"].startswith("console-state-"), auth)
+            self.assertEqual(auth["code_challenge"], "held-by-the-api")
+        self.assertFalse([r for r in self.fake.requests if r[2].endswith("/token")])
+
+    def test_tc_993_01_a_console_refusal_at_the_start_fails_naming_its_key(self):
+        for key in ("unavailable", "wrong-host"):
+            with self.subTest(key=key):
+                self.fake.start_refusal = key
+                code, out = self.go("create-account")
+                self.assertEqual(code, 1, out)
+                self.assertIn("FAIL fact=console start:", out)
+                self.assertIn(f"signin={key}", out)
+
+    # TC-993-02: the callback, the session and /me's roles.
+    def test_tc_993_02_the_callback_mints_a_session_and_me_names_the_roles(self):
+        out = self.create()
+        self.assertIn("roles=none;", out)
+        self.assertIn("pages=login-register,login-login-recovery-authn-code-config", out)
+        query, pending = self.fake.callbacks[0]
+        self.assertTrue(query["code"].startswith("code-"))
+        self.assertTrue(pending.startswith("pending-"), "the callback was not delivered with the pending cookie")
+        self.fake.roles = ["admin"]
+        self.fake.script([P993["login"], None])
+        code, out = self.go("sign-in", "password")
+        self.assertEqual(code, 0, out)
+        self.assertIn("signin sign-in PASS roles=admin;", out)
+        account = self.account()
+        self.assertIn(account["console_session"], self.fake.sessions)
+        self.assertEqual(account["roles"], ["admin"])
+        self.assertEqual(account["recovery_codes"], ["rc-aaaa-0001", "rc-bbbb-0002", "rc-cccc-0003"])
+
+    # TC-993-03: each refusal at the callback or /me is its own failed fact.
+    def test_tc_993_03_a_callback_refusal_fails_naming_the_key(self):
+        for key in ("failed", "expired", "action-failed"):
+            with self.subTest(key=key):
+                self.fake.callback_key = key
+                self.fake.script([P993["register"], P993["codes"], None])
+                code, out = self.go("create-account")
+                self.assertEqual(code, 1, out)
+                self.assertIn("FAIL fact=console callback:", out)
+                self.assertIn(f"signin={key}", out)
+
+    def test_tc_993_03_no_session_cookie_fails(self):
+        self.fake.no_session = True
+        self.fake.script([P993["register"], P993["codes"], None])
+        code, out = self.go("create-account")
+        self.assertEqual(code, 1, out)
+        self.assertIn("FAIL fact=session:", out)
+
+    def test_tc_993_03_me_refusing_or_naming_another_fails(self):
+        for status in (401, 500):
+            with self.subTest(status=status):
+                self.fake.me_status = status
+                self.fake.script([P993["register"], P993["codes"], None])
+                code, out = self.go("create-account")
+                self.assertEqual(code, 1, out)
+                self.assertIn("FAIL fact=me:", out)
+                self.assertIn(f"HTTP {status}", out)
+        self.fake.me_status, self.fake.me_name = None, "someone-else"
+        self.fake.script([P993["register"], P993["codes"], None])
+        code, out = self.go("create-account")
+        self.assertEqual(code, 1, out)
+        self.assertIn("FAIL fact=me: GET /api/auth/me named another account.", out)
+
+    def test_tc_993_03_an_action_status_other_than_success_fails(self):
+        self.create()
+        for status in ("error", "cancelled"):
+            with self.subTest(status=status):
+                self.fake.action_status = status
+                self.fake.script([P993["login"], None, P993["login"], P993["codes"], None])
+                code, out = self.go("enrol", "recovery-codes")
+                self.assertEqual(code, 1, out)
+                self.assertIn("FAIL fact=kc_action_status:", out)
+                self.assertIn(status, out)
+
+    # TC-993-04: enrolment through #1150's launcher.
+    def test_tc_993_04_each_kind_posts_its_method_and_follows_next(self):
+        self.create()
+        action_page = {"totp": "config-totp", "passkey": "register-passkey", "passkey-2fa": "register-passkey",
+                       "recovery-codes": "codes"}
+        for kind in ("recovery-codes", "passkey-2fa", "passkey", "totp"):
+            with self.subTest(kind=kind):
+                second = [P993["otp"]] if self.account().get("totp_secret") else []
+                self.fake.script([P993["login"], *second, None, P993["login"], *second, P993[action_page[kind]], None])
+                before = len(self.fake.posts)
+                code, out = self.go("enrol", kind)
+                self.assertEqual(code, 0, out)
+                body, kind_of_body = self.fake.launch_bodies[-1]
+                self.assertEqual(body, {"method": METHODS993[kind]})
+                self.assertEqual(kind_of_body, "json")
+                action, pending = self.fake.action_gets[-1]
+                self.assertEqual(action, "add_" + METHODS993[kind])
+                self.assertTrue(pending.startswith("prepared-"), "next was not GET with the launcher's pending cookie")
+                # A fresh sign-in at the door precedes the action's page.
+                self.assertEqual(self.fake.auths[-1]["prompt"], "login")
+                self.assertEqual(self.fake.auths[-1]["kc_action"], KC_FOR[action])
+                posted = self.fake.posts[before:]
+                self.assertEqual(sum(1 for f in posted if "password" in f), 2, "two password steps")
+        # The account holds the code last: its fresh sign-in answered it too.
+        self.fake.script([P993["login"], P993["otp"], None, P993["login"], P993["otp"], P993["codes"], None])
+        code, out = self.go("enrol", "recovery-codes")
+        self.assertEqual(code, 0, out)
+        self.assertIn("pages=login-login,login-login-otp,login-login,login-login-otp,"
+                      "login-login-recovery-authn-code-config", out)
+
+    def test_tc_993_04_launcher_refusals(self):
+        self.create()
+        cases = [((409, {"error": CLOCK_SENTENCE, "code": "clock_not_set"}), 1, "FAIL fact=clock:"),
+                 ((400, {"error": "Choose a passkey, a security key, an authenticator app or recovery codes."}), 1,
+                  "FAIL fact=enrol start:"),
+                 ((401, {"error": "auth required"}), 1, "FAIL fact=enrol start:"),
+                 ((404, {}), 1, "FAIL fact=enrol start:"),
+                 ((200, {}), 2, "INCONCLUSIVE"),
+                 ((200, {"next": "/api/auth/signin?elsewhere=1"}), 2, "INCONCLUSIVE")]
+        for launch, want, says in cases:
+            with self.subTest(launch=launch):
+                self.fake.launch = launch
+                self.fake.script([P993["login"], None])
+                code, out = self.go("enrol", "totp")
+                self.assertEqual(code, want, out)
+                self.assertIn(says, out)
+                if launch[0] == 409:
+                    self.assertIn(CLOCK_SENTENCE, out)
+
+    def test_tc_993_04_the_door_refusing_the_forwarded_action_fails(self):
+        self.create()
+        self.fake.script([P993["login"], None, P993["refusal"]])
+        code, out = self.go("enrol", "totp")
+        self.assertEqual(code, 1, out)
+        self.assertIn("FAIL fact=kc_action:", out)
+        self.assertIn("rasputin-door-refusal", out)
+
+    # TC-993-05: an action's return mints no session and is not read with /me.
+    def test_tc_993_05_the_grant_ending_sessions_does_not_fail_the_enrol(self):
+        self.create()
+        self.fake.grant_on_action = True
+        self.fake.script([P993["login"], None, P993["login"], P993["config-totp"], None])
+        me_before = self.fake.me_calls
+        code, out = self.go("enrol", "totp")
+        self.assertEqual(code, 0, out)
+        # /me ran once, for the console sign-in before the launcher, and the
+        # session that sign-in minted is now ended: /me would answer 401.
+        self.assertEqual(self.fake.me_calls, me_before + 1)
+        self.assertIn(self.account()["console_session"], self.fake.ended)
+        self.assertTrue(self.account()["totp_secret"])
+
+    def test_tc_993_05_an_action_return_that_sets_a_session_fails(self):
+        self.create()
+        self.fake.action_sets_session = True
+        self.fake.script([P993["login"], None, P993["login"], P993["codes"], None])
+        code, out = self.go("enrol", "recovery-codes")
+        self.assertEqual(code, 1, out)
+        self.assertIn("FAIL fact=action return:", out)
+
+    # TC-993-06: sign-out.
+    def test_tc_993_06_sign_out_posts_logout_and_me_then_answers_401(self):
+        self.create()
+        session = self.account()["console_session"]
+        code, out = self.go("sign-out")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.fake.logouts, [session])
+        me = [r for r in self.fake.requests if r[2] == "/api/auth/me"][-1]
+        self.assertEqual(me[4].get(SESSION993), session, "/me after sign-out did not carry the signed-out session")
+        self.assertNotIn("console_session", self.account())
+
+    def test_tc_993_06_a_session_that_survives_logout_fails(self):
+        self.create()
+        self.fake.end_on_logout = False
+        code, out = self.go("sign-out")
+        self.assertEqual(code, 1, out)
+        self.assertIn("FAIL fact=signed out:", out)
+
+    def test_tc_993_06_no_saved_session_is_inconclusive(self):
+        State(self.state, os.getuid()).save("o", {"label": "o", "username": "o-user", "password": "pw-pw-pw-pw"})
+        code, out = self.go("sign-out")
+        self.assertEqual(code, 2, out)
+        self.assertIn("holds no console session", out)
+
+    # TC-993-07: --jar.
+    def test_tc_993_07_the_jar_is_0600_and_holds_only_the_console_cookies(self):
+        jar = os.path.join(state_dir(self), "smoke.jar")
+        self.create()
+        self.fake.script([P993["login"], None])
+        code, out = self.go("sign-in", "password", extra=("--jar", jar))
+        self.assertEqual(code, 0, out)
+        self.assertEqual(stat.S_IMODE(os.stat(jar).st_mode), 0o600)
+        with open(jar, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+        self.assertEqual(lines[0], "# Netscape HTTP Cookie File")
+        rows = [ln.split("\t") for ln in lines[1:]]
+        self.assertTrue(rows)
+        self.assertEqual({r[0].removeprefix("#HttpOnly_") for r in rows}, {"c993.local"})
+        self.assertIn(SESSION993, [r[5] for r in rows])
+        session = [r for r in rows if r[5] == SESSION993][0]
+        self.assertEqual((session[1], session[2], session[3], session[6]),
+                         ("FALSE", "/", "TRUE", self.account()["console_session"]))
+        self.assertTrue(session[0].startswith("#HttpOnly_"))
+
+    def test_tc_993_07_an_existing_file_or_link_is_refused_and_left_alone(self):
+        d = state_dir(self)
+        self.create()
+        existing = os.path.join(d, "existing.jar")
+        with open(existing, "w") as f:
+            f.write("keep me\n")
+        target = os.path.join(d, "target")
+        with open(target, "w") as f:
+            f.write("target\n")
+        link = os.path.join(d, "link.jar")
+        os.symlink(target, link)
+        for path in (existing, link):
+            with self.subTest(path=os.path.basename(path)):
+                served = len(self.fake.requests)
+                code, out = self.go("sign-in", "password", extra=("--jar", path))
+                self.assertEqual(code, 2, out)
+                self.assertIn("already exists", out)
+                self.assertEqual(len(self.fake.requests), served, "the verb ran before the jar was refused")
+        with open(existing) as f:
+            self.assertEqual(f.read(), "keep me\n")
+        with open(target) as f:
+            self.assertEqual(f.read(), "target\n")
+        self.fake.script([P993["login"], None])
+        code, out = self.go("sign-in", "password", extra=("--jar", os.path.join(d, "no-such-dir", "j")))
+        self.assertEqual(code, 2, out)
+        self.assertIn("could not be written", out)
+
+    # TC-993-08: no secret in any output.
+    def test_tc_993_08_no_cookie_password_code_or_secret_is_printed(self):
+        d = state_dir(self)
+        self.create()
+        self.fake.script([P993["login"], None, P993["login"], P993["config-totp"], None])
+        self.go("enrol", "totp", extra=("--jar", os.path.join(d, "j1")))
+        self.go("enrol", "totp", extra=("--jar", os.path.join(d, "j1")))  # the jar refusal
+        self.fake.callback_key = "failed"
+        self.fake.script([P993["login"], P993["otp"]])
+        self.go("sign-in", "password-totp")
+        self.fake.callback_key = None
+        self.go("sign-out")
+        account = self.account()
+        secrets = [account["password"], account["totp_secret"], *account["recovery_codes"],
+                   *self.fake.sessions, *[q["code"] for q, _ in self.fake.callbacks]]
+        with open(os.path.join(self.state, "needles"), encoding="utf-8") as f:
+            needles = [n for n in f.read().split("\n") if n]
+        for s in secrets:
+            self.assertIn(s, needles)
+        text = "".join(self.outputs)
+        self.assertEqual([n for n in needles + secrets if n in text], [])
+
+    # TC-993-09: the RP ID in the fact line.
+    def test_tc_993_09_passkey_enrol_and_sign_in_name_the_rp_id(self):
+        self.create()
+        self.fake.script([P993["login"], None, P993["login"], P993["register-passkey"], None])
+        code, out = self.go("enrol", "passkey")
+        self.assertEqual(code, 0, out)
+        self.assertIn(f"rp_id={RP993};", out)
+        self.fake.script([P993["login"], None])
+        code, out = self.go("sign-in", "passkey")
+        self.assertEqual(code, 0, out)
+        self.assertIn(f"rp_id={RP993};", out)
+        posted = self.fake.posts[-1]
+        client = json.loads(passkey.b64url_decode(posted["clientDataJSON"]))
+        self.assertEqual((client["challenge"], client["origin"]), ("Y2hhbGxlbmdlLTk5Mw", DOOR993))
+        self.assertEqual(passkey.b64url_decode(posted["authenticatorData"])[:32],
+                         hashlib.sha256(RP993.encode()).digest())
+
+    # TC-993-10: admin-password-alone on the real flow.
+    def test_tc_993_10_admin_password_alone(self):
+        self.create()
+        cases = [([P993["login"], P993["otp"]], 0, "refused: the page login-login-otp;"),
+                 ([P993["login"], None], 1, "admitted"),
+                 ([P993["login"], P993["error"]], 1, "the page login-error")]
+        for script, want, says in cases:
+            with self.subTest(says=says):
+                self.fake.script(script)
+                code, out = self.go("negative", "admin-password-alone")
+                self.assertEqual(code, want, out)
+                self.assertIn(says, out)
+
+    # TC-993-11: door-page passes only on the themed registration form.
+    def test_tc_993_11_door_page(self):
+        cases = [([P993["register"]], 0), ([P993["error"]], 2), ([P993["not-ready"]], 2),
+                 ([tpage("login-made-up")], 2), ([tpage("login-register", theme=False)], 2)]
+        for script, want in cases:
+            with self.subTest(page=script[0][:60]):
+                self.fake.script(script)
+                code, out = self.go("door-page")
+                self.assertEqual(code, want, out)
+        self.fake.start_refusal = "unavailable"
+        code, out = self.go("door-page")
+        self.assertEqual(code, 2, out)
+        self.assertIn("signin=unavailable", out)
+
+        def no_answer(*a):
+            raise Inconclusive("GET https://c993.local/api/auth/signup gave no HTTP answer (OSError).")
+        code, out = self.go("door-page", fake=no_answer)
+        self.assertEqual(code, 2, out)
+
+    # TC-993-12: the strategy, and a bad console block.
+    def test_tc_993_12_load_doors_picks_the_strategy(self):
+        from signin_kit import console
+        st = State(state_dir(self), os.getuid())
+        seen = {}
+
+        def transport_for(hosts, stops):
+            seen.update(hosts=hosts, stops=stops)
+            return object()
+        doors, _ = signin.load_doors(self.doors, transport_for, st, seeded_rng())
+        self.assertIsInstance(doors["home"].client, console.ConsoleClient)
+        self.assertIsInstance(doors["app"].client, console.PublicClient)
+        self.assertEqual(seen["hosts"], {"sso-c993.local", "c993.local", "signin.c993.internal"})
+        self.assertEqual(seen["stops"], {CONSOLE + "/login", CONSOLE + "/api/auth/callback"})
+        doors, _ = signin.load_doors(write_doors(), transport_for, st, seeded_rng())
+        self.assertTrue(all(isinstance(d.client, console.PublicClient) for d in doors.values()))
+
+    def test_tc_993_12_a_bad_console_block_is_inconclusive(self):
+        good = {"origin": CONSOLE, "methods_route": "/api/me/sign-in-methods", "methods": METHODS993}
+        bad = [["not", "an", "object"], dict(good, origin="http://c993.local"), {k: v for k, v in good.items() if k != "origin"},
+               {k: v for k, v in good.items() if k != "methods_route"}, {k: v for k, v in good.items() if k != "methods"},
+               dict(good, methods={"totp": "authenticator_app"})]
+        for block in bad:
+            with self.subTest(block=block):
+                code, out = self.go("create-account", doors=console_doors(block))
+                self.assertEqual(code, 2, out)
+                self.assertIn("doors file", out)
+
+    # F-993-04: the WebAuthn negatives at the home door, through the console,
+    # with the passkey that signs in alone; PKCE's cannot run there.
+    def test_f_993_04_webauthn_negatives_through_the_console(self):
+        self.create()
+        self.fake.script([P993["login"], None, P993["login"], P993["register-passkey"], None])
+        self.assertEqual(self.go("enrol", "passkey")[0], 0)
+        self.fake.script([P993["login"]])
+        code, out = self.go("negative", "replay")
+        self.assertEqual(code, 2, out)
+        self.assertIn("no accepted assertion to replay", out)
+        self.fake.script([P993["login"], None])
+        self.assertEqual(self.go("sign-in", "passkey")[0], 0)
+        for name in ("bad-origin", "bad-rpid", "no-up", "no-uv", "bad-signature", "bad-challenge", "replay"):
+            with self.subTest(name=name):
+                self.fake.script([P993["login"], P993["webauthn-error"]])
+                code, out = self.go("negative", name)
+                self.assertEqual(code, 0, out)
+                self.assertIn("refused: the page login-webauthn-error;", out)
+        self.fake.script([P993["login"], None])
+        code, out = self.go("negative", "bad-origin")
+        self.assertEqual(code, 1, out)
+        self.assertIn("admitted", out)
+        for name in ("pkce-wrong-verifier", "pkce-absent"):
+            with self.subTest(name=name):
+                code, out = self.go("negative", name)
+                self.assertEqual(code, 2, out)
+                self.assertIn("holds the PKCE verifier", out)
+
+    def test_password_totp_takes_the_authenticator_from_another_second_step(self):
+        """The door may offer the recovery code first; the code sign-in picks
+        the authenticator app instead (cp TC-990-03's otpInstead)."""
+        self.create()
+        self.fake.script([P993["login"], None, P993["login"], P993["config-totp"], None])
+        self.assertEqual(self.go("enrol", "totp")[0], 0)
+        select = (f'<html><body data-page-id="login-select-authenticator" data-rasputin-theme="rasputin">'
+                  f'<form id="kc-select-credential-form" action="{KC993}/authenticate?s=1" method="post">'
+                  '<input type="hidden" name="authenticationExecution" value="ex-recovery"><h2>Recovery '
+                  f'Authentication Code</h2></form><form id="kc-select-credential-form" action="{KC993}/authenticate?s=2" '
+                  'method="post"><input type="hidden" name="authenticationExecution" value="ex-otp">'
+                  '<h2>Authenticator Application</h2></form></body></html>').encode()
+        recovery = tpage("login-login-recovery-authn-code-input", [
+            ("kc-recovery-code-login-form", {"recoveryCodeInput": ""}),
+            ("kc-select-try-another-way-form", {"tryAnotherWay": "on"})])
+        self.fake.script([P993["login"], recovery, select, P993["otp"], None])
+        code, out = self.go("sign-in", "password-totp")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.fake.posts[-2], {"authenticationExecution": "ex-otp"})
+        self.assertIn("otp", self.fake.posts[-1])
+
+
 if __name__ == "__main__":
     # The tests are loaded from this file's own globals, not by unittest.main,
     # which looks up sys.modules["__main__"]: under python3 -m trace that is
