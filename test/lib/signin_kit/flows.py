@@ -31,6 +31,12 @@ ENROL_ACTIONS = {
     "recovery-codes": "CONFIGURE_RECOVERY_AUTHN_CODES",
 }
 SIGN_IN_METHODS = ("password", "password-totp", "password-passkey", "passkey", "recovery-code")
+RESET_METHODS = ("passkey", "recovery-code")
+
+# A password reset's return (geekdojo/geekdojo-brain#992): the api's path at
+# each door, and the sentence the app door's page shows on success.
+RESET_DONE_PATH = "/api/auth/reset-done"
+RESET_DONE_SENTENCE = "Your password is changed."
 
 # Each negative: the assertion change it makes, and the refusal it must meet.
 NEGATIVES = {
@@ -371,6 +377,87 @@ class Flows:
         # ...and the new one signs in.
         outcome, verifier = self._sign_in(trace, door, account, self._method_for(account))
         self._finish(door, outcome, verifier, account)
+
+    def reset_password_recovery_code(self, trace, label, door_name):
+        """A forgotten password reset with one recovery code
+        (geekdojo/geekdojo-brain#992), from the door's own "Forgot your
+        password?" link: the account's name, the code the page asks for, a
+        privileged account's authenticator code or passkey (never a second
+        recovery code), the new password, and the reset's return. Then the
+        refresh token the account last held is refused, the old password is
+        refused and the new one signs in. Returns what the return said."""
+        door = self.door(door_name)
+        account = self._state.load(label)
+        codes = account.get("recovery_codes") or []
+        if not codes:
+            raise Inconclusive(f"The account {label} holds no recovery codes to reset with.")
+        page, _ = self._authorize(trace, door, prompt="login")
+        page = self._expect(page, "login-login")
+        start = urllib.parse.urljoin(door.origin + "/", pages.link(page, "rasputin-forgot-password"))
+        page = self._expect(trace.see(self._t.navigate("GET", start)), pages.CHOOSE_USER)
+        outcome = self._post(trace, page.form("kc-reset-password-form"), {"username": account["username"]})
+        page = self._expect(outcome, "login-login-recovery-authn-code-input")
+        number = pages.recovery_code_number(page)
+        if not 1 <= number <= len(codes):
+            raise Inconclusive(f"The page asked for recovery code {number}, which this account was not given.",
+                               page_id=page.page_id)
+        outcome = self._post(trace, page.form("kc-recovery-code-login-form"), {"recoveryCodeInput": codes[number - 1]})
+        if not isinstance(outcome, Redirect) and outcome.page_id == "login-login-otp":
+            outcome = self._post(trace, outcome.form("kc-otp-login-form"), {"otp": self._totp_code(account)})
+        elif not isinstance(outcome, Redirect) and outcome.page_id == "login-webauthn-authenticate":
+            credential = account.get("passkey_2fa") or account.get("passkey")
+            if not credential:
+                raise FactFailed("The reset asked for a passkey, and this account holds none.",
+                                 fact="privileged step", page_id=outcome.page_id)
+            outcome = self._post(trace, outcome.form("webauth"), self._assertion(outcome, door, credential))
+        page = self._expect(outcome, "login-login-update-password")
+        new_password = self._password()
+        self._state.add_needles(new_password)
+        outcome = self._post(trace, page.form("kc-passwd-update-form"),
+                             {"password-new": new_password, "password-confirm": new_password})
+        returned = self._reset_returned(trace, outcome)
+        old_tokens = account.get("tokens") or {}
+        account["old_password"], account["password"], account["tokens"] = account["password"], new_password, {}
+        self._state.save(label, account)
+        refresh = old_tokens.get("refresh_token")
+        if refresh:
+            response = self._t.request("POST", door.endpoint("token"), {
+                "grant_type": "refresh_token", "refresh_token": refresh, "client_id": door.client_id})
+            if response.status == 200:
+                raise FactFailed("A session remains after the reset: the old refresh token still refreshes.",
+                                 fact="sessions ended", http_status=200)
+            if response.status != 400:
+                raise Inconclusive(f"The old refresh token's refresh answered HTTP {response.status}, so the "
+                                   f"client cannot tell whether its session ended.", http_status=response.status)
+        page, _ = self._authorize(trace, door, prompt="login")
+        refused = self._password_form(trace, page, account, account["old_password"])
+        if isinstance(refused, Redirect) or refused.page_id != "login-login":
+            raise FactFailed("The old password was not refused after the reset.", fact="old password refused",
+                             page_id=getattr(refused, "page_id", "redirect"))
+        outcome, verifier = self._sign_in(trace, door, account, self._method_for(account))
+        self._finish(door, outcome, verifier, account)
+        return returned
+
+    def _reset_returned(self, trace, outcome):
+        """The reset's return: the console's, a redirect the client delivers
+        and whose answer must name reset-done; or the app door's page, which
+        must say the password is changed."""
+        if isinstance(outcome, Redirect):
+            if not urllib.parse.urlsplit(outcome.location).path.endswith(RESET_DONE_PATH) or "code" not in outcome.params:
+                raise FactFailed("The reset did not return to the reset-done address with a code.",
+                                 fact="reset returned")
+            answer = self._t.deliver(outcome)
+            location = answer.header("Location") or ""
+            said = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(location).query)).get("signin", "")
+            if said != "reset-done":
+                raise FactFailed(f"The console answered the reset's return with {said or 'no outcome'}, "
+                                 f"not reset-done.", fact="reset done", http_status=answer.status)
+            return "the console answered reset-done"
+        page = self._expect(outcome, pages.DOOR_INFO)
+        if RESET_DONE_SENTENCE not in " ".join(page.text_by_id.values()) + " " + page.raw:
+            raise FactFailed(f"The door's page after the reset says: {pages.message(page) or 'nothing the client reads'}.",
+                             fact="reset done", page_id=page.page_id)
+        return "the app door said the password is changed"
 
     def set_password(self, trace, label, door_name, new_password, then_sign_in):
         """Sign in with the account's current password (an administrator's
