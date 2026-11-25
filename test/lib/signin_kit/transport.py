@@ -115,6 +115,17 @@ class Transport:
         if not self.is_known(url):
             raise Inconclusive(f"The client has no address for {describe(method, url)}, so it did "
                                f"not call it.", call=describe(method, url))
+        return self._send(method, url, fields, json_body, headers)
+
+    def deliver(self, redirect):
+        """One GET of a Redirect the server sent the browser to, on a host the
+        client does not otherwise fetch (a password reset's return to the
+        console, geekdojo/geekdojo-brain#992), over the same connection
+        rules. It is not followed: the answer, a redirect included, is
+        returned."""
+        return self._checked(self._send("GET", redirect.location), "GET", redirect.location)
+
+    def _send(self, method, url, fields=None, json_body=None, headers=None):
         split = urllib.parse.urlsplit(url)
         send = {"Host": split.netloc, "User-Agent": "rasputin-signin-test",
                 "Accept": "text/html,application/json;q=0.9,*/*;q=0.8"}

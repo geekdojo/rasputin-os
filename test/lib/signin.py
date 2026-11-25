@@ -6,7 +6,7 @@
     signin.py enrol totp|passkey|passkey-2fa|recovery-codes   (same options)
     signin.py sign-in password|password-totp|password-passkey|passkey|recovery-code
     signin.py sign-out
-    signin.py reset-password passkey
+    signin.py reset-password passkey|recovery-code
     signin.py set-password --new-password-file F [--then-sign-in]   (same options)
     signin.py negative bad-origin|bad-rpid|no-up|no-uv|bad-signature|bad-challenge|
                        replay|admin-password-alone|no-app-access|
@@ -28,6 +28,16 @@ breached-password warning, it submits the page's own Keep form. With
 --then-sign-in it then signs in with the new password. The new password is
 never printed, logged or written down (the state file keeps the old one as
 old_password); the stdout line names only its length.
+
+reset-password recovery-code (geekdojo/geekdojo-brain#992) starts at the
+door's own "Forgot your password?" link, names the account, gives the
+recovery code the page asks for, answers a privileged account's
+authenticator code or passkey, and sets a new password. At the home door it
+delivers the reset's return to the console, whose answer must be
+?signin=reset-done; at the app door the door's own page must say the password
+is changed. It then fails if the refresh token the account last held still
+refreshes (a session remains) or if the old password still signs in, and
+signs in with the new one.
 
 Stdout is exactly one line, `signin <verb> PASS|FAIL|INCONCLUSIVE <fact>`.
 Exit 0: the fact held. 1: a named fact failed. 2: the run could not tell
@@ -95,7 +105,7 @@ def build_parser():
     verbs.add_parser("enrol", parents=[keycloak]).add_argument("what", choices=sorted(flows.ENROL_ACTIONS))
     verbs.add_parser("sign-in", parents=[keycloak]).add_argument("what", choices=flows.SIGN_IN_METHODS)
     verbs.add_parser("sign-out", parents=[keycloak])
-    verbs.add_parser("reset-password", parents=[keycloak]).add_argument("what", choices=("passkey",))
+    verbs.add_parser("reset-password", parents=[keycloak]).add_argument("what", choices=flows.RESET_METHODS)
     setpw = verbs.add_parser("set-password", parents=[keycloak])
     setpw.add_argument("--new-password-file", required=True, help="a 0600 file holding the new password")
     setpw.add_argument("--then-sign-in", action="store_true", help="sign in with the new password after")
@@ -179,6 +189,8 @@ def run_verb(args, clock, rng, passkeys, opener_factory, state, log, trace, held
         verbs.sign_in(trace, args.what, args.label, args.door)
     elif args.verb == "sign-out":
         verbs.sign_out(trace, args.label, args.door)
+    elif args.verb == "reset-password" and args.what == "recovery-code":
+        detail = f"{verbs.reset_password_recovery_code(trace, args.label, args.door)}; "
     elif args.verb == "reset-password":
         verbs.reset_password_passkey(trace, args.label, args.door)
     elif args.verb == "set-password":

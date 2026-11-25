@@ -42,8 +42,17 @@ KNOWN_PAGES = {
 # fixture in the vectors: the breached-password warning
 # (geekdojo/geekdojo-brain#1145), with its Keep form rasputin-keep-form.
 DOOR_WARNING = "rasputin-door-warning"
-DOOR_PAGES = {DOOR_WARNING: "breached-password warning"}
-_ALL_PAGES = {**KNOWN_PAGES, **DOOR_PAGES}
+# The door's information page: the app door's answer to a password reset's
+# return (geekdojo/geekdojo-brain#992).
+DOOR_INFO = "rasputin-door-info"
+DOOR_PAGES = {DOOR_WARNING: "breached-password warning", DOOR_INFO: "information"}
+
+# Keycloak's reset page (geekdojo/geekdojo-brain#992), which reaches the
+# vectors' fixtures with the control plane's next pinned tag; until then it
+# is known here only, so the vectors' page count still matches KNOWN_PAGES.
+CHOOSE_USER = "login-login-reset-password"
+RESET_PAGES = {CHOOSE_USER: "choose the account to reset"}
+_ALL_PAGES = {**KNOWN_PAGES, **DOOR_PAGES, **RESET_PAGES}
 
 # Pages that are a second step: their presence after a sign-in form means
 # the second step ran.
@@ -210,6 +219,15 @@ def totp_secret(page):
         raise Inconclusive(f"The page {page.page_id} shows no authenticator-app secret.",
                            page_id=page.page_id)
     return secret
+
+
+def link(page, link_id):
+    """The href of the <a> with id link_id, unescaped, or Inconclusive."""
+    match = re.search(r'<a\b[^>]*\bid="' + re.escape(link_id) + r'"[^>]*\bhref="([^"]*)"', page.raw) or \
+        re.search(r'<a\b[^>]*\bhref="([^"]*)"[^>]*\bid="' + re.escape(link_id) + r'"', page.raw)
+    if not match or not match.group(1):
+        raise Inconclusive(f"The page {page.page_id} has no link {link_id}.", page_id=page.page_id)
+    return html.unescape(match.group(1))
 
 
 def recovery_codes(page):

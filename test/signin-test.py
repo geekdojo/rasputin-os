@@ -1056,6 +1056,180 @@ class SetPassword(unittest.TestCase):
         self.assert_password_absent()
 
 
+# --------------------------------------------------------- TC-992-38 reset
+
+
+HOME = "https://sso-kc959.local:19591"
+APP = "https://signin.kc959.internal:19591"
+CONSOLE_RESET = "https://console.kc959.local/api/auth/reset-done"
+
+
+def reset_page(page_id, form_id, action, inputs, extra=""):
+    fields = "".join(f'<input name="{n}">' for n in inputs)
+    return (f'<html><body data-page-id="{page_id}" data-rasputin-theme="rasputin">'
+            f'<form id="{form_id}" action="{action}" method="post">{fields}</form>{extra}</body></html>').encode()
+
+
+class ResetFake:
+    """Keycloak and the api for one recovery-code reset, routed by path: the
+    sign-in page with its "Forgot your password?" link, choose user, the
+    code, an authenticator code when privileged, the new password, the
+    reset's return at the console or the app door, the refresh of the old
+    token, and the sign-ins after."""
+
+    def __init__(self, origin, privileged=False, session_remains=False, console_says="reset-done"):
+        self.origin, self.privileged, self.session_remains, self.console_says = origin, privileged, session_remains, console_says
+        kc = f"{origin}/realms/rasputin/login-actions"
+        self.login = reset_page("login-login", "kc-form-login", f"{kc}/authenticate?session_code=s1",
+                                ["username", "password"],
+                                f'<a id="rasputin-forgot-password" href="{kc}/reset-credentials?client_id=r&amp;redirect_uri=x">'
+                                "Forgot your password?</a>")
+        self.choose = reset_page("login-login-reset-password", "kc-reset-password-form", f"{kc}/reset-credentials?s=2", ["username"])
+        self.code = reset_page("login-login-recovery-authn-code-input", "kc-recovery-code-login-form", f"{kc}/reset-credentials?s=3",
+                               ["recoveryCodeInput"], "<label for=\"recoveryCodeInput\">Recovery code #2</label>")
+        self.otp = reset_page("login-login-otp", "kc-otp-login-form", f"{kc}/reset-credentials?s=4", ["otp"])
+        self.update = reset_page("login-login-update-password", "kc-passwd-update-form", f"{kc}/reset-credentials?s=5",
+                                 ["password-new", "password-confirm"])
+        self.info = (b'<html><body class="rasp-body" data-page-id="rasputin-door-info" data-rasputin-theme="rasputin">'
+                     b'<p>Your password is changed. Sign in with it and your second step.</p></body></html>')
+        self.posts, self.pending, self.new_password, self.delivered = [], None, None, []
+
+    def __call__(self, method, url, headers, body):
+        split = urllib.parse.urlsplit(url)
+        query = dict(urllib.parse.parse_qsl(split.query))
+        form = dict(urllib.parse.parse_qsl(body.decode(), keep_blank_values=True)) if body else {}
+        if method == "POST":
+            self.posts.append((split.path + ("?" + split.query if split.query else ""), form))
+        path = split.path
+        if path.endswith("/protocol/openid-connect/auth"):
+            self.pending = {"redirect_uri": query["redirect_uri"], "state": query["state"], "challenge": query["code_challenge"]}
+            return 200, [], self.login
+        if path.endswith("/protocol/openid-connect/token"):
+            if form.get("grant_type") == "refresh_token":
+                if self.session_remains:
+                    return 200, [], json.dumps({"access_token": "a"}).encode()
+                return 400, [], json.dumps({"error": "invalid_grant"}).encode()
+            if pkce.challenge(form.get("code_verifier", "")) != self.pending["challenge"]:
+                return 400, [], json.dumps({"error": "invalid_grant"}).encode()
+            claims = b64url(json.dumps({"sub": "user-1"}).encode())
+            return 200, [], json.dumps({"access_token": "at-new", "refresh_token": "rt-new",
+                                        "id_token": f"eyJhbGciOiJub25lIn0.{claims}.sig-new"}).encode()
+        if path.endswith("/authenticate"):
+            if self.privileged and form.get("password") == self.new_password:
+                kc = f"{self.origin}/realms/rasputin/login-actions"
+                return 200, [], reset_page("login-login-otp", "kc-otp-login-form", f"{kc}/authenticate?otp=1", ["otp"])
+            if form.get("password") == self.new_password or "otp" in form:
+                return 302, [("Location", self.pending["redirect_uri"] + "?" + urllib.parse.urlencode(
+                    {"code": "code-new", "state": self.pending["state"]}))], b""
+            return 200, [], self.login
+        if path.endswith("/reset-credentials") and method == "GET":
+            return 200, [], self.choose
+        if path.endswith("/reset-credentials"):
+            step = query.get("s")
+            if step == "2":
+                return 200, [], self.code
+            if step == "3":
+                return 200, [], self.otp if self.privileged else self.update
+            if step == "4":
+                return 200, [], self.update
+            self.new_password = form.get("password-new")
+            done = (CONSOLE_RESET if self.origin == HOME else f"{APP}/api/auth/reset-done") + "?code=reset-code&iss=x"
+            return 302, [("Location", done)], b""
+        if path == "/api/auth/reset-done":
+            self.delivered.append(url)
+            if split.netloc.startswith("console."):
+                return 303, [("Location", f"/login?signin={self.console_says}")], b""
+            return 200, [], self.info
+        return 404, [], b"not found"
+
+
+class ResetPasswordRecoveryCode(unittest.TestCase):
+    """TC-992-38: `signin.py reset-password recovery-code` parses and runs
+    choose user, the code, the privileged step if any, the new password and
+    the reset's return; it fails naming the fact when a session remains or
+    the old password still works."""
+
+    OLD = "old-password-for-the-reset-992"
+
+    def setUp(self):
+        self.state = state_dir(self)
+        State(self.state, os.getuid()).save("r", {
+            "label": "r", "username": "r-user", "password": self.OLD, "user_id": "user-1",
+            "recovery_codes": ["code-one-0001", "code-two-0002"], "totp_secret": "",
+            "tokens": {"refresh_token": "rt-old"}})
+
+    def go(self, fake, door="home"):
+        code, out, err = run(["reset-password", "recovery-code", "--state", self.state, "--doors", write_doors(),
+                              "--ca", "/unused", "--label", "r", "--door", door], fake)
+        self.assertRegex(out, LINE)
+        self.assertNotIn(self.OLD, out + err)
+        return code, out
+
+    def test_home_door_reset_delivers_the_return_and_checks_the_old_password(self):
+        fake = ResetFake(HOME)
+        code, out = self.go(fake)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out, "signin reset-password PASS the console answered reset-done; pages=login-login,"
+                              "login-login-reset-password,login-login-recovery-authn-code-input,"
+                              "login-login-update-password,login-login,login-login,login-login\n")
+        paths = [p for p, _ in fake.posts]
+        self.assertEqual(fake.posts[0][1], {"username": "r-user"})
+        self.assertEqual(fake.posts[1][1], {"recoveryCodeInput": "code-two-0002"})
+        self.assertEqual(fake.delivered, [CONSOLE_RESET + "?code=reset-code&iss=x"])
+        self.assertIn(("/realms/rasputin/protocol/openid-connect/token",
+                       {"grant_type": "refresh_token", "refresh_token": "rt-old", "client_id": "rasputin-console"}), fake.posts)
+        self.assertTrue(any(f.get("password") == self.OLD for _, f in fake.posts), paths)
+        saved = State(self.state, os.getuid()).load("r")
+        self.assertEqual(saved["old_password"], self.OLD)
+        self.assertEqual(saved["password"], fake.new_password)
+
+    def test_app_door_reads_its_page_and_a_privileged_reset_gives_its_code(self):
+        state = State(self.state, os.getuid())
+        account = state.load("r")
+        account["totp_secret"] = base64.b32encode(b"0123456789abcdef0123").decode()
+        state.save("r", account)
+        fake = ResetFake(APP, privileged=True)
+        code, out = self.go(fake, door="app")
+        self.assertEqual(code, 0, out)
+        self.assertIn("PASS the app door said the password is changed;", out)
+        self.assertIn("login-login-otp", out)
+        self.assertTrue(any("otp" in f for _, f in fake.posts))
+        self.assertFalse(any("recoveryCodeInput" in f for _, f in fake.posts[2:]), "a second recovery code was given")
+
+    def test_a_session_that_remains_fails_naming_it(self):
+        code, out = self.go(ResetFake(HOME, session_remains=True))
+        self.assertEqual(code, 1, out)
+        self.assertIn("A session remains after the reset", out)
+
+    def test_the_console_saying_anything_else_fails(self):
+        code, out = self.go(ResetFake(HOME, console_says="reset-incomplete"))
+        self.assertEqual(code, 1, out)
+        self.assertIn("reset-incomplete, not reset-done", out)
+
+    def test_the_old_password_still_working_fails_naming_it(self):
+        fake = ResetFake(HOME)
+        real = fake.__call__
+
+        def old_works(method, url, headers, body):
+            if body and b"password=" + self.OLD.encode() in body:
+                fake.new_password = self.OLD
+            return real(method, url, headers, body)
+        code, out = self.go(old_works)
+        self.assertEqual(code, 1, out)
+        self.assertIn("The old password was not refused after the reset", out)
+
+    def test_no_codes_is_inconclusive_and_the_choice_parses(self):
+        state = State(self.state, os.getuid())
+        account = state.load("r")
+        account["recovery_codes"] = []
+        state.save("r", account)
+        code, out = self.go(ResetFake(HOME))
+        self.assertEqual(code, 2, out)
+        self.assertIn("holds no recovery codes", out)
+        code, out, _ = run(["reset-password", "email", "--state", self.state, "--doors", write_doors(),
+                            "--ca", "/unused", "--label", "r"], ResetFake(HOME))
+        self.assertEqual(code, 2, out)
+
 if __name__ == "__main__":
     # The tests are loaded from this file's own globals, not by unittest.main,
     # which looks up sys.modules["__main__"]: under python3 -m trace that is
