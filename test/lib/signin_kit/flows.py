@@ -294,8 +294,11 @@ class Flows:
         self._state.add_account_needles(account)
         page, pending = self._authorize(trace, door, prompt="create")
         page = self._expect(page, "login-register")
+        # firstName is required by the realm's user profile (shown as "Name"),
+        # and lastName by stock Keycloak's; a realm without one ignores it.
         outcome = self._post(trace, page.form("kc-register-form"), {
             "username": account["username"], "email": f"{account['username']}@signin.invalid",
+            "firstName": label, "lastName": "Smoke",
             "password": account["password"], "password-confirm": account["password"]})
         if not isinstance(outcome, Redirect) and outcome.page_id == "login-login-recovery-authn-code-config":
             # During first run the door asks the first account to save its

@@ -1569,6 +1569,9 @@ class ConsolePath(unittest.TestCase):
         first = self.fake.requests[0]
         self.assertEqual(first[:3], ("GET", "c993.local", "/api/auth/signup"))
         self.assertEqual(self.fake.auths[0]["prompt"], "create")
+        # The registration fills the profile's required name (the door
+        # answers "This is required." without it).
+        self.assertEqual((self.fake.posts[0]["firstName"], self.fake.posts[0]["lastName"]), ("o", "Smoke"))
         self.fake.script([P993["login"], None])
         code, out = self.go("sign-in", "password")
         self.assertEqual(code, 0, out)
