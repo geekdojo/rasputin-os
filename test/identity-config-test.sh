@@ -101,7 +101,8 @@ db-url-database=keycloak
 db-username=keycloak
 db-url-properties=?sslmode=verify-full&sslrootcert=$KC_CREDS/identity-ca.pem&sslcert=$KC_CREDS/db-client.pem&sslkey=$KC_CREDS/db-client.pk8
 db-pool-max-size=8
-log=console"
+log=console
+spi-password-policy--password-blacklist--false-positive-probability=1e-9"
 # The build options the api tarball's identity/keycloak-build.conf sets at the
 # pin, and the build-time siblings most often mistaken for runtime ones. A key
 # here is refused as a build option; any other unlisted key as unknown.
@@ -350,6 +351,9 @@ tree; edit "$T/$REL_KC" replace:cache=local '' \
 	&& { run_tree; refused "TC-974-02 cache=local removed" 'cache=local'; }
 tree; edit "$T/$REL_KC" after:log=console 'hostname=rasputin.local' \
 	&& { run_tree; refused "TC-974-02 hostname set" 'hostname'; }
+FPP=spi-password-policy--password-blacklist--false-positive-probability
+tree; edit "$T/$REL_KC" "replace:$FPP=1e-9" "$FPP=1.0E-4" \
+	&& { run_tree; refused "F-1145-40 the deny list's false-positive probability at Keycloak's default" "$FPP=1e-9"; }
 
 echo
 echo "6. the checker refuses each wrong credential path (TC-974-04)"
