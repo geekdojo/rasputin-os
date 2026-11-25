@@ -86,6 +86,9 @@
 #       directory, byte-equal, and Keycloak reaches /health/started; with
 #       the directory absent (an older api tarball) the unit still reaches
 #       started, logs the <6> line and leaves the copy (TC-1145-13)
+#       and with the list set as the realm's policy, Keycloak loads it at
+#       the false-positive probability keycloak.conf sets, 1e-9, refuses a
+#       listed password and accepts an unlisted one (F-1145-40)
 #
 # TEST HARNESS, not from the image, and labelled where it is done:
 #   * the keycloak (991) and postgres (992) users, which mkusers creates on the
@@ -1121,6 +1124,29 @@ check "TC-1145-13 the staged list is byte-equal to the shipped one" \
 check "TC-1145-13 the journal holds the hook's <6> staged line" \
 	"$(yes_if inside "journalctl --after-cursor='$c' -u $KC -p 6..6 -o cat --no-pager | grep -q '^identity-stage-denylist: The password deny list was staged'")" \
 	"$(inside "journalctl --after-cursor='$c' -u $KC -o cat --no-pager | grep identity-stage-denylist")"
+# F-1145-40: Keycloak reads the deny list's false-positive probability from
+# the shipped keycloak.conf. The list loads at the first password checked
+# against it, so: the policy set on the realm through the Admin API, with
+# scenario 40's recovery client, one unlisted and one listed password set,
+# and Keycloak's own load line read from the journal.
+# admin_call METHOD PATH BODY — over mutual TLS with that client's token on
+# stdin; prints the HTTP status.
+_t=$(printf 'grant_type=client_credentials&client_id=rasputin-recover-tc40b&client_secret=%s' "$S40B" \
+	| docker exec -i "$CID" sh -c "curl -sS $TLSARGS --data-binary @- -H 'Content-Type: application/x-www-form-urlencoded' https://127.0.0.1:8543/realms/master/protocol/openid-connect/token")
+TOK41=$(printf '%s\n' "$_t" | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')
+admin_call() {
+	printf 'Authorization: Bearer %s\n' "$TOK41" | docker exec -i "$CID" sh -c \
+		"curl -sS $TLSARGS -o /dev/null -w '%{http_code}' -X $1 -H @- -H 'Content-Type: application/json' --data-binary '$3' https://127.0.0.1:8543/admin/realms/rasputin$2"
+}
+c=$(cursor)
+st=$(admin_call PUT '' "{\"passwordPolicy\":\"passwordBlacklist($DENYLIST)\"}")
+check "F-1145-40 the deny list set as realm rasputin's password policy (got HTTP $st)" "$(yes_if [ "$st" = 204 ])"
+st=$(admin_call POST /users '{"username":"f1145-unlisted","enabled":true,"credentials":[{"type":"password","value":"f1145-Unlisted-Strong-7731","temporary":false}]}')
+check "F-1145-40 a user with an unlisted password is created (got HTTP $st)" "$(yes_if [ "$st" = 201 ])"
+st=$(admin_call POST /users '{"username":"f1145-listed","enabled":true,"credentials":[{"type":"password","value":"harness-listed-password-one","temporary":false}]}')
+check "F-1145-40 a user with a listed password is refused (got HTTP $st)" "$(yes_if [ "$st" != 201 ] && [ "${st#[45]}" != "$st" ])"
+load=$(inside "journalctl --after-cursor='$c' -u $KC -o cat --no-pager | grep 'Loading denylist finished: name=$DENYLIST '")
+check "F-1145-40 Keycloak loaded the list at falsePositiveProbability=1.0E-9" "$(yes_if contains 'falsePositiveProbability=1.0E-9 ' "$load")" "${load:-no load line}"
 before=$(inside "sha256sum <$DENYDIR/$DENYLIST")
 inside "systemctl stop $KC; rm -rf $DENYSRC"
 c=$(cursor)
