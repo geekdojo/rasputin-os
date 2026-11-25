@@ -7,24 +7,38 @@ operator registered on the old image signs in after the update.
     legacy-sign-in --name N    POST /api/auth/login/begin and /finish with an
                                assertion from the registered key, then
                                GET /api/auth/me, which must answer 200 naming N
+    bridge --name N            after the update, the move's bridge
+                               (geekdojo/geekdojo-brain#1005): POST
+                               /api/auth/bridge/begin and /finish with an
+                               assertion from the same key, then
+                               /api/auth/bridge/password with the password and
+                               email; passes when all three answer 200
 
-The routes are rasputin-control-plane v2026.11.1
-api/internal/auth/handlers.go:24-31. The registration is soft-passkey.py's
-"none" attestation; the assertion is passkey.build_assertion, signed by
-openssl. The origin is https://<the options' RP ID>, as a browser on the
-console's own name would send.
+The legacy routes are rasputin-control-plane v2026.11.1
+api/internal/auth/handlers.go:24-31; the bridge's are its
+api/internal/auth/bridge.go (merge e8f75376). The registration is
+soft-passkey.py's "none" attestation; the assertion is
+passkey.build_assertion, signed by openssl, with user presence and
+verification set (the bridge requires verification). The origin is
+https://<the options' RP ID>, as a browser on the console's own name would
+send.
 
 A refusal (any non-200 at a step, no session cookie, /me naming someone
-else) is a failed fact naming the operator; no HTTP answer or a TLS failure
-is Inconclusive (the transport raises it).
+else) is a failed fact naming the operator and, when the api's coded body
+carries one, its code (the bridge's has_password, for one); no HTTP answer
+or a TLS failure is Inconclusive (the transport raises it).
 """
 
 import json
+import re
 
 from . import passkey
 from .errors import FactFailed, Inconclusive
 
 SESSION_COOKIE = "rasputin-session"
+# The api's coded refusal body carries {"code": "<word>"}; only a code of this
+# shape is repeated in a sentence, never the body's own text.
+_CODE = re.compile(r"^[a-z][a-z_]{0,39}$")
 
 
 class Legacy:
@@ -39,8 +53,10 @@ class Legacy:
     def _post(self, base, route, name, payload):
         response = self._t.request("POST", base + route, json_body=json.dumps(payload))
         if response.status != 200:
-            raise FactFailed(f"The console refused {name} at {route} (HTTP {response.status}).",
-                             fact=route, http_status=response.status)
+            code = _refusal_code(response)
+            said = f"HTTP {response.status} {code}" if code else f"HTTP {response.status}"
+            raise FactFailed(f"The console refused {name} at {route} ({said}).",
+                             fact=route, http_status=response.status, code=code)
         return response
 
     @staticmethod
@@ -75,9 +91,10 @@ class Legacy:
                                 "credential_id": passkey.b64url(credential_id), "user_handle": user_handle})
         return f"{name} registered through the old console ceremony"
 
-    def sign_in(self, base, name):
+    def _assertion(self, base, route, name):
+        """Begin a ceremony at route and answer it with the registered key:
+        the PublicKeyCredential JSON a finish step takes."""
         account = self._state.load(name)
-        route = "/api/auth/login/begin"
         options = self._json(self._post(base, route, name, {}), route, name)
         public_key = options.get("publicKey") or {}
         challenge = public_key.get("challenge")
@@ -87,8 +104,10 @@ class Legacy:
         inputs = passkey.AssertionInputs(
             rp_id=rp_id, origin=f"https://{rp_id}", challenge=challenge,
             credential_id=passkey.b64url_decode(account["credential_id"]), user_handle=account["user_handle"])
-        assertion = passkey.build_assertion(inputs, self._passkeys.signer(account["key_path"]))
-        self._post(base, "/api/auth/login/finish", name, assertion.credential())
+        return passkey.build_assertion(inputs, self._passkeys.signer(account["key_path"])).credential()
+
+    def sign_in(self, base, name):
+        self._post(base, "/api/auth/login/finish", name, self._assertion(base, "/api/auth/login/begin", name))
         me = self._t.request("GET", base + "/api/auth/me")
         if me.status != 200:
             raise FactFailed(f"/api/auth/me answered HTTP {me.status} after {name} signed in.",
@@ -96,3 +115,20 @@ class Legacy:
         if self._json(me, "/api/auth/me", name).get("name") != name:
             raise FactFailed(f"/api/auth/me names another user, not {name}.", fact="/api/auth/me")
         return f"{name} signed in"
+
+    def bridge(self, base, name, password, email):
+        """The move's bridge: the old passkey earns a grant, and the grant
+        sets the moved account's first password and email. The password and
+        email go only in the password step's body."""
+        self._post(base, "/api/auth/bridge/finish", name, self._assertion(base, "/api/auth/bridge/begin", name))
+        self._post(base, "/api/auth/bridge/password", name, {"password": password, "email": email})
+        return f"{name}'s pre-update passkey was accepted and its first password and email were set"
+
+
+def _refusal_code(response):
+    """The code in the api's coded refusal body, or None."""
+    try:
+        code = json.loads(response.body).get("code")
+    except (ValueError, AttributeError):
+        return None
+    return code if isinstance(code, str) and _CODE.match(code) else None
