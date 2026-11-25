@@ -503,11 +503,17 @@ def closed_port():
 # ------------------------------------------------------------- the old api fake
 
 RP_ID = "updsmoke.local"
+BRIDGE_COOKIE = "__Host-rasputin-bridge"
 
 
 class OldApi(http.server.ThreadingHTTPServer):
     """The pre-identity console's auth routes over TLS, verifying each
-    assertion with openssl against the key the registration carried."""
+    assertion with openssl against the key the registration carried. It also
+    serves the move's bridge as rasputin-control-plane e8f75376
+    api/internal/auth/bridge.go answers it: the __Host-rasputin-bridge
+    cookie, user verification required, a grant under a new cookie value,
+    409 has_password for an account that has one, and the coded refusal
+    body. `first_passwords` records what the password step set, by name."""
 
     def __init__(self):
         super().__init__(("127.0.0.1", 0), _OldApiHandler)
@@ -521,6 +527,7 @@ class OldApi(http.server.ThreadingHTTPServer):
         self.routes_404 = False
         self.me_status = None
         self.me_name = None
+        self.first_passwords = {}
         threading.Thread(target=self.serve_forever, daemon=True).start()
 
     @property
@@ -574,9 +581,54 @@ class _OldApiHandler(http.server.BaseHTTPRequestHandler):
         self.server.pending[token] = (kind, challenge, extra)
         return token, challenge
 
-    def take(self, kind):
-        p = self.server.pending.pop(_cookie(self, "rasputin-pending") or "", None)
+    def take(self, kind, cookie="rasputin-pending"):
+        p = self.server.pending.pop(_cookie(self, cookie) or "", None)
         return p if p and p[0] == kind else None
+
+    def coded(self, status, code):
+        """bridge.go's refusal: the coded body, and the cookie cleared."""
+        return self.reply(status, {"error": "refused", "code": code, "correlationId": os.urandom(8).hex()},
+                          [f"{BRIDGE_COOKIE}=; Max-Age=0"])
+
+    def verified_user(self, r, challenge):
+        """The registered user whose key signed this webauthn.get assertion,
+        or None."""
+        user = self.server.users.get(_decode(r["userHandle"]))
+        auth = _decode(r["authenticatorData"])
+        if not user or not self.client_data_ok(r, "webauthn.get", challenge) \
+                or auth[:32] != hashlib.sha256(RP_ID.encode()).digest() \
+                or not self.server.verify(user[1], _decode(r["signature"]),
+                                          auth + hashlib.sha256(_decode(r["clientDataJSON"])).digest()):
+            return None
+        return user, auth[32]
+
+    def bridge(self, body):
+        if self.path == "/api/auth/bridge/begin":
+            token, challenge = self.begin("bridge", None)
+            return self.reply(200, {"publicKey": {"challenge": challenge, "rpId": RP_ID,
+                                                  "userVerification": "required"}}, [f"{BRIDGE_COOKIE}={token}"])
+        if self.path == "/api/auth/bridge/finish":
+            p = self.take("bridge", BRIDGE_COOKIE)
+            if not p:
+                return self.coded(401, "bridge_expired")
+            found = self.verified_user(body["response"], p[1])
+            if not found or not found[1] & passkey.FLAG_UV:
+                return self.coded(401, "passkey_refused")
+            name = found[0][0]
+            if name in self.server.first_passwords:
+                return self.coded(409, "has_password")
+            token = os.urandom(16).hex()
+            self.server.pending[token] = ("grant", None, name)
+            return self.reply(200, {"next": "/login/bridge"}, [f"{BRIDGE_COOKIE}={token}"])
+        if self.path == "/api/auth/bridge/password":
+            p = self.take("grant", BRIDGE_COOKIE)
+            if not p:
+                return self.coded(401, "bridge_expired")
+            if not isinstance(body.get("password"), str) or not isinstance(body.get("email"), str):
+                return self.coded(400, "invalid_request")
+            self.server.first_passwords[p[2]] = (body["password"], body["email"])
+            return self.reply(200, {"next": "/api/auth/signin"})
+        return self.reply(404)
 
     def client_data_ok(self, response, kind, challenge):
         cd = json.loads(_decode(response["clientDataJSON"]))
@@ -620,15 +672,12 @@ class _OldApiHandler(http.server.BaseHTTPRequestHandler):
             p = self.take("login")
             if self.server.login_finish_status:
                 return self.reply(self.server.login_finish_status, {"error": "refused"})
-            r = body["response"]
-            user = self.server.users.get(_decode(r["userHandle"]))
-            auth = _decode(r["authenticatorData"])
-            if not p or not user or not self.client_data_ok(r, "webauthn.get", p[1]) \
-                    or auth[:32] != hashlib.sha256(RP_ID.encode()).digest() \
-                    or not self.server.verify(user[1], _decode(r["signature"]),
-                                              auth + hashlib.sha256(_decode(r["clientDataJSON"])).digest()):
+            found = self.verified_user(body["response"], p[1]) if p else None
+            if not found:
                 return self.reply(401, {"error": "auth failed"})
-            return self.reply(200, {"name": user[0]}, [self.session(user[0])])
+            return self.reply(200, {"name": found[0][0]}, [self.session(found[0][0])])
+        if self.path.startswith("/api/auth/bridge/"):
+            return self.bridge(body)
         return self.reply(404)
 
 
@@ -719,6 +768,52 @@ class LegacyVerbs(LegacyCase):
             body = [ln.strip() for ln in f if not ln.startswith("-----")]
         self.assertTrue(set(body) <= set(needles))
         self.assertEqual([n for n in needles if n in "".join(self.outputs)], [])
+
+
+class BridgeVerb(LegacyCase):
+    """TC-1005-34 (geekdojo/geekdojo-brain#1005): the bridge verb against
+    the api fake's bridge routes."""
+
+    PASSWORD = "first-password-for-tc-1005-34"
+    EMAIL = "smoke-operator@example.com"
+
+    def bridge(self):
+        pwdir = tempfile.mkdtemp(prefix="signin-pw-")
+        self.addCleanup(shutil.rmtree, pwdir, True)
+        path = os.path.join(pwdir, "pw")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(self.PASSWORD + "\n")
+        os.chmod(path, 0o600)
+        code, out, err = run(["bridge", "--name", "smoke-operator", "--base", self.api.base, "--state", self.state,
+                              "--ca", pki()["ca"], "--timeout", "5", "--password-file", path, "--email", self.EMAIL],
+                             opener_factory=signin.https_opener)
+        self.outputs.append(out + err)
+        self.assertRegex(out, LINE)
+        return code, out
+
+    # TC-1005-34: the legacy assertion is accepted, the password and email
+    # are set, and a second run is refused has_password.
+    def test_tc_1005_34_sets_the_first_password_once(self):
+        self.assertEqual(self.legacy("legacy-register")[0], 0)
+        code, out = self.bridge()
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out, "signin bridge PASS smoke-operator's pre-update passkey was accepted and its first "
+                              "password and email were set\n")
+        self.assertEqual(self.api.verify_log, ["Verified OK"])
+        self.assertEqual(self.api.first_passwords, {"smoke-operator": (self.PASSWORD, self.EMAIL)})
+
+        code, out = self.bridge()
+        self.assertEqual(code, 1, out)
+        self.assertIn("/api/auth/bridge/finish (HTTP 409 has_password)", out)
+        self.assertEqual(self.api.verify_log, ["Verified OK", "Verified OK"])
+        self.assertEqual(self.api.first_passwords, {"smoke-operator": (self.PASSWORD, self.EMAIL)})
+
+        text = "".join(self.outputs)
+        self.assertNotIn(self.PASSWORD, text)
+        self.assertNotIn(self.EMAIL, text)
+        for name in os.listdir(self.state):
+            with open(os.path.join(self.state, name), encoding="utf-8", errors="replace") as f:
+                self.assertNotIn(self.PASSWORD, f.read(), f"the state file {name} holds the password")
 
 
 # ------------------------------------------------------------------ TC-967-03

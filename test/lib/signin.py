@@ -13,6 +13,7 @@
                        pkce-wrong-verifier|pkce-absent
     signin.py legacy-register --base URL --name N
     signin.py legacy-sign-in  --base URL --name N
+    signin.py bridge          --base URL --name N --password-file F --email E
 
 Every verb also takes --state DIR (0700, owned by the caller; files 0600)
 and --ca FILE, and optionally --server-name, --connect ADDR:PORT,
@@ -28,6 +29,15 @@ breached-password warning, it submits the page's own Keep form. With
 --then-sign-in it then signs in with the new password. The new password is
 never printed, logged or written down (the state file keeps the old one as
 old_password); the stdout line names only its length.
+
+bridge (geekdojo/geekdojo-brain#1005) runs the move's bridge after the
+update with the passkey legacy-register made: begin, finish, then the
+password step with the password read from --password-file (the same file
+rules as --new-password-file) and --email. It passes when the api accepts
+the old passkey and sets the first password and email; a refusal fails
+naming the api's code, so a second run on an account that already has a
+password fails naming has_password. The password is never printed, logged
+or written down, and the email is not printed or logged.
 
 reset-password recovery-code (geekdojo/geekdojo-brain#992) starts at the
 door's own "Forgot your password?" link, names the account, gives the
@@ -71,7 +81,7 @@ from signin_kit.transport import HttpsOpener, Transport, ssl_context  # noqa: E4
 
 SOFT_PASSKEY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "soft-passkey.py")
 WORDS = {EXIT_PASS: "PASS", EXIT_FACT_FAILED: "FAIL"}
-LEGACY_VERBS = ("legacy-register", "legacy-sign-in")
+LEGACY_VERBS = ("legacy-register", "legacy-sign-in", "bridge")
 
 
 class _Parser(argparse.ArgumentParser):
@@ -110,8 +120,11 @@ def build_parser():
     setpw.add_argument("--new-password-file", required=True, help="a 0600 file holding the new password")
     setpw.add_argument("--then-sign-in", action="store_true", help="sign in with the new password after")
     verbs.add_parser("negative", parents=[keycloak]).add_argument("what", choices=sorted(flows.NEGATIVES))
-    for verb in LEGACY_VERBS:
+    for verb in ("legacy-register", "legacy-sign-in"):
         verbs.add_parser(verb, parents=[old])
+    bridge = verbs.add_parser("bridge", parents=[old])
+    bridge.add_argument("--password-file", required=True, help="a 0600 file holding the first password")
+    bridge.add_argument("--email", required=True, help="the account's email address")
     return parser
 
 
@@ -170,8 +183,14 @@ def run_verb(args, clock, rng, passkeys, opener_factory, state, log, trace, held
     jar = http.cookiejar.CookieJar()
     if args.verb in LEGACY_VERBS:
         base = args.base.rstrip("/")
+        if args.verb == "bridge":
+            # Held in memory for the log's redaction, never in the needles file.
+            password = read_password_file(args.password_file)
+            held_secrets.update((password, args.email))
         transport = Transport(opener_factory(args), {urllib.parse.urlsplit(base).hostname}, jar, state, log)
         old = legacy.Legacy(transport, state, soft, passkeys, rng, jar)
+        if args.verb == "bridge":
+            return old.bridge(base, args.name, password, args.email)
         return old.register(base, args.name) if args.verb == "legacy-register" else old.sign_in(base, args.name)
     if args.verb == "set-password":
         # Held in memory for the log's redaction, never in the needles file.
