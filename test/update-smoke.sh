@@ -95,18 +95,40 @@
 #      build's rootfs with a shell into the guest, on both arches, and it is an
 #      OTA'd node: its persistent shadow was seeded by the old image and has no
 #      openbao row, which is exactly the path `id openbao` must work on.
-#      The operator (geekdojo/geekdojo-brain#967): in boot 1 the harness
-#      registers smoke-operator on the base image through the old console's
-#      passkey ceremony (test/lib/signin.py legacy-register, over the api's
-#      HTTPS with the base's controlplane CA as the trust anchor), and in boot
-#      2 that operator must sign in to the updated console (legacy-sign-in,
-#      then /api/auth/me naming it). A refusal fails the run, so publish does
-#      not run. The client's state, its needles and the CA live only in
-#      $WORK/operator, which the EXIT trap removes, and the console logs (the
-#      run's artifacts) are scanned for every needle first.
+#      The operator and the move (geekdojo/geekdojo-brain#967, #1012). Boot
+#      1 reads which sign-in the base runs from its GET /api/auth/status, a
+#      fact and never its version: `hasUsers` is an old base, `firstRun` an
+#      identity base, and anything else ends the run.
+#      From an old base: in boot 1 the harness registers smoke-operator
+#      through the old console's passkey ceremony (test/lib/signin.py
+#      legacy-register, over the api's HTTPS with the base's controlplane CA
+#      as the trust anchor). On both arches, a host-side poller starts before
+#      boot 2's QEMU and records every GET /api/auth/status until just before
+#      boot 2's power-off (test/lib/smoke-signin.sh ss_status_record, issue
+#      TC-01): the run fails on any firstRun:true, on no 200 saying
+#      firstRun:false, or on no unanswered read before the first 200. On
+#      amd64, after the realm wait and before the store leg, in order, the
+#      first failure stopping the rest: sign-in ready (ready:true); the door
+#      showing its registration form (converge has run, which the move waits
+#      for); the move Job's record in the api's journal, a move failure other
+#      than not_ready ending the wait; the bridge (signin.py bridge, the old
+#      passkey setting a generated first password and email); a
+#      password-only sign-in through the console with roles none, saving its
+#      recovery codes; a passkey through the launcher at sso-updsmoke.local;
+#      the grant ending that session; a password and recovery code sign-in
+#      with admin; and the password alone refused. The legacy sign-in is not
+#      run on boot 2: the new api has no legacy routes. A refusal fails the
+#      run, so publish does not run. The client's state, its needles (the
+#      first password among them) and the CA live only in $WORK/operator,
+#      which the EXIT trap removes, and the console logs (the run's
+#      artifacts) are scanned for every needle at the end.
+#      From an identity base there is no pre-update operator, so boot 1
+#      prints one ::notice:: naming the base, and none of the operator steps
+#      above or in boot 3 run; every other assertion decides the leg.
 #      UPDATE_SMOKE_FIXTURE=operator-gone (TEST-ONLY; CI never sets it, and it
 #      prints a FIXTURE: line) moves the api's rasputin.db aside in boot 2
-#      before the sign-in, to show the refusal path.
+#      after the realm wait, to show the refusal path: TC-01's record and the
+#      bridge fail.
 #      The identity service (geekdojo/geekdojo-brain#974), amd64 only: realm
 #      rasputin's discovery document answers 200 over mutual TLS
 #      (test/lib/identity-ready.sh), both identity units are active and not
@@ -116,7 +138,11 @@
 #      next NORMAL boot falls back to the [all] partition (the one-shot rollback);
 #      amd64 marks the booted slot bad, and GRUB falls back to A. Assert slot A
 #      runs ITS kernel (the old image's), with docker, and on arm64 that slot
-#      A's boot partition is byte-identical to before the update.
+#      A's boot partition is byte-identical to before the update. From an old
+#      base, on both arches (issue TC-03): the pre-update operator signs in
+#      on the old slot (legacy-sign-in, /api/auth/me naming it),
+#      /api/auth/status says hasUsers:true, and /api/restore/candidates
+#      answers 409, so first run stays closed after the rollback.
 #
 # THE BASE'S STORE STATE. What boot 2's seal-key and store-init decide follows
 # from what is on the persistent partition the base left: a base from before
@@ -159,6 +185,8 @@ KID="$HERE/../scripts/kernel-id.sh"
 . "$HERE/lib/secret-scan.sh"
 # The realm wait (geekdojo/geekdojo-brain#974), boot 2 on amd64.
 . "$HERE/lib/identity-ready.sh"
+# The sign-in through the console and the move's facts (#993, #1012).
+. "$HERE/lib/smoke-signin.sh"
 
 case "$ARCH" in amd64|arm64) ;; *) echo "::error::unknown arch '$ARCH'"; exit 2 ;; esac
 for f in "$OLD_IMG" "$BUNDLE" "$NEW_IMG"; do
@@ -193,6 +221,15 @@ GUEST_PKI=/run/update-smoke-store
 # The operator the update must not lock out (#967), and the sign-in client.
 OPERATOR=smoke-operator
 SIGNIN="$HERE/lib/signin.py"
+# The console's own name and its home and app doors (cluster id updsmoke,
+# the seed's), each sent to the HTTPS hostfwd.
+CONSOLE_HOST=updsmoke.local
+APP_HOST=signin.updsmoke.internal
+# Issue TC-01's record of boot 2's GET /api/auth/status (#1012): one line per
+# read, from before boot 2's QEMU starts; the stop file ends it.
+STATUS_LOG="$WORK/status-boot2.log"
+STATUS_STOP="$WORK/status-boot2.stop"
+SR_PID=""
 
 rm -rf "$WORK"
 mkdir -p "$WORK"
@@ -201,6 +238,7 @@ KEY="$WORK/id_ed25519"
 QPID=""
 cleanup() {
 	[ -n "$QPID" ] && kill "$QPID" 2>/dev/null
+	[ -n "$SR_PID" ] && kill "$SR_PID" 2>/dev/null
 	# The key is throwaway, but it is a private key: it does not outlive the run.
 	rm -f "$KEY" "$KEY.pub" "$DISK" "$WORK/bundle.vfat" "$WORK"/*.bin
 	# So are the store's harness CA keys and test leaves (TC-756-24).
@@ -356,12 +394,12 @@ api_https_wait() {
 	return 1
 }
 
-# signin VERB — test/lib/signin.py VERB for the operator against the api's
-# HTTPS, trusting only the base's controlplane CA. Its one stdout line goes to
-# SIGNIN_LINE and its sentence to SIGNIN_WHY; its stderr is printed
-# indented; its status is returned.
+# signin VERB [ARG...] — test/lib/signin.py VERB (a legacy verb) for the
+# operator against the api's HTTPS, trusting only the base's controlplane CA.
+# Its one stdout line goes to SIGNIN_LINE and its sentence to SIGNIN_WHY; its
+# stderr is printed indented; its status is returned.
 signin() {
-	SIGNIN_LINE=$(python3 -I "$SIGNIN" "$1" --name "$OPERATOR" --base "https://127.0.0.1:${HTTPS_PORT}" \
+	SIGNIN_LINE=$(python3 -I "$SIGNIN" "$@" --name "$OPERATOR" --base "https://127.0.0.1:${HTTPS_PORT}" \
 		--ca "$WORK/operator/mesh-ca.pem" --state "$WORK/operator" 2>"$WORK/operator.err")
 	_rc=$?
 	sed 's/^/    signin: /' "$WORK/operator.err"
@@ -369,6 +407,89 @@ signin() {
 	SIGNIN_WHY=${SIGNIN_LINE#signin * * }
 	SIGNIN_WHY=${SIGNIN_WHY:-signin.py printed no verdict (exit $_rc)}
 	return "$_rc"
+}
+
+# status_fetch BODY — the FETCH of smoke-signin.sh's status facts: one
+# GET /api/auth/status at the console's own name, its certificate checked
+# against the base's controlplane CA; the body to BODY, the status printed.
+status_fetch() {
+	curl -s --connect-to "${CONSOLE_HOST}:443:127.0.0.1:${HTTPS_PORT}" --cacert "$WORK/operator/mesh-ca.pem" \
+		--max-time 2 -o "$1" -w '%{http_code}' "https://${CONSOLE_HOST}/api/auth/status" 2>/dev/null || true
+}
+# status_record_end — stop TC-01's poller and print its verdict.
+status_record_end() {
+	[ -n "$SR_PID" ] || return 0
+	: >"$STATUS_STOP"
+	wait "$SR_PID" 2>/dev/null
+	SR_PID=""
+	if _sv=$(ss_status_verdict "$STATUS_LOG"); then
+		pass "boot 2: TC-01 first run stayed closed from the first answer ($_sv; record $STATUS_LOG)"
+	else
+		fail "boot 2: TC-01 first run was not shown closed from the first answer: $(printf '%s' "$_sv" | tr '\n' ' ')(record $STATUS_LOG)"
+	fi
+}
+# The move's probes and ALIVEs (#1012).
+status_probe() { ss_status_probe status_fetch "$STATUS_LOG"; }
+move_probe() { ss_move_probe ssh_guest; }
+move_alive() {
+	qemu_alive || { echo "QEMU is gone"; return 1; }
+	ss_move_alive ssh_guest
+}
+enrol_me() { me_status "$CONSOLE_HOST" "$HTTPS_PORT" "$WORK/operator/mesh-ca.pem" "$WORK/operator/enrol.jar"; }
+grant_probe() { ss_grant_probe enrol_me; }
+# needle_count — the lines of the operator's needles file.
+needle_count() { _nc=$(grep -c . "$WORK/operator/needles" 2>/dev/null); echo "${_nc:-0}"; }
+
+# move_sequence — boot 2 on amd64 from an old base (#1012): sign-in ready,
+# the door (converge has run), the move Job's record, the bridge with a
+# first password, a password-only sign-in without the role (the recovery
+# codes saved), a passkey through the launcher, the grant, a password and
+# recovery code sign-in as administrator, and the password alone refused. Each step needs
+# the one before it, so the first failure stops the rest (sg, SG_FAIL), and
+# the caller reports it as one fail.
+move_sequence() {
+	SG_FAIL=""
+	SS_SIGNIN="$SIGNIN" SS_STATE="$WORK/operator" SS_DOORS="$WORK/doors.json" SS_CA="$WORK/operator/mesh-ca.pem"
+	SS_CONNECT="127.0.0.1:${HTTPS_PORT}" SS_LABEL="$OPERATOR"
+	ss_doors_file "$CONSOLE_HOST" "$APP_HOST" "$SS_DOORS"
+	ss_wait "sign-in ready after the update (GET /api/auth/status ready:true)" "$DOOR_TRIES" 2 status_probe qemu_alive \
+		|| { sg_fail "sign-in never became ready"; return; }
+	# The move is due only once converge has applied the realm (cp
+	# identity/move/cond.go), and the door's registration form is the fact
+	# that converge has run; each wait is one scheduler check, the run and a
+	# margin.
+	ss_wait "the console's sign-up reaching the door's registration form" "$DOOR_TRIES" 2 ss_door_probe qemu_alive \
+		|| { sg_fail "the door never showed its registration form"; return; }
+	ss_wait "the move Job recording its last step ($SS_MOVE_RECORDED)" "$DOOR_TRIES" 2 move_probe move_alive \
+		|| { sg_fail "the move never recorded its last step"; return; }
+	echo "boot 2: identity.move.failed lines with a cause other than not_ready this boot: $(ssh_guest 'journalctl -u rasputin-api -b -o cat --no-pager' 2>/dev/null | grep -F "$SS_MOVE_FAILED" | grep -vc ' cause=not_ready')"
+	(umask 077 && openssl rand -base64 24 >"$WORK/operator/first-password") \
+		|| { sg_fail "no first password could be made"; return; }
+	echo "boot 2: the operator's needles before the bridge: $(needle_count)"
+	if signin bridge --password-file "$WORK/operator/first-password" --email "$OPERATOR@update-smoke.invalid"; then
+		echo "$SIGNIN_LINE"
+	else
+		echo "::error::the bridge refused $OPERATOR's pre-update passkey: $SIGNIN_WHY"
+		sg_fail "signin.py bridge did not pass: $SIGNIN_WHY"
+		return
+	fi
+	echo "boot 2: the operator's needles after the bridge: $(needle_count)"
+	sg sign-in password || return
+	[ "$(sg_field roles)" = none ] \
+		|| { sg_fail "the moved account's password alone signed in with roles '$(sg_field roles)', not none"; return; }
+	sg enrol passkey --jar "$WORK/operator/enrol.jar" || return
+	MOVE_RPID=$(sg_field rp_id)
+	[ "$MOVE_RPID" = "sso-$CONSOLE_HOST" ] \
+		|| { sg_fail "the passkey was made for '${MOVE_RPID:-no RP ID}', not sso-$CONSOLE_HOST"; return; }
+	ss_wait "the grant ending the enrolment's console session" "$GRANT_TRIES" 2 grant_probe qemu_alive \
+		|| { sg_fail "the grant never ended the enrolment's session"; return; }
+	sg sign-in recovery-code || return
+	MOVE_ROLES=$(sg_field roles)
+	case ",$MOVE_ROLES," in
+		*,admin,*) ;;
+		*) sg_fail "the password and recovery code signed in with roles '${MOVE_ROLES:-none}', with no admin"; return ;;
+	esac
+	sg negative admin-password-alone || return
 }
 
 running_id() { ssh_guest 'echo "$(uname -r) $(uname -v)"' 2>/dev/null; }
@@ -434,15 +555,30 @@ ssh_guest 'rauc status --detailed' 2>&1 | sed 's/^/    rauc: /'
 # The operator (#967): registered on the base through the old console's
 # ceremony, so boot 2 can sign it in after the update. The CA is the base's
 # controlplane CA, which issued the api's HTTPS leaf; it is public.
+# Which sign-in the base runs is read from its /api/auth/status's shape, a
+# fact, never its version (#1012): an old base (hasUsers) gets the operator
+# and every move step; an identity base (firstRun) has no pre-update
+# operator, so it gets none of them, and its leg is decided by the other
+# assertions.
+BASE_CEREMONY=unknown
 if api_https_wait; then
 	(umask 077 && mkdir -p "$WORK/operator" && ssh_guest "cat $MESH_CA" >"$WORK/operator/mesh-ca.pem") 2>/dev/null \
 		|| fail "boot 1: could not read the controlplane CA $MESH_CA over SSH"
-	if signin legacy-register; then
-		pass "boot 1: $OPERATOR registered on $OLD_VERSION through the old console ceremony"
-	else
-		fail "boot 1: $OPERATOR could not be registered on $OLD_VERSION: $SIGNIN_WHY"
-	fi
+	BASE_CEREMONY=$(ss_base_ceremony status_fetch)
 fi
+case "$BASE_CEREMONY" in
+	old)
+		if signin legacy-register; then
+			pass "boot 1: $OPERATOR registered on $OLD_VERSION through the old console ceremony"
+		else
+			fail "boot 1: $OPERATOR could not be registered on $OLD_VERSION: $SIGNIN_WHY"
+		fi
+		;;
+	identity)
+		echo "::notice::update-smoke ($ARCH): the base $OLD_VERSION is an identity release (its /api/auth/status has firstRun), so it has no pre-update operator: no registration, TC-01 record, move or boot-3 operator check runs"
+		;;
+	*) die "the base $OLD_VERSION's GET /api/auth/status has neither hasUsers nor firstRun, or did not answer, so which sign-in it runs is unknown" ;;
+esac
 # The base's store state (THE BASE'S STORE STATE, above). The api goes first,
 # because it is what starts and restarts the store; a base with no
 # openbao.service has nothing to stop. The listing is the seal-key script's own
@@ -508,6 +644,15 @@ else
 	expect "slot B boot marker" "$NEW_VERSION" "$(fat_cat "$DISK" 1 rasputin-boot-version-B | tr -d '\n')"
 	expect "slot B's kernel on the ESP is the new kernel" "$NEW_ID" "$(slot_kernel_id "$DISK" B || echo none)"
 fi
+# TC-01 (#1012), from an old base: the poller starts before boot 2's QEMU,
+# so its first reads find no hostfwd bound and go unanswered; boot 1's QEMU
+# has already exited (poweroff_guest waits on it).
+if [ "$BASE_CEREMONY" = old ]; then
+	rm -f "$STATUS_LOG" "$STATUS_STOP"
+	ss_status_record status_fetch "$STATUS_LOG" "$STATUS_STOP" "$BUDGET" 1 &
+	SR_PID=$!
+	echo "boot 2: TC-01's record of GET /api/auth/status is $STATUS_LOG"
+fi
 if boot 2; then
 	expect "boot 2: running slot" B "$(cmdline_slot)"
 	expect "boot 2: running kernel is the new build's" "$NEW_ID" "$(running_id)"
@@ -547,11 +692,15 @@ if boot 2; then
 		ssh_guest 'systemctl stop rasputin-api.service && mv /var/lib/rasputin/rasputin.db /var/lib/rasputin/rasputin.db.fixture-aside && systemctl start rasputin-api.service' >/dev/null 2>&1 \
 			|| fail "boot 2: FIXTURE: operator-gone could not move rasputin.db aside"
 	fi
-	if api_https_wait; then
-		if signin legacy-sign-in; then
-			pass "boot 2: the pre-update operator $OPERATOR signed in after the update"
+	# The move (#1012), amd64 only: arm64 masks the identity service. The
+	# legacy sign-in is gone from the new api, so the operator now signs
+	# in through the move, before the store leg, which restarts the api.
+	if [ "$ARCH" = amd64 ] && [ "$BASE_CEREMONY" = old ] && api_https_wait; then
+		move_sequence
+		if [ -z "$SG_FAIL" ]; then
+			pass "boot 2: the move of $OPERATOR, the bridge, the password-only sign-in (roles none), a passkey at $MOVE_RPID, the grant, the recovery-code sign-in (roles $MOVE_ROLES) and the password alone refused"
 		else
-			fail "the pre-update operator $OPERATOR could not sign in after the update: $SIGNIN_WHY"
+			fail "boot 2: the move of the pre-update operator $OPERATOR stopped: $SG_FAIL"
 		fi
 	fi
 	# The secrets-store binary (geekdojo/geekdojo-brain#798). Only busybox
@@ -859,8 +1008,10 @@ if boot 2; then
 	if [ "$ARCH" = amd64 ]; then
 		ssh_guest 'rauc status mark-bad booted' 2>&1 | sed 's/^/    rauc: /'
 	fi
+	status_record_end
 	poweroff_guest
 else
+	status_record_end
 	fail "the updated slot did not come up"
 fi
 
@@ -878,6 +1029,23 @@ if boot 3; then
 	expect "boot 3: image version" "$OLD_VERSION" "$(ssh_guest 'cat /etc/rasputin/image-version' 2>/dev/null)"
 	expect "boot 3: docker active" active "$(ssh_guest 'systemctl is-active docker' 2>/dev/null)"
 	expect "boot 3: docker0 exists" yes "$(guest_yes 'ip link show docker0')"
+	# TC-03 (#1012): the old slot's console still knows the pre-update
+	# operator after the move, and first run stays closed there.
+	if [ "$BASE_CEREMONY" = old ] && api_https_wait; then
+		if signin legacy-sign-in; then
+			pass "boot 3: the pre-update operator $OPERATOR signed in on the old slot, and /api/auth/me named it"
+		else
+			fail "boot 3: the pre-update operator $OPERATOR could not sign in on the old slot: $SIGNIN_WHY"
+		fi
+		rm -f "$WORK/status-boot3.json"
+		_code=$(status_fetch "$WORK/status-boot3.json")
+		expect "boot 3: GET /api/auth/status says hasUsers:true" "200 true" \
+			"$_code $(jq -r '.hasUsers' "$WORK/status-boot3.json" 2>/dev/null)"
+		rm -f "$WORK/status-boot3.json"
+		expect "boot 3: GET /api/restore/candidates is refused, an operator exists" 409 \
+			"$(curl -s -o /dev/null -w '%{http_code}' --connect-to "${CONSOLE_HOST}:443:127.0.0.1:${HTTPS_PORT}" \
+				--cacert "$WORK/operator/mesh-ca.pem" --max-time 5 "https://${CONSOLE_HOST}/api/restore/candidates" || true)"
+	fi
 	poweroff_guest
 else
 	fail "slot A did not come back after the rollback"
@@ -915,7 +1083,8 @@ console_scan() {
 		*) fail "the scan of the run's logs for the operator's secrets read nothing: $(printf '%s' "$_cs" | tr '\n' ' ')" ;;
 	esac
 }
-console_scan
+# An identity base registers no operator, so it has no needles to look for.
+[ "$BASE_CEREMONY" = old ] && console_scan
 
 echo "== consoles: $WORK/console-{1,2,3}.log"
 if [ "$FAILS" -gt 0 ]; then

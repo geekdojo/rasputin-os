@@ -60,8 +60,12 @@ password step with the password read from --password-file (the same file
 rules as --new-password-file) and --email. It passes when the api accepts
 the old passkey and sets the first password and email; a refusal fails
 naming the api's code, so a second run on an account that already has a
-password fails naming has_password. The password is never printed, logged
-or written down, and the email is not printed or logged.
+password fails naming has_password. On a pass the name and the password are
+saved into the name's 0600 state file, as create-account saves its own, so
+sign-in and enrol can use the moved account (geekdojo/geekdojo-brain#1012),
+and the password joins the needles; a refusal writes nothing, and a state
+file that cannot be saved is Inconclusive. The password and the email are
+never printed or logged.
 
 reset-password recovery-code (geekdojo/geekdojo-brain#992) starts at the
 door's own "Forgot your password?" link, names the account, gives the
@@ -261,7 +265,8 @@ def run_verb(args, clock, rng, passkeys, opener_factory, state, log, trace, held
     if args.verb in LEGACY_VERBS:
         base = args.base.rstrip("/")
         if args.verb == "bridge":
-            # Held in memory for the log's redaction, never in the needles file.
+            # Held in memory for the log's redaction; bridge saves the
+            # password into the state file, and so the needles, on a pass.
             password = read_password_file(args.password_file)
             held_secrets.update((password, args.email))
         transport = Transport(opener_factory(args), {urllib.parse.urlsplit(base).hostname}, jar, state, log)

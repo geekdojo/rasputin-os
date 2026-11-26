@@ -1,0 +1,24 @@
+{
+  "app": {
+    "client_id": "no-app-client-until-1027",
+    "origin": "https://signin.c1.internal",
+    "realm": "rasputin",
+    "redirect_uri": "https://app.c1.internal/callback"
+  },
+  "home": {
+    "client_id": "rasputin-console",
+    "console": {
+      "methods": {
+        "passkey": "passkey",
+        "passkey-2fa": "security_key",
+        "recovery-codes": "recovery_codes",
+        "totp": "authenticator_app"
+      },
+      "methods_route": "/api/me/sign-in-methods",
+      "origin": "https://c1.local"
+    },
+    "origin": "https://sso-c1.local",
+    "realm": "rasputin",
+    "redirect_uri": "https://c1.local/api/auth/callback"
+  }
+}
