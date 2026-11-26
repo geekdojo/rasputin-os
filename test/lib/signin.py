@@ -6,6 +6,7 @@
     signin.py enrol totp|passkey|passkey-2fa|recovery-codes   (same options)
     signin.py sign-in password|password-totp|password-passkey|passkey|recovery-code
     signin.py sign-out
+    signin.py door-page
     signin.py reset-password passkey|recovery-code
     signin.py set-password --new-password-file F [--then-sign-in]   (same options)
     signin.py negative bad-origin|bad-rpid|no-up|no-uv|bad-signature|bad-challenge|
@@ -20,6 +21,29 @@ and --ca FILE, and optionally --server-name, --connect ADDR:PORT,
 --client-cert and --client-key, --timeout and --stock-theme. --doors names a
 JSON file: {"home": {"origin", "realm", "client_id", "redirect_uri",
 "post_logout_uri"}, "app": {...}}. No option takes a secret.
+
+A door with a "console" object is signed in to through the console
+(geekdojo/geekdojo-brain#993, signin_kit/console.py): {"origin":
+"https://<cid>.local", "methods_route": "/api/me/sign-in-methods", "methods":
+{"totp": "authenticator_app", "passkey": "passkey", "passkey-2fa":
+"security_key", "recovery-codes": "recovery_codes"}}. Its redirect_uri is the
+console's /api/auth/callback. Without one, the client is a public client of
+stock Keycloak with its own PKCE and token exchange (the vectors' replay). A
+console object that is not one, with an origin that is not https:// or a
+route or method map that is missing, is Inconclusive.
+
+Every Keycloak verb also takes --jar FILE: once the verb passes, FILE is
+created 0600 (never over an existing file or a link) as a Netscape cookie jar
+holding the console hosts' cookies only, for curl -b. It cannot exist
+beforehand, and a jar that cannot be written is Inconclusive.
+
+door-page makes one visit to the console's account creation and passes only
+on the door's Rasputin-themed registration form (login-register). Every other
+answer is Inconclusive (exit 2): the boot smoke polls it until the realm's
+console client and registration are converged.
+
+The PASS line carries roles=<the account's console roles> after a console
+sign-in and rp_id=<the page's RP ID> after a passkey's enrolment or sign-in.
 
 set-password signs in with the current password the account's state file
 holds (an administrator's temporary one), and at UPDATE_PASSWORD posts the
@@ -49,7 +73,8 @@ is changed. It then fails if the refresh token the account last held still
 refreshes (a session remains) or if the old password still signs in, and
 signs in with the new one.
 
-Stdout is exactly one line, `signin <verb> PASS|FAIL|INCONCLUSIVE <fact>`.
+Stdout is exactly one line, `signin <verb> PASS|FAIL|INCONCLUSIVE <fact>`; a
+failed fact's line starts `fact=<its name>: ` before its sentence.
 Exit 0: the fact held. 1: a named fact failed. 2: the run could not tell
 (an unknown or missing page id, an empty page, no HTTP answer, TLS failing
 against --ca, openssl missing, a bad state directory, bad arguments). It
@@ -73,8 +98,8 @@ import urllib.parse
 # beside this file, is added back, and nothing else.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from signin_kit import flows, legacy, passkey  # noqa: E402
-from signin_kit.errors import EXIT_FACT_FAILED, EXIT_PASS, Inconclusive, SigninError  # noqa: E402
+from signin_kit import console, flows, legacy, passkey  # noqa: E402
+from signin_kit.errors import EXIT_FACT_FAILED, EXIT_PASS, FactFailed, Inconclusive, SigninError  # noqa: E402
 from signin_kit.log import Log  # noqa: E402
 from signin_kit.state import State  # noqa: E402
 from signin_kit.transport import HttpsOpener, Transport, ssl_context  # noqa: E402
@@ -105,6 +130,7 @@ def build_parser():
     keycloak.add_argument("--doors", required=True, help="the doors' JSON file")
     keycloak.add_argument("--label", required=True, help="the account label")
     keycloak.add_argument("--door", choices=("home", "app"), default="home")
+    keycloak.add_argument("--jar", help="once the verb passes, a new 0600 Netscape jar of the console's cookies")
     old = _Parser(add_help=False, parents=[common])
     old.add_argument("--base", required=True, help="the console's https:// base URL")
     old.add_argument("--name", required=True, help="the operator's name")
@@ -115,6 +141,7 @@ def build_parser():
     verbs.add_parser("enrol", parents=[keycloak]).add_argument("what", choices=sorted(flows.ENROL_ACTIONS))
     verbs.add_parser("sign-in", parents=[keycloak]).add_argument("what", choices=flows.SIGN_IN_METHODS)
     verbs.add_parser("sign-out", parents=[keycloak])
+    verbs.add_parser("door-page", parents=[keycloak])
     verbs.add_parser("reset-password", parents=[keycloak]).add_argument("what", choices=flows.RESET_METHODS)
     setpw = verbs.add_parser("set-password", parents=[keycloak])
     setpw.add_argument("--new-password-file", required=True, help="a 0600 file holding the new password")
@@ -128,14 +155,64 @@ def build_parser():
     return parser
 
 
-def load_doors(path):
+def _console_block(path, name, block):
+    """A door's console object, checked: (origin, route, method map)."""
+    if not isinstance(block, dict):
+        raise Inconclusive(f"The doors file {path} gives door {name} a console that is not an object.")
+    origin, route, methods = block.get("origin"), block.get("methods_route"), block.get("methods")
+    if not isinstance(origin, str) or not origin.startswith("https://") or not urllib.parse.urlsplit(origin).hostname:
+        raise Inconclusive(f"The doors file {path} gives door {name} a console origin that is not https://<host>.")
+    if not isinstance(route, str) or not route.startswith("/"):
+        raise Inconclusive(f"The doors file {path} gives door {name}'s console no methods_route.")
+    if not isinstance(methods, dict) or set(methods) != set(flows.ENROL_ACTIONS) \
+            or not all(isinstance(v, str) and v for v in methods.values()):
+        raise Inconclusive(f"The doors file {path} gives door {name}'s console no method for each of "
+                           f"{', '.join(sorted(flows.ENROL_ACTIONS))}.")
+    return origin.rstrip("/"), route, methods
+
+
+def load_doors(path, transport_for, state, rng):
+    """The doors, each with the client strategy that signs in there, and the
+    one transport they share. transport_for(hosts, stops) builds it: the
+    door hosts and each console's host, and the console paths never
+    followed."""
     try:
         with open(path, encoding="utf-8") as f:
             raw = json.load(f)
-        return {name: flows.Door(name, d["origin"], d["realm"], d["client_id"], d["redirect_uri"],
-                                 d["post_logout_uri"]) for name, d in raw.items()}
+        doors = {name: flows.Door(name, d["origin"], d["realm"], d["client_id"], d["redirect_uri"],
+                                  d.get("post_logout_uri", "")) for name, d in raw.items()}
+        consoles = {name: _console_block(path, name, d["console"]) for name, d in raw.items() if "console" in d}
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as err:
         raise Inconclusive(f"The doors file {path} could not be read ({type(err).__name__}).") from err
+    hosts = {d.host for d in doors.values()} | {urllib.parse.urlsplit(c[0]).hostname for c in consoles.values()}
+    stops = set().union(*(console.ConsoleClient.stops(c[0]) for c in consoles.values()))
+    transport = transport_for(hosts, stops)
+    for name, door in doors.items():
+        door.client = (console.ConsoleClient(transport, state, *consoles[name]) if name in consoles
+                       else console.PublicClient(transport, state, rng))
+    return doors, transport
+
+
+def check_jar_absent(path):
+    if path and os.path.lexists(path):
+        raise Inconclusive(f"The jar {path} already exists, and the client never writes over a file.")
+
+
+def write_jar(path, cookies):
+    """A new 0600 Netscape cookie jar at path holding cookies, never over an
+    existing file or through a link. The sentence never holds a value."""
+    check_jar_absent(path)
+    lines = ["# Netscape HTTP Cookie File"]
+    for c in cookies:
+        domain = ("#HttpOnly_" if c.has_nonstandard_attr("HttpOnly") else "") + c.domain
+        lines.append("\t".join([domain, "TRUE" if c.domain.startswith(".") else "FALSE", c.path,
+                                "TRUE" if c.secure else "FALSE", str(c.expires or 0), c.name, c.value or ""]))
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+    except OSError as err:
+        raise Inconclusive(f"The jar {path} could not be written ({type(err).__name__}).") from err
 
 
 def read_password_file(path):
@@ -196,11 +273,14 @@ def run_verb(args, clock, rng, passkeys, opener_factory, state, log, trace, held
         # Held in memory for the log's redaction, never in the needles file.
         new_password = read_password_file(args.new_password_file)
         held_secrets.add(new_password)
-    doors = load_doors(args.doors)
-    transport = Transport(opener_factory(args), {d.host for d in doors.values()}, jar, state, log)
+    check_jar_absent(args.jar)
+    doors, transport = load_doors(args.doors, lambda hosts, stops: Transport(
+        opener_factory(args), hosts, jar, state, log, stops), state, rng)
     verbs = flows.Flows(transport, doors, state, soft, passkeys, clock, rng, log)
     detail = ""
-    if args.verb == "create-account":
+    if args.verb == "door-page":
+        detail = f"{verbs.door_page(trace, args.door)}; "
+    elif args.verb == "create-account":
         verbs.create_account(trace, args.label, args.door)
     elif args.verb == "enrol":
         verbs.enrol(trace, args.what, args.label, args.door)
@@ -216,7 +296,11 @@ def run_verb(args, clock, rng, passkeys, opener_factory, state, log, trace, held
         detail = f"{verbs.set_password(trace, args.label, args.door, new_password, args.then_sign_in)}; "
     else:
         detail = f"refused: {verbs.negative(trace, args.what, args.label, args.door)}; "
-    return f"{detail}pages={','.join(trace.page_ids) or '-'}"
+    if args.jar:
+        hosts = {d.client.host for d in doors.values() if d.client.launches}
+        write_jar(args.jar, [c for h in sorted(hosts) for c in transport.cookies(h)])
+    notes = "".join(f"{k}={v}; " for k, v in trace.notes.items())
+    return f"{detail}{notes}pages={','.join(trace.page_ids) or '-'}"
 
 
 def main(argv, env, stdout, stderr, clock, rng, signer_factory, opener_factory):
@@ -238,6 +322,9 @@ def main(argv, env, stdout, stderr, clock, rng, signer_factory, opener_factory):
         code = EXIT_PASS
     except SigninError as err:
         code, fact = err.exit_code, err.sentence
+        if isinstance(err, FactFailed) and err.fields.get("fact"):
+            # The fact's name leads, so a wrapper can name it without parsing the sentence.
+            fact = f"fact={err.fields['fact']}: {err.sentence}"
     except Exception as err:  # noqa: BLE001 - an unforeseen error is never a pass or a failed fact
         code, fact = 2, f"The client stopped on an unexpected {type(err).__name__}."
     pages_seen = ",".join(trace.page_ids) if trace else ""

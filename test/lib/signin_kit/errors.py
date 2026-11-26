@@ -33,3 +33,9 @@ class Inconclusive(SigninError):
     HTTP answer, a TLS failure, a bad state directory or bad arguments."""
 
     exit_code = EXIT_INCONCLUSIVE
+
+
+class RulesApplying(FactFailed):
+    """The console's control lock while Rasputin applies its sign-in rules
+    (cp auth/controllock.go, HTTP 423 code signin_rules_applying). It ends on
+    its own when that converge finishes, so the caller may wait on it."""

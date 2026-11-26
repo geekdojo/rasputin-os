@@ -45,7 +45,13 @@ DOOR_WARNING = "rasputin-door-warning"
 # The door's information page: the app door's answer to a password reset's
 # return (geekdojo/geekdojo-brain#992).
 DOOR_INFO = "rasputin-door-info"
-DOOR_PAGES = {DOOR_WARNING: "breached-password warning", DOOR_INFO: "information"}
+# The door's refusal (a kc_action the api did not issue, geekdojo/geekdojo-
+# brain#1150) and its page while sign-in is not available
+# (geekdojo/geekdojo-brain#993).
+DOOR_REFUSAL = "rasputin-door-refusal"
+DOOR_NOT_READY = "rasputin-door-not-ready"
+DOOR_PAGES = {DOOR_WARNING: "breached-password warning", DOOR_INFO: "information",
+              DOOR_REFUSAL: "refusal", DOOR_NOT_READY: "sign-in not available"}
 
 # Keycloak's reset page (geekdojo/geekdojo-brain#992), which reaches the
 # vectors' fixtures with the control plane's next pinned tag; until then it
@@ -189,16 +195,27 @@ def js_literal(text):
     return "".join(out)
 
 
+def _data_attribute(name):
+    """The data- attribute the Rasputin theme writes an argument as:
+    rpId is data-rp-id, userid is data-userid (identity theme, #988)."""
+    return "data-" + re.sub(r"([A-Z])", lambda m: "-" + m.group(1).lower(), name)
+
+
 def script_args(page, names):
-    """Each named argument from the page's inline WebAuthn script. A missing
-    argument is Inconclusive, never a default."""
+    """Each named argument from the page's inline WebAuthn script (stock
+    Keycloak), or from the data- attribute the Rasputin theme moved it to. A
+    missing argument is Inconclusive, never a default."""
     values = {}
     for name in names:
         match = re.search(r"\b" + re.escape(name) + r"\s*:\s*" + _JS_VALUE, page.raw)
+        if match:
+            values[name] = js_literal(match.group(1))
+            continue
+        match = re.search(r"\s" + re.escape(_data_attribute(name)) + r'="([^"]*)"', page.raw)
         if not match:
             raise Inconclusive(f"The page {page.page_id} does not give the WebAuthn argument {name}.",
                                page_id=page.page_id)
-        values[name] = js_literal(match.group(1))
+        values[name] = html.unescape(match.group(1))
     return values
 
 
@@ -239,10 +256,17 @@ def recovery_codes(page):
     raise Inconclusive(f"The page {page.page_id} gives no recovery codes.", page_id=page.page_id)
 
 
+_RECOVERY_LABEL = re.compile(r'(?s)<label\b[^>]*\bfor="recoveryCodeInput"[^>]*>(.*?)</label>')
+
+
 def recovery_code_number(page):
-    """Which recovery code the input page asks for (1-based)."""
+    """Which recovery code the input page asks for (1-based): from the code
+    field's own label, "Recovery code number 1" in the Rasputin theme or
+    "Recovery code #1" in stock Keycloak, else stock's "#1" in the page."""
+    label = _RECOVERY_LABEL.search(page.raw)
+    match = label and re.search(r"(?:#|\bnumber)\s*(\d+)", html.unescape(label.group(1)), re.I)
     text = " ".join(page.text_by_id.values())
-    match = re.search(r"#\s*(\d+)", text) or re.search(r"#\s*(\d+)", html.unescape(page.raw))
+    match = match or re.search(r"#\s*(\d+)", text) or re.search(r"#\s*(\d+)", html.unescape(page.raw))
     if not match:
         raise Inconclusive(f"The page {page.page_id} does not say which recovery code it wants.",
                            page_id=page.page_id)
@@ -263,7 +287,12 @@ def message(page):
 
 def select_options(page):
     """The choices on the "another way to sign in" page: (execution id,
-    heading) in page order."""
+    heading) in page order. The Rasputin theme (parent base) renders one form
+    whose choices are submit buttons named authenticationExecution, each with
+    a heading element; stock keycloak.v2 renders one form per choice."""
+    buttons = re.findall(r'(?s)<button[^>]*name="authenticationExecution"[^>]*>.*?</button>', page.raw)
+    if buttons:
+        return [_button_option(page, b) for b in buttons]
     options = []
     for chunk in page.raw.split('<form id="kc-select-credential-form"')[1:]:
         execution = re.search(r'name="authenticationExecution"\s+value="([^"]+)"', chunk)
@@ -275,3 +304,11 @@ def select_options(page):
     if not options:
         raise Inconclusive(f"The page {page.page_id} offers no choices.", page_id=page.page_id)
     return options
+
+
+def _button_option(page, button):
+    execution = re.search(r'<button[^>]*value="([^"]+)"', button)
+    heading = re.search(r'(?s)class="[^"]*heading[^"]*"[^>]*>(.*?)</', button)
+    if not execution or not heading:
+        raise Inconclusive(f"The page {page.page_id} has a choice the client cannot read.", page_id=page.page_id)
+    return html.unescape(execution.group(1)), " ".join(html.unescape(heading.group(1)).split())

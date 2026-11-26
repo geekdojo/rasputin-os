@@ -2,14 +2,17 @@
 #
 # Tests for the boot smoke's check that the api reports the secrets store ready
 # (geekdojo/geekdojo-brain#834): the readiness verdict, the wait and the
-# post-kill report in test/lib/store-ready.sh, the first-run sign-in in
-# test/lib/api-session.sh, and the soft passkey in test/lib/soft-passkey.py.
+# post-kill report in test/lib/store-ready.sh, and the soft passkey in
+# test/lib/soft-passkey.py, which the sign-in client (test/lib/signin.py)
+# registers passkeys with. The first-run sign-in the store read needs is
+# test/lib/smoke-signin.sh's, tested in test/smoke-signin-test.sh
+# (geekdojo/geekdojo-brain#993).
 #
 # Why. The boot smoke runs only on a release build, so a wrong verdict, a
 # sign-in that reports itself as "not ready", or a message that names the
 # wrong fact would first show up on the one run where it costs the most. Every
-# branch runs here against stubbed collaborators: the HTTP POST, the alerts
-# fetch and the liveness check are passed in as functions, and the interval is
+# branch runs here against stubbed collaborators: the alerts fetch and the
+# liveness check are passed in as functions, and the interval is
 # 0. The soft passkey's output is decoded with base64, jq, od and sha256sum,
 # never with the helper itself. The real api's side is the pre-cut run recorded
 # on the issue, and the QEMU smoke at the store-arming cut.
@@ -27,10 +30,9 @@ export LC_ALL
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 SR_LIB="$ROOT/test/lib/store-ready.sh"
-AS_LIB="$ROOT/test/lib/api-session.sh"
 HELPER="$ROOT/test/lib/soft-passkey.py"
 CHECKS="$ROOT/test/lib/checks.sh"
-for f in "$CHECKS" "$SR_LIB" "$AS_LIB" "$HELPER"; do
+for f in "$CHECKS" "$SR_LIB" "$HELPER"; do
 	[ -f "$f" ] || { echo "FAILED: the file $f is missing."; exit 1; }
 done
 for t in jq python3 openssl; do
@@ -69,7 +71,7 @@ if [ -z "${SR_TEST_SHELL:-}" ]; then
 	echo "== the suite fails closed (TC-834-23)"
 	mkdir -p "$TMP/tree/test/lib"
 	cp "$0" "$TMP/tree/test/store-ready-test.sh"
-	cp "$CHECKS" "$AS_LIB" "$HELPER" "$TMP/tree/test/lib/"
+	cp "$CHECKS" "$HELPER" "$TMP/tree/test/lib/"
 	for s in $TEST_SHELLS; do
 		shp=$(command -v "$s")
 		for gone in store-ready.sh jq python3 openssl; do
@@ -120,8 +122,6 @@ fi
 SH=$SR_TEST_SHELL
 # shellcheck source=SCRIPTDIR/lib/store-ready.sh
 . "$SR_LIB"
-# shellcheck source=SCRIPTDIR/lib/api-session.sh
-. "$AS_LIB"
 
 T="$TMP/t"
 mkdir -p "$T"
@@ -275,169 +275,17 @@ check "TC-834-13 [$SH] exactly the success line" \
 	"$(yes_if test "$OUT" = "The api reports the secrets store ready: GET /api/alerts holds no secret-store alert after 42 seconds.")" "$OUT"
 check "TC-834-13 [$SH] returns 0" "$(yes_if test "$RC" = 0)" "rc=$RC"
 
-# ---------------------------------------------------------------- sign-in ----
-# stub_post answers from $T/<step>.code, .resp and .jar, where step is begin
-# or finish, logs each call and keeps a copy of what was posted.
+# The registration options the soft passkey cases encode: a challenge and the
+# RP ID, as a begin step hands them over.
 CHALLENGE="q1w2e3r4t5y6u7i8o9p0ASDFGHJKLzxcvbnm-_QWE"
 BEGIN_OK='{"publicKey":{"challenge":"'$CHALLENGE'","rp":{"id":"smoke1.local","name":"Rasputin"},"user":{"id":"dXNlcg","name":"smoke","displayName":"Smoke Test"},"pubKeyCredParams":[{"type":"public-key","alg":-7}],"timeout":300000}}'
-TAB=$(printf '\t')
-PENDING_VALUE="pendingVALUEnotToLeak42"
-SESSION_VALUE="sessionVALUEnotToLeak42"
-PENDING_LINE="127.0.0.1${TAB}FALSE${TAB}/${TAB}TRUE${TAB}0${TAB}rasputin-pending${TAB}$PENDING_VALUE"
-SESSION_LINE="#HttpOnly_127.0.0.1${TAB}FALSE${TAB}/${TAB}TRUE${TAB}0${TAB}rasputin-session${TAB}$SESSION_VALUE"
-BASE="https://127.0.0.1:18443"
 
-stub_post() {
-	case "$1" in
-		*/api/auth/register/begin) _k=begin ;;
-		*/api/auth/register/finish) _k=finish ;;
-		*) _k=other ;;
-	esac
-	printf '%s %s\n' "$_k" "$1" >> "$T/post.log"
-	cp "$2" "$T/posted.$_k"
-	[ -f "$T/$_k.resp" ] && cp "$T/$_k.resp" "$3"
-	[ -f "$T/$_k.jar" ] && printf '%s\n' "$(cat "$T/$_k.jar")" >> "$4"
-	cat "$T/$_k.code"
-}
-# session_setup BEGIN_CODE BEGIN_RESP FINISH_CODE FINISH_RESP FINISH_COOKIE
-session_setup() {
-	rm -rf "$T/work" "$T/jar" "$T"/begin.* "$T"/finish.* "$T"/posted.* "$T/post.log"
-	mkdir -p "$T/work"
-	printf '# Netscape HTTP Cookie File\n' > "$T/jar"
-	printf '%s' "$1" > "$T/begin.code"
-	printf '%s' "$2" > "$T/begin.resp"
-	printf '%s' "$PENDING_LINE" > "$T/begin.jar"
-	printf '%s' "$3" > "$T/finish.code"
-	printf '%s' "$4" > "$T/finish.resp"
-	[ -n "$5" ] && printf '%s' "$5" > "$T/finish.jar"
-	: > "$T/post.log"
-}
-# session [PATH-PREFIX] — api_session with the stub, its stdout and stderr apart.
-session() {
-	OUT=$(
-		[ -n "${1:-}" ] && PATH="$1:$PATH"
-		api_session stub_post "$BASE" "https://smoke1.local" "$T/jar" "$T/work" "$HELPER" 2> "$T/session.err"
-	); RC=$?
-	ERR=$(cat "$T/session.err")
-}
-posted() { grep -c "^$1 " "$T/post.log"; }
-work_empty() {
-	check "$1: nothing is left under WORK (no DER, no body)" "$(yes_if test -z "$(ls -A "$T/work")")" "$(ls -A "$T/work")"
-}
-one_reason() {
-	check "$1: the reason is exactly: $2" "$(yes_if test "$OUT" = "$2")" "$OUT"
-	check "$1: returns 1" "$(yes_if test "$RC" = 1)" "rc=$RC"
-	check "$1: nothing on stderr" "$(yes_if test -z "$ERR")" "$ERR"
-}
-
-# TC-834-14: begin is refused.
-session_setup 503 '{"error":"down"}' 200 '{}' ""
-session
-l="TC-834-14 [$SH] begin answers 503"
-one_reason "$l" "The api's register/begin answered HTTP 503."
-check "$l: finish was never posted" "$(yes_if test "$(posted finish)" = 0)" "$(cat "$T/post.log")"
-work_empty "$l"
-
-# TC-834-15: options with no challenge, or no rp.id.
-session_setup 200 '{"publicKey":{"rp":{"id":"smoke1.local"}}}' 200 '{}' ""
-# A python3 that only records that it ran: the helper must not be reached.
-mkdir -p "$T/py-spy"
-printf '#!/bin/sh\necho ran >> "%s"\nexit 0\n' "$T/helper.ran" > "$T/py-spy/python3"
-chmod 0755 "$T/py-spy/python3"
-rm -f "$T/helper.ran"
-session "$T/py-spy"
-l="TC-834-15 [$SH] begin options with no challenge"
-one_reason "$l" "The registration options from register/begin carry no challenge."
-check "$l: finish was never posted" "$(yes_if test "$(posted finish)" = 0)" "$(cat "$T/post.log")"
-check "$l: the helper never ran" "$(yes_if test ! -e "$T/helper.ran")"
-work_empty "$l"
-session_setup 200 '{"publicKey":{"challenge":"'$CHALLENGE'","rp":{"name":"Rasputin"}}}' 200 '{}' ""
-session "$T/py-spy"
-l="TC-834-15 [$SH] begin options with no rp.id"
-one_reason "$l" "The registration options from register/begin carry no rp.id."
-check "$l: finish was never posted" "$(yes_if test "$(posted finish)" = 0)" "$(cat "$T/post.log")"
-check "$l: the helper never ran" "$(yes_if test ! -e "$T/helper.ran")"
-work_empty "$l"
-
-# TC-834-16: finish is refused, and nothing secret leaks.
-session_setup 200 "$BEGIN_OK" 400 '{"error":"verification failed: BODYdetailNotToLeak"}' ""
-session
-l="TC-834-16 [$SH] finish answers 400"
-one_reason "$l" "The api's register/finish answered HTTP 400."
-check "$l: the jar does hold the pending cookie the output must not show" "$(yes_if grep -q "$PENDING_VALUE" "$T/jar")"
-for secret in "$CHALLENGE" BODYdetailNotToLeak "$PENDING_VALUE"; do
-	check "$l: the output does not contain $secret" "$(yes_if test "$(contains "$secret" "$OUT$ERR"; echo $?)" = 1)" "$OUT$ERR"
-done
-work_empty "$l"
-
-# TC-834-17: 200 with no session cookie.
-session_setup 200 "$BEGIN_OK" 200 '{"id":"x"}' ""
-session
-l="TC-834-17 [$SH] finish answers 200 with no session cookie"
-one_reason "$l" "The api's register/finish answered 200 but issued no session cookie."
-work_empty "$l"
-
-# TC-834-18: the happy path.
-session_setup 200 "$BEGIN_OK" 200 '{"id":"x"}' "$SESSION_LINE"
-session
-l="TC-834-18 [$SH] the happy path"
-check "$l: returns 0" "$(yes_if test "$RC" = 0)" "rc=$RC $OUT"
-check "$l: prints nothing" "$(yes_if test -z "$OUT$ERR")" "$OUT$ERR"
-check "$l: begin and finish went to BASE's register routes, in order" \
-	"$(yes_if test "$(cut -d' ' -f2 "$T/post.log" | tr '\n' ' ')" = "$BASE/api/auth/register/begin $BASE/api/auth/register/finish ")" "$(cat "$T/post.log")"
-check "$l: the body posted to begin is JSON with a non-empty name" \
-	"$(yes_if jq_true '.name | type == "string" and length > 0' "$T/posted.begin")" "$(cat "$T/posted.begin")"
 # b64u_dec — unpadded base64url to bytes, with tr and base64 -d rather than the helper.
 b64u_dec() {
 	_s=$(printf '%s' "$1" | tr '_-' '/+')
 	case $((${#_s} % 4)) in 2) _s="$_s==" ;; 3) _s="$_s=" ;; esac
 	printf '%s' "$_s" | base64 -d
 }
-b64u_dec "$(jq -r '.response.clientDataJSON' "$T/posted.finish")" > "$T/cd18.json"
-check "$l: the finish body's clientDataJSON has origin https://smoke1.local" \
-	"$(yes_if test "$(jq -r .origin "$T/cd18.json")" = https://smoke1.local)" "$(cat "$T/cd18.json")"
-check "$l: the finish body's clientDataJSON has the begin challenge" \
-	"$(yes_if test "$(jq -r .challenge "$T/cd18.json")" = "$CHALLENGE")" "$(cat "$T/cd18.json")"
-check "$l: the finish body's clientDataJSON has type webauthn.create" \
-	"$(yes_if test "$(jq -r .type "$T/cd18.json")" = webauthn.create)" "$(cat "$T/cd18.json")"
-work_empty "$l"
-
-# TC-834-27: no HTTP answer, at begin and at finish.
-session_setup 000 '' 200 '{}' ""
-session
-l="TC-834-27 [$SH] begin gives no answer"
-one_reason "$l" "The api's register/begin gave no HTTP answer."
-check "$l: finish was never posted" "$(yes_if test "$(posted finish)" = 0)" "$(cat "$T/post.log")"
-work_empty "$l"
-session_setup 200 "$BEGIN_OK" 000 '' ""
-session
-l="TC-834-27 [$SH] finish gives no answer"
-one_reason "$l" "The api's register/finish gave no HTTP answer."
-check "$l: does not say answered HTTP 000" "$(yes_if test "$(contains "answered HTTP 000" "$OUT"; echo $?)" = 1)" "$OUT"
-work_empty "$l"
-
-# TC-834-28: openssl cannot make the key.
-mkdir -p "$T/no-openssl"
-printf '#!/bin/sh\nexit 1\n' > "$T/no-openssl/openssl"
-chmod 0755 "$T/no-openssl/openssl"
-session_setup 200 "$BEGIN_OK" 200 '{}' "$SESSION_LINE"
-session "$T/no-openssl"
-l="TC-834-28 [$SH] openssl fails"
-one_reason "$l" "OpenSSL could not make a P-256 public key."
-check "$l: the reason is a sentence with a capital" "$(yes_if matches '^[A-Z].*\.$' "$OUT")" "$OUT"
-check "$l: finish was never posted" "$(yes_if test "$(posted finish)" = 0)" "$(cat "$T/post.log")"
-work_empty "$l"
-
-# TC-834-29: the soft passkey cannot encode.
-mkdir -p "$T/bad-python"
-printf '#!/bin/sh\necho "The options are not JSON." >&2\nexit 2\n' > "$T/bad-python/python3"
-chmod 0755 "$T/bad-python/python3"
-session_setup 200 "$BEGIN_OK" 200 '{}' "$SESSION_LINE"
-session "$T/bad-python"
-l="TC-834-29 [$SH] the soft passkey fails"
-one_reason "$l" "The soft passkey could not encode the registration: The options are not JSON."
-check "$l: finish was never posted" "$(yes_if test "$(posted finish)" = 0)" "$(cat "$T/post.log")"
-work_empty "$l"
 
 # ------------------------------------------------------------ soft passkey ----
 # passkey OPTIONS-FILE ARG... — the helper under python3 -I, stdout, stderr and

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """soft-passkey.py: the browser's half of a WebAuthn registration, for tests.
 
-The boot smoke signs in to a fresh control plane through first-run
-registration (geekdojo/geekdojo-brain#834, test/lib/api-session.sh). This
+The sign-in client (test/lib/signin.py, geekdojo/geekdojo-brain#967)
+registers its passkeys with this helper's encode; it was written for the boot
+smoke's first-run registration (geekdojo/geekdojo-brain#834). This
 helper turns the api's register/begin options into the PublicKeyCredential
 that register/finish takes, as a browser would after an authenticator made a
 key: a "none" attestation, which carries no signature, over a P-256 public key

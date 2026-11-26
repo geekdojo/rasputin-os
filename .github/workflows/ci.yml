@@ -461,9 +461,9 @@ jobs:
         run: sh test/store-migrate-test.sh
       # The boot smoke's check that the api reports the secrets store ready
       # (geekdojo/geekdojo-brain#834): the verdict on GET /api/alerts, the
-      # wait, the post-kill report, the first-run sign-in through an injected
-      # POST, and the soft passkey's output decoded without the helper, under
-      # sh, dash and bash; and the helper's line coverage.
+      # wait, the post-kill report, and the soft passkey's output decoded
+      # without the helper, under sh, dash and bash; and the helper's line
+      # coverage.
       - name: Store readiness check tests
         run: sh test/store-ready-test.sh
       # The smokes' identity readiness check (geekdojo/geekdojo-brain#974): the
@@ -472,6 +472,13 @@ jobs:
       # verdicts, with stub collaborators and no clock.
       - name: Identity ready tests
         run: sh test/identity-ready-test.sh
+      # The boot smoke's first-run sign-in (geekdojo/geekdojo-brain#993,
+      # TC-993-22): the signin.py wrapper's one ::error:: per failed step
+      # (exit 2 never a pass), and the door, clock-sync and grant polls
+      # naming their fact and last state when they run out, with a stub
+      # signin.py, stub probes and no clock.
+      - name: Boot smoke sign-in tests
+        run: sh test/smoke-signin-test.sh
       # qemu_exec's KVM refusal (geekdojo/geekdojo-brain#974): the amd64 guest
       # never runs under TCG, with a stub QEMU and a scratch device path.
       - name: QEMU common tests
