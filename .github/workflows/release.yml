@@ -52,7 +52,7 @@ on:
         type: boolean
         default: false
       update_smoke_from:
-        description: "Extra published versions to run the update smoke FROM, comma-separated (one-off legs, e.g. 2026.09.6-dev.269,2026.09.6-dev.276). The newest published release always runs."
+        description: "Extra published versions to run the update smoke FROM, comma-separated (one-off legs, e.g. 2026.09.6-dev.269,2026.09.6-dev.276). The newest published release and the newest stable always run."
         type: string
         default: ""
 
