@@ -23,7 +23,9 @@ an authorization request or touches a token:
            (data from the doors file, with its method map) with JSON
            {"method": m}; the 200's `next` is GET in the same jar, and its 303
            leads to the home door's fresh sign-in (prompt=login), then the
-           action's page.
+           action's page. A 423 signin_rules_applying (the control lock
+           while a converge applies the sign-in rules) is RulesApplying,
+           which the caller waits out.
   sign-out POST /api/auth/logout with the session the account's state holds;
            GET /api/auth/me with that same cookie must then answer 401.
 
@@ -38,7 +40,7 @@ import urllib.parse
 from . import pages
 from . import passkey
 from . import pkce
-from .errors import FactFailed, Inconclusive
+from .errors import FactFailed, Inconclusive, RulesApplying
 from .transport import Redirect
 
 SESSION_COOKIE = "__Host-rasputin-session"
@@ -49,6 +51,9 @@ SIGNIN_PATH = "/api/auth/signin"
 SIGNUP_PATH = "/api/auth/signup"
 ME_PATH = "/api/auth/me"
 LOGOUT_PATH = "/api/auth/logout"
+# The control lock's code while Rasputin applies its sign-in rules: the
+# converge after first run ends holds it for its run (cp auth/controllock.go).
+RULES_APPLYING = "signin_rules_applying"
 
 # What a pending sign-in is waiting to finish: a sign-in that mints a
 # session, or an action's fresh sign-in, which mints none.
@@ -208,6 +213,9 @@ class ConsoleClient:
         if response.status >= 500:
             raise Inconclusive(f"The console answered {call} with HTTP {response.status}.",
                                http_status=response.status)
+        if response.status == 423 and _code(response.body) == RULES_APPLYING:
+            raise RulesApplying(f"The console locked {call} with HTTP 423 while Rasputin applies its "
+                                f"sign-in rules.", fact="sign-in rules applied", http_status=423)
         if response.status == 409:
             raise FactFailed(f"The console refused {method} at {call} with HTTP 409: "
                              f"{_sentence(response.body) or 'no sentence'}", fact="clock", http_status=409)
@@ -296,6 +304,15 @@ def _set_cookie(response, name):
             if got:
                 return got
     return ""
+
+
+def _code(body):
+    """The `code` of a coded JSON error, or ''."""
+    try:
+        code = json.loads(body).get("code")
+    except (ValueError, AttributeError):
+        return ""
+    return code if isinstance(code, str) else ""
 
 
 def _sentence(body):

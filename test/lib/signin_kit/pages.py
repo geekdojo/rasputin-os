@@ -256,10 +256,17 @@ def recovery_codes(page):
     raise Inconclusive(f"The page {page.page_id} gives no recovery codes.", page_id=page.page_id)
 
 
+_RECOVERY_LABEL = re.compile(r'(?s)<label\b[^>]*\bfor="recoveryCodeInput"[^>]*>(.*?)</label>')
+
+
 def recovery_code_number(page):
-    """Which recovery code the input page asks for (1-based)."""
+    """Which recovery code the input page asks for (1-based): from the code
+    field's own label, "Recovery code number 1" in the Rasputin theme or
+    "Recovery code #1" in stock Keycloak, else stock's "#1" in the page."""
+    label = _RECOVERY_LABEL.search(page.raw)
+    match = label and re.search(r"(?:#|\bnumber)\s*(\d+)", html.unescape(label.group(1)), re.I)
     text = " ".join(page.text_by_id.values())
-    match = re.search(r"#\s*(\d+)", text) or re.search(r"#\s*(\d+)", html.unescape(page.raw))
+    match = match or re.search(r"#\s*(\d+)", text) or re.search(r"#\s*(\d+)", html.unescape(page.raw))
     if not match:
         raise Inconclusive(f"The page {page.page_id} does not say which recovery code it wants.",
                            page_id=page.page_id)

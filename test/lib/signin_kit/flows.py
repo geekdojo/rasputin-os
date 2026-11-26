@@ -24,7 +24,7 @@ from . import pages
 from . import otp
 from . import passkey
 from . import pkce
-from .errors import FactFailed, Inconclusive
+from .errors import FactFailed, Inconclusive, RulesApplying
 from .transport import Redirect
 
 ENROL_ACTIONS = {
@@ -55,6 +55,27 @@ NEGATIVES = {
     "pkce-wrong-verifier": {"error": "invalid_grant"},
     "pkce-absent": {"error": "invalid_request"},
 }
+
+
+# The api door's answer to a credential post while the source's previous one
+# is still being checked (cp door/policy/policy.go sentenceBusy), and how
+# long and how often the client posts again.
+DOOR_BUSY_SENTENCE = "Another sign-in from this device is still being checked."
+DOOR_BUSY_CEILING = 30
+DOOR_BUSY_INTERVAL = 1
+
+
+# How long and how often an enrolment asks the console's sign-in-methods
+# route again while it answers RulesApplying: the converge that ends first
+# run is submitted at the api's next 60s scheduler check, then runs, so one
+# interval, its run and a margin.
+RULES_APPLYING_CEILING = 120
+RULES_APPLYING_INTERVAL = 2
+
+
+def _door_busy(outcome):
+    return (not isinstance(outcome, Redirect) and outcome.status == 429
+            and DOOR_BUSY_SENTENCE in outcome.body)
 
 
 def b64url(data):
@@ -133,9 +154,26 @@ class Flows:
         return door.client.start(trace, door, prompt=prompt, kc_action=kc_action, with_pkce=with_pkce)
 
     def _post(self, trace, form, fields):
+        """Post the page's form. The api's door admits one credential post per
+        source and frees the slot on its next sign-in-history drain pass, so
+        a post straight after a password or code can meet its 429 busy page
+        (cp door/policy/throttle.go). The door answered that itself, so
+        Keycloak never saw the post: the same form is posted again once a
+        second has passed, until the door admits it or DOOR_BUSY_CEILING runs
+        out (the cp clients do the same: identitytest's admitted)."""
         merged = dict(form.fields)
         merged.update(fields)
-        return trace.see(self._t.navigate("POST", form.action, merged))
+        deadline = self._clock.now() + DOOR_BUSY_CEILING
+        while True:
+            outcome = self._t.navigate("POST", form.action, merged)
+            if not _door_busy(outcome):
+                return trace.see(outcome)
+            if self._clock.now() >= deadline:
+                raise FactFailed(f"The door still held this device's previous credential post after "
+                                 f"{DOOR_BUSY_CEILING} s.", fact="door admits the post",
+                                 page_id=pages.DOOR_REFUSAL, http_status=429)
+            self._log.info("door-busy-wait", seconds=DOOR_BUSY_INTERVAL)
+            self._clock.sleep_until(self._clock.now() + DOOR_BUSY_INTERVAL)
 
     @staticmethod
     def _expect(outcome, *page_ids):
@@ -328,7 +366,7 @@ class Flows:
         if door.client.launches:
             self.sign_in(trace, method, label, door_name)
             account = self._state.load(label)
-        page, pending = door.client.start_action(trace, door, kind, ENROL_ACTIONS[kind], account)
+        page, pending = self._start_action(trace, door, kind, account)
         outcome = self._answer_sign_in(trace, page, door, account, method)
         if kind == "totp":
             page = self._expect(outcome, "login-login-config-totp")
@@ -353,6 +391,21 @@ class Flows:
             account["passkey" if kind == "passkey" else "passkey_2fa"] = {
                 "key_path": key_path, "credential_id": b64url(credential_id), "userid": args["userid"]}
         self._finish(trace, door, outcome, pending, account)
+
+    def _start_action(self, trace, door, kind, account):
+        """The client's action start, asked again every
+        RULES_APPLYING_INTERVAL while the console holds its control lock for
+        a converge, up to RULES_APPLYING_CEILING."""
+        deadline = self._clock.now() + RULES_APPLYING_CEILING
+        while True:
+            try:
+                return door.client.start_action(trace, door, kind, ENROL_ACTIONS[kind], account)
+            except RulesApplying as err:
+                if self._clock.now() >= deadline:
+                    raise RulesApplying(f"{err.sentence} It was still locked after {RULES_APPLYING_CEILING} s.",
+                                        **err.fields) from err
+                self._log.info("rules-applying-wait", seconds=RULES_APPLYING_INTERVAL)
+                self._clock.sleep_until(self._clock.now() + RULES_APPLYING_INTERVAL)
 
     def sign_out(self, trace, label, door_name):
         door = self.door(door_name)
@@ -535,21 +588,34 @@ class Flows:
             return self._negative_result(name, status == 400 and answer.get("error") == expected["error"],
                                          actual)
         page, _ = self._authorize(trace, door, prompt="login")
+        passwordless = False
         if "mutation" in expected:
-            outcome = self._mutated(trace, page, door, account, label, expected["mutation"])
+            outcome, passwordless = self._mutated(trace, page, door, account, label, expected["mutation"])
         else:
             outcome = self._password_form(trace, page, account)
         if isinstance(outcome, Redirect):
             actual = "admitted" if "code" in outcome.params else "a redirect with no code"
             return self._negative_result(name, False, actual)
-        refused = (outcome.page_id in door.client.password_alone_refused if expected["page"] == "client"
-                   else outcome.page_id == expected["page"])
+        if expected["page"] == "client":
+            refused = outcome.page_id in door.client.password_alone_refused
+        else:
+            # The sign-in page's own passkey form shows a refused assertion on
+            # the sign-in page again, with its error sentence (the home
+            # door's passwordless path, local run #993); a second-step passkey
+            # shows login-webauthn-error.
+            said = pages.message(outcome)
+            refused = outcome.page_id == expected["page"] or (
+                passwordless and outcome.page_id == "login-login" and bool(said))
+            if refused and said:
+                return self._negative_result(name, True, f"the page {outcome.page_id}, saying: {said}")
         return self._negative_result(name, refused, f"the page {outcome.page_id}")
 
     def _mutated(self, trace, page, door, account, label, mutation):
         """A WebAuthn negative: a second-step passkey's assertion after the
         password, or, for an account whose passkey signs in alone, the
-        sign-in page's own passkey form (the home door's path, F-993-04)."""
+        sign-in page's own passkey form (the home door's path, F-993-04).
+        Returns the outcome and whether it was that passwordless form."""
+        passwordless = not account.get("passkey_2fa")
         if account.get("passkey_2fa"):
             page = self._expect(self._password_form(trace, page, account), "login-webauthn-authenticate")
             credential, replay = account["passkey_2fa"], account.get("last_assertion")
@@ -564,7 +630,7 @@ class Flows:
             fields = replay
         else:
             fields = self._assertion(page, door, credential, mutation=mutation)
-        return self._post(trace, page.form("webauth"), fields)
+        return self._post(trace, page.form("webauth"), fields), passwordless
 
     @staticmethod
     def _negative_result(name, refused, actual):

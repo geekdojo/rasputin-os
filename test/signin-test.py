@@ -1395,6 +1395,12 @@ P993 = {
 }
 
 
+# The api door's 429 page while the source's previous credential post is
+# still being checked, as the real door rendered it (local run, #993).
+BUSY993 = tpage("rasputin-door-refusal", extra='<h1>This can&#39;t continue</h1><p class="kc-feedback-text">'
+                'Another sign-in from this device is still being checked. Try again in a moment.</p>')
+
+
 class ConsoleFake:
     """The console at c993.local (its start, #1150's launcher, its callback,
     /me and logout) and the home door at sso-c993.local, whose pages are
@@ -1414,6 +1420,13 @@ class ConsoleFake:
         self.no_session = self.action_sets_session = self.grant_on_action = False
         self.action_status = "success"
         self.end_on_logout = True
+        # Door busy (the api door's one credential post per source): how many
+        # posts it answers 429 busy before admitting one, and the body.
+        self.busy, self.busy_posts = 0, []
+        self.busy_body = BUSY993
+        # The control lock: how many launcher POSTs answer 423 before one is
+        # served, and the lock's code.
+        self.locked, self.locked_code = 0, "signin_rules_applying"
 
     def script(self, bodies):
         self.queue = list(bodies)
@@ -1470,6 +1483,10 @@ class ConsoleFake:
             return self._door_page()
         if method == "POST":
             form = dict(urllib.parse.parse_qsl(body.decode(), keep_blank_values=True))
+            if self.busy:
+                self.busy -= 1
+                self.busy_posts.append(form)
+                return 429, [("Retry-After", "1")], self.busy_body
             if form.get("username"):
                 self.username = form["username"]
             self.posts.append(form)
@@ -1490,6 +1507,9 @@ class ConsoleFake:
             self.launch_bodies.append((json.loads(body), headers_ct(body)))
             if not live:
                 return 401, [], b'{"error":"auth required"}'
+            if self.locked:
+                self.locked -= 1
+                return 423, [], json.dumps({"code": self.locked_code, "error": "Administrator tools are locked."}).encode()
             if self.launch:
                 return self.launch[0], [], json.dumps(self.launch[1]).encode()
             self.pending_action = "add_" + json.loads(body)["method"]
@@ -1933,6 +1953,27 @@ class ConsolePath(unittest.TestCase):
                 self.assertEqual(code, 2, out)
                 self.assertIn("holds the PKCE verifier", out)
 
+    # The home door shows a refused passwordless assertion on its sign-in
+    # page again, with the theme's error sentence (the local run's bad-origin
+    # met it, #993). The same page with no error is not a refusal.
+    def test_f_993_04_the_sign_in_page_with_its_error_is_the_passwordless_refusal(self):
+        self.create()
+        self.fake.script([P993["login"], None, P993["login"], P993["register-passkey"], None])
+        self.assertEqual(self.go("enrol", "passkey")[0], 0)
+        self.fake.script([P993["login"], None])
+        self.assertEqual(self.go("sign-in", "passkey")[0], 0)
+        refused = P993["login"].replace(b"</body>", b'<div id="kc-feedback" role="alert" class="rasp-alert rasp-alert-error">'
+                                        b'<span class="rasp-alert-text kc-feedback-text">The passkey was made for a '
+                                        b'different address. Use one made for this one.</span></div></body>')
+        self.fake.script([P993["login"], refused])
+        code, out = self.go("negative", "bad-origin")
+        self.assertEqual(code, 0, out)
+        self.assertIn("refused: the page login-login, saying: The passkey was made for a different address.", out)
+        self.fake.script([P993["login"], P993["login"]])
+        code, out = self.go("negative", "bad-signature")
+        self.assertEqual(code, 1, out)
+        self.assertIn("FAIL fact=bad-signature:", out)
+
     def test_password_totp_takes_the_authenticator_from_another_second_step(self):
         """The door may offer the recovery code first; the code sign-in picks
         the authenticator app instead (cp TC-990-03's otpInstead)."""
@@ -1990,6 +2031,110 @@ class ConsolePath(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertEqual(self.fake.posts[-2], {"authenticationExecution": "ex-otp"})
         self.assertIn("otp", self.fake.posts[-1])
+
+    # The api door holds one credential post per source until its next drain
+    # pass (cp door/policy/throttle.go), so the post after a password or code
+    # can meet its 429 busy page. The local run against the real door met it
+    # at enrol passkey's fresh sign-in (#993).
+    def test_a_credential_post_the_door_answers_busy_is_posted_again_until_admitted(self):
+        self.create()
+        self.fake.busy = 2
+        self.fake.script([P993["login"], None])
+        before = self.clock.now()
+        code, out = self.go("sign-in", "password")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(len(self.fake.busy_posts), 2)
+        # The same form each time, then admitted as the last post.
+        self.assertEqual(self.fake.busy_posts[0], self.fake.busy_posts[1])
+        self.assertEqual(self.fake.busy_posts[0], self.fake.posts[-1])
+        self.assertGreaterEqual(self.clock.now() - before, 2)
+
+    def test_a_door_that_stays_busy_fails_after_the_ceiling(self):
+        self.create()
+        self.fake.busy = 10_000
+        self.fake.script([P993["login"], None])
+        before = self.clock.now()
+        code, out = self.go("sign-in", "password")
+        self.assertEqual(code, 1, out)
+        self.assertIn("FAIL fact=door admits the post:", out)
+        self.assertIn("after 30 s", out)
+        self.assertEqual(self.clock.now() - before, 30)
+        self.assertEqual(len(self.fake.busy_posts), 31)
+
+    # The converge that ends first run holds the console's control lock for
+    # its run, and #1150's route is control (cp auth/controllock.go); the
+    # local run met its 423 at enrol passkey's launcher POST (#993).
+    def _enrolled_totp(self):
+        self.create()
+        self.fake.script([P993["login"], None, P993["login"], P993["config-totp"], None])
+        self.assertEqual(self.go("enrol", "totp")[0], 0)
+
+    def test_an_enrolment_waits_out_the_control_lock_while_the_rules_apply(self):
+        self._enrolled_totp()
+        self.fake.locked = 3
+        self.fake.script([P993["login"], P993["otp"], None, P993["login"], P993["otp"],
+                          P993["register-passkey"], None])
+        before, posts = self.clock.now(), len(self.fake.launch_bodies)
+        code, out = self.go("enrol", "passkey")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(len(self.fake.launch_bodies) - posts, 4)
+        self.assertGreaterEqual(self.clock.now() - before, 6)
+
+    def test_a_control_lock_that_outlasts_the_ceiling_fails(self):
+        self._enrolled_totp()
+        self.fake.locked = 10_000
+        self.fake.script([P993["login"], P993["otp"], None])
+        posts = len(self.fake.launch_bodies)
+        code, out = self.go("enrol", "passkey")
+        self.assertEqual(code, 1, out)
+        self.assertIn("FAIL fact=sign-in rules applied:", out)
+        self.assertIn("after 120 s", out)
+        # 120 s at one ask every 2 s: the first ask and 60 more.
+        self.assertEqual(len(self.fake.launch_bodies) - posts, 61)
+
+    def test_the_lock_for_rules_that_differ_is_not_waited_on(self):
+        self._enrolled_totp()
+        self.fake.locked, self.fake.locked_code = 1, "signin_rules_differ"
+        self.fake.script([P993["login"], P993["otp"], None])
+        posts = len(self.fake.launch_bodies)
+        code, out = self.go("enrol", "passkey")
+        self.assertEqual(code, 1, out)
+        self.assertIn("FAIL fact=enrol start:", out)
+        self.assertEqual(len(self.fake.launch_bodies) - posts, 1)
+
+    # The Rasputin theme labels the code field "Recovery code number N"
+    # (stock: "Recovery code #N"); the local run's sign-in recovery-code met
+    # it (#993). The decoy "#1" in a style is not the number.
+    RASPUTIN_RECOVERY = tpage("login-login-recovery-authn-code-input", [
+        ("kc-recovery-code-login-form", {"recoveryCodeInput": ""}),
+        ("kc-select-try-another-way-form", {"tryAnotherWay": "on"})],
+        '<style>.rasp-x{color:#1a1a1a}</style><h1>Sign in with a recovery code</h1>'
+        '<div class="rasp-label-wrap"><label for="recoveryCodeInput" class="rasp-section-label rasp-label">'
+        'Recovery code number 2</label></div>')
+
+    def test_the_rasputin_themes_recovery_code_number_is_read_from_its_label(self):
+        self.assertEqual(pages.recovery_code_number(pages.parse(self.RASPUTIN_RECOVERY.decode())), 2)
+        stock = tpage("login-login-recovery-authn-code-input", [("kc-recovery-code-login-form", {})],
+                      '<label for="recoveryCodeInput">Recovery code #3</label>')
+        self.assertEqual(pages.recovery_code_number(pages.parse(stock.decode())), 3)
+
+    def test_sign_in_recovery_code_answers_the_code_the_rasputin_theme_asks_for(self):
+        self.create()
+        self.fake.script([P993["login"], self.RASPUTIN_RECOVERY, None])
+        code, out = self.go("sign-in", "recovery-code")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.fake.posts[-1]["recoveryCodeInput"], "rc-bbbb-0002")
+
+    def test_a_429_that_is_not_the_busy_page_is_not_posted_again(self):
+        self.create()
+        self.fake.busy = 1
+        self.fake.busy_body = tpage("rasputin-door-refusal", extra='<p class="kc-feedback-text">'
+                                    'Too many failed sign-ins from this device. Try again in 1 minute.</p>')
+        self.fake.script([P993["login"], None])
+        code, out = self.go("sign-in", "password")
+        self.assertEqual(code, 1, out)
+        self.assertEqual(len(self.fake.busy_posts), 1)
+        self.assertIn("rasputin-door-refusal", out)
 
 
 if __name__ == "__main__":

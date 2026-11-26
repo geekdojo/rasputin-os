@@ -124,8 +124,13 @@ SSH_PORT=12222
 #   GRANT_TRIES GET /api/auth/me on the authenticator enrolment's session
 #               answering 401: the grant ends the account's sessions (C23).
 #               30 reads, 60s, normally within a few.
-# Each signin.py call is bounded by --timeout 20 per HTTP call, and a code
-# sign-in waits at most 30s for the next TOTP step. Projected from SP-1 the
+# Each signin.py call is bounded by --timeout 20 per HTTP call; a code
+# sign-in waits at most 30s for the next TOTP step; a credential post the door
+# answers busy (one post per source, freed by its next drain pass) is posted
+# again each second for at most 30s, normally a second or two; and an
+# enrolment the console locks while the converge that ends first run applies
+# the sign-in rules (423 signin_rules_applying) asks again every 2s for at
+# most 120s, one scheduler interval and the run. Projected from SP-1 the
 # phase adds about 263s on a fresh image (base 154 + fresh ready 22.0 + verb
 # subset 87.1; identity-evidence/959/index.md:33,127); its ceilings (120 + 60
 # + 60 plus the verbs) sit on top of the polls above, which by then end on
