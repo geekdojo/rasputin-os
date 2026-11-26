@@ -280,7 +280,12 @@ def message(page):
 
 def select_options(page):
     """The choices on the "another way to sign in" page: (execution id,
-    heading) in page order."""
+    heading) in page order. The Rasputin theme (parent base) renders one form
+    whose choices are submit buttons named authenticationExecution, each with
+    a heading element; stock keycloak.v2 renders one form per choice."""
+    buttons = re.findall(r'(?s)<button[^>]*name="authenticationExecution"[^>]*>.*?</button>', page.raw)
+    if buttons:
+        return [_button_option(page, b) for b in buttons]
     options = []
     for chunk in page.raw.split('<form id="kc-select-credential-form"')[1:]:
         execution = re.search(r'name="authenticationExecution"\s+value="([^"]+)"', chunk)
@@ -292,3 +297,11 @@ def select_options(page):
     if not options:
         raise Inconclusive(f"The page {page.page_id} offers no choices.", page_id=page.page_id)
     return options
+
+
+def _button_option(page, button):
+    execution = re.search(r'<button[^>]*value="([^"]+)"', button)
+    heading = re.search(r'(?s)class="[^"]*heading[^"]*"[^>]*>(.*?)</', button)
+    if not execution or not heading:
+        raise Inconclusive(f"The page {page.page_id} has a choice the client cannot read.", page_id=page.page_id)
+    return html.unescape(execution.group(1)), " ".join(html.unescape(heading.group(1)).split())

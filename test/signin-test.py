@@ -1954,6 +1954,43 @@ class ConsolePath(unittest.TestCase):
         self.assertEqual(self.fake.posts[-2], {"authenticationExecution": "ex-otp"})
         self.assertIn("otp", self.fake.posts[-1])
 
+    # The Rasputin theme's chooser (parent base, select-authenticator.ftl):
+    # one form, each choice a submit button with a heading. The boot smoke's
+    # enrol passkey met it on its fresh sign-in (run 45721751996).
+    RASPUTIN_SELECT = (
+        f'<html><body data-page-id="login-select-authenticator" data-rasputin-theme="rasputin">'
+        f'<form id="kc-select-credential-form" class="rasp-form" action="{KC993}/authenticate?s=1" method="post">'
+        '<div class="rasp-choices">'
+        '<button class="rasp-choice-item" type="submit" name="authenticationExecution" value="ex-recovery">'
+        '<div class="rasp-choice-icon"><i class="kcAuthenticatorRecoveryAuthnCodesClass rasp-choice-glyph"></i></div>'
+        '<div class="rasp-choice-body"><div class="rasp-choice-heading">Recovery code</div>'
+        '<div class="rasp-hint">Enter one of the recovery codes you saved.</div></div></button>'
+        '<button class="rasp-choice-item" type="submit" name="authenticationExecution" value="ex-otp">'
+        '<div class="rasp-choice-icon"><i class="kcAuthenticatorOTPClass rasp-choice-glyph"></i></div>'
+        '<div class="rasp-choice-body"><div class="rasp-choice-heading">\n  Authenticator app\n</div>'
+        '<div class="rasp-hint">Enter a code from your authenticator app.</div></div></button>'
+        '</div></form></body></html>')
+
+    def test_the_rasputin_themes_chooser_is_read_by_its_buttons(self):
+        p = pages.parse(self.RASPUTIN_SELECT)
+        self.assertEqual(pages.select_options(p), [("ex-recovery", "Recovery code"), ("ex-otp", "Authenticator app")])
+        unreadable = pages.parse(self.RASPUTIN_SELECT.replace('rasp-choice-heading', 'rasp-choice-title'))
+        with self.assertRaises(Inconclusive):
+            pages.select_options(unreadable)
+
+    def test_password_totp_picks_the_authenticator_from_the_rasputin_themes_chooser(self):
+        self.create()
+        self.fake.script([P993["login"], None, P993["login"], P993["config-totp"], None])
+        self.assertEqual(self.go("enrol", "totp")[0], 0)
+        recovery = tpage("login-login-recovery-authn-code-input", [
+            ("kc-recovery-code-login-form", {"recoveryCodeInput": ""}),
+            ("kc-select-try-another-way-form", {"tryAnotherWay": "on"})])
+        self.fake.script([P993["login"], recovery, self.RASPUTIN_SELECT.encode(), P993["otp"], None])
+        code, out = self.go("sign-in", "password-totp")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.fake.posts[-2], {"authenticationExecution": "ex-otp"})
+        self.assertIn("otp", self.fake.posts[-1])
+
 
 if __name__ == "__main__":
     # The tests are loaded from this file's own globals, not by unittest.main,

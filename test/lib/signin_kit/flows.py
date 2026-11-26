@@ -208,9 +208,10 @@ class Flows:
         if not choice:
             raise FactFailed(f"The other ways to sign in did not include {fact}.",
                              fact=f"{fact} offered", page_id=page.page_id)
-        form = [f for f in page.forms if f.id == "kc-select-credential-form"
-                and f.fields.get("authenticationExecution") == choice[0]][0]
-        return self._post(trace, form, {})
+        form = next((f for f in page.forms if f.id == "kc-select-credential-form"
+                     and f.fields.get("authenticationExecution") == choice[0]), None) \
+            or page.form("kc-select-credential-form")
+        return self._post(trace, form, {"authenticationExecution": choice[0]})
 
     def _second_step(self, trace, outcome, door, account, method):
         """Answer the second step `method` asks for, or refuse one it doesn't."""
