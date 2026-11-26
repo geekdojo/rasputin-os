@@ -12,7 +12,10 @@ operator registered on the old image signs in after the update.
                                /api/auth/bridge/begin and /finish with an
                                assertion from the same key, then
                                /api/auth/bridge/password with the password and
-                               email; passes when all three answer 200
+                               email; passes when all three answer 200, and
+                               then saves username (N) and password into N's
+                               state file, so the Keycloak verbs can sign
+                               the moved account in (geekdojo/geekdojo-brain#1012)
 
 The legacy routes are rasputin-control-plane v2026.11.1
 api/internal/auth/handlers.go:24-31; the bridge's are its
@@ -118,10 +121,22 @@ class Legacy:
 
     def bridge(self, base, name, password, email):
         """The move's bridge: the old passkey earns a grant, and the grant
-        sets the moved account's first password and email. The password and
-        email go only in the password step's body."""
+        sets the moved account's first password and email. On the api's 200
+        the name and password are saved to the name's state file (the email
+        is not); before it, nothing is written."""
+        account = self._state.load(name)
         self._post(base, "/api/auth/bridge/finish", name, self._assertion(base, "/api/auth/bridge/begin", name))
         self._post(base, "/api/auth/bridge/password", name, {"password": password, "email": email})
+        # The moved account signs in at the home door by the operator's name
+        # (already canonical for the smoke's operator) and this password; the
+        # legacy fields stay, so the old slot can still sign it in. Saved
+        # only once the api has set the password: a refusal writes nothing.
+        account.update({"username": name, "password": password})
+        try:
+            self._state.save(name, account)
+        except OSError as err:
+            raise Inconclusive(f"The api set {name}'s first password, but the state file could not be "
+                               f"saved ({type(err).__name__}).") from err
         return f"{name}'s pre-update passkey was accepted and its first password and email were set"
 
 

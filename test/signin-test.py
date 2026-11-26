@@ -528,6 +528,10 @@ class OldApi(http.server.ThreadingHTTPServer):
         self.me_status = None
         self.me_name = None
         self.first_passwords = {}
+        # A bridge route answering a coded refusal: path -> (status, code).
+        self.bridge_refusals = {}
+        # Every cookie value set, for TC-1012-14's needles.
+        self.issued = set()
         threading.Thread(target=self.serve_forever, daemon=True).start()
 
     @property
@@ -571,6 +575,7 @@ class _OldApiHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         for c in cookies:
+            self.server.issued.add(c.split("=", 1)[1])
             self.send_header("Set-Cookie", c + "; Path=/; Secure; HttpOnly")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -603,6 +608,8 @@ class _OldApiHandler(http.server.BaseHTTPRequestHandler):
         return user, auth[32]
 
     def bridge(self, body):
+        if self.path in self.server.bridge_refusals:
+            return self.coded(*self.server.bridge_refusals[self.path])
         if self.path == "/api/auth/bridge/begin":
             token, challenge = self.begin("bridge", None)
             return self.reply(200, {"publicKey": {"challenge": challenge, "rpId": RP_ID,
@@ -811,9 +818,72 @@ class BridgeVerb(LegacyCase):
         text = "".join(self.outputs)
         self.assertNotIn(self.PASSWORD, text)
         self.assertNotIn(self.EMAIL, text)
+        # Since geekdojo/geekdojo-brain#1012 the password is kept, as
+        # create-account keeps its own: in the account's state file and the
+        # needles, and in no other file.
         for name in os.listdir(self.state):
             with open(os.path.join(self.state, name), encoding="utf-8", errors="replace") as f:
-                self.assertNotIn(self.PASSWORD, f.read(), f"the state file {name} holds the password")
+                held = self.PASSWORD in f.read()
+            self.assertEqual(held, name in ("smoke-operator.json", "needles"), f"the state file {name}")
+
+    def snapshot(self):
+        out = {}
+        for name in sorted(os.listdir(self.state)):
+            with open(os.path.join(self.state, name), "rb") as f:
+                out[name] = f.read()
+        return out
+
+    # TC-1012-14: on a pass the name's state file gains username and
+    # password beside its unchanged legacy fields, and the needles the
+    # password, so sign-in can use the moved account.
+    def test_tc_1012_14_a_pass_saves_the_username_and_password(self):
+        self.assertEqual(self.legacy("legacy-register")[0], 0)
+        before = State(self.state, os.getuid()).load("smoke-operator")
+        code, out = self.bridge()
+        self.assertEqual(code, 0, out)
+        after = State(self.state, os.getuid()).load("smoke-operator")
+        self.assertEqual(after, dict(before, username="smoke-operator", password=self.PASSWORD))
+        self.assertIn(self.PASSWORD, State(self.state, os.getuid()).needles())
+        self.assertNotIn(self.EMAIL, State(self.state, os.getuid()).needles())
+        self.assertEqual(stat.S_IMODE(os.stat(os.path.join(self.state, "smoke-operator.json")).st_mode), 0o600)
+
+    # TC-1012-14: a refusal at any of the three steps leaves the state file
+    # byte-identical and writes no password, and fails naming the api's
+    # code. The needles gain only what the transport keeps of every cookie
+    # the api sets (the bridge cookie, transport.py): nothing the bridge's
+    # save wrote.
+    def test_tc_1012_14_a_refusal_at_any_step_writes_nothing(self):
+        self.assertEqual(self.legacy("legacy-register")[0], 0)
+        for route, status, word in (("/api/auth/bridge/begin", 403, "bridge_closed"),
+                                    ("/api/auth/bridge/finish", 401, "passkey_refused"),
+                                    ("/api/auth/bridge/password", 400, "password_refused")):
+            with self.subTest(route=route):
+                before = self.snapshot()
+                needles = State(self.state, os.getuid()).needles()
+                self.api.bridge_refusals = {route: (status, word)}
+                code, out = self.bridge()
+                self.assertEqual(code, 1, out)
+                self.assertIn(f"{route} (HTTP {status} {word})", out)
+                after = self.snapshot()
+                self.assertEqual(after.pop("smoke-operator.json"), before.pop("smoke-operator.json"))
+                self.assertEqual(sorted(after), sorted(before))
+                added = State(self.state, os.getuid()).needles() - needles
+                self.assertTrue(needles <= State(self.state, os.getuid()).needles())
+                self.assertNotIn(self.PASSWORD, added)
+                self.assertTrue(added <= self.api.issued, added - self.api.issued)
+        self.assertEqual(self.api.first_passwords, {})
+
+    # TC-1012-14: the api set the password but the state cannot be saved:
+    # Inconclusive (exit 2), never a pass, and the password is not printed.
+    def test_tc_1012_14_a_state_that_cannot_be_saved_is_inconclusive(self):
+        self.assertEqual(self.legacy("legacy-register")[0], 0)
+        os.mkdir(os.path.join(self.state, "smoke-operator.json.tmp"))
+        code, out = self.bridge()
+        self.assertEqual(code, 2, out)
+        self.assertIn("INCONCLUSIVE The api set smoke-operator's first password, but the state file could not be "
+                      "saved", out)
+        self.assertNotIn(self.PASSWORD, "".join(self.outputs))
+        self.assertNotIn("password", State(self.state, os.getuid()).load("smoke-operator"))
 
 
 # ------------------------------------------------------------------ TC-967-03
@@ -1927,6 +1997,38 @@ class ConsolePath(unittest.TestCase):
 
     # F-993-04: the WebAuthn negatives at the home door, through the console,
     # with the passkey that signs in alone; PKCE's cannot run there.
+    # TC-1012-15: a moved account's first password sign-in lands on the
+    # door's ask to save recovery codes; sign-in saves them to the account
+    # and the needles, posts the page's form and finishes through the
+    # console, roles=none. A sign-in that never shows the page is unchanged.
+    def moved(self):
+        State(self.state, os.getuid()).save("smoke-op", {
+            "label": "smoke-op", "username": "smoke-op", "password": "moved-first-password-1012",
+            "key_path": "unused", "rp_id": "c993.local", "credential_id": "AA", "user_handle": "AA"})
+
+    def test_tc_1012_15_sign_in_answers_the_recovery_codes_page(self):
+        self.moved()
+        self.fake.script([P993["login"], P993["codes"], None])
+        code, out = self.go("sign-in", "password", label="smoke-op")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out, "signin sign-in PASS roles=none; "
+                              "pages=login-login,login-login-recovery-authn-code-config\n")
+        codes = ["rc-aaaa-0001", "rc-bbbb-0002", "rc-cccc-0003"]
+        self.assertEqual(self.account("smoke-op")["recovery_codes"], codes)
+        self.assertTrue(set(codes) <= State(self.state, os.getuid()).needles())
+        self.assertEqual(self.fake.posts[-1].get("generatedRecoveryAuthnCodes"), ",".join(codes))
+        self.assertEqual(len(self.fake.callbacks), 1)
+        self.assertEqual([n for n in State(self.state, os.getuid()).needles() if n in "".join(self.outputs)], [])
+
+    def test_tc_1012_15_a_sign_in_without_the_page_is_unchanged(self):
+        self.moved()
+        self.fake.script([P993["login"], None])
+        code, out = self.go("sign-in", "password", label="smoke-op")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out, "signin sign-in PASS roles=none; pages=login-login\n")
+        self.assertNotIn("recovery_codes", self.account("smoke-op"))
+        self.assertEqual(len(self.fake.posts), 1)
+
     def test_f_993_04_webauthn_negatives_through_the_console(self):
         self.create()
         self.fake.script([P993["login"], None, P993["login"], P993["register-passkey"], None])

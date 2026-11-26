@@ -476,7 +476,11 @@ jobs:
       # TC-993-22): the signin.py wrapper's one ::error:: per failed step
       # (exit 2 never a pass), and the door, clock-sync and grant polls
       # naming their fact and last state when they run out, with a stub
-      # signin.py, stub probes and no clock.
+      # signin.py, stub probes and no clock. And the update smoke's move
+      # facts (geekdojo/geekdojo-brain#1012): TC-01's status record and
+      # verdict, the move's journal fact, a wait its ALIVE ends, the base's
+      # sign-in by its status shape, the shared doors file and the step
+      # sequence. Under sh, dash and bash.
       - name: Boot smoke sign-in tests
         run: sh test/smoke-signin-test.sh
       # qemu_exec's KVM refusal (geekdojo/geekdojo-brain#974): the amd64 guest
@@ -515,6 +519,13 @@ jobs:
       # the image's shell.
       - name: Release target guard tests
         run: bash test/release-target-guard-test.sh
+      # release.yml's update-plan runs scripts/update-plan.sh to pick the
+      # published images the update smoke starts from: the newest published
+      # release and the newest stable (geekdojo/geekdojo-brain#1012), on both
+      # arches, failing closed with no stable and on a bad update_smoke_from
+      # entry. Against release-list fixtures, under sh, dash and bash.
+      - name: Update smoke base plan tests
+        run: sh test/update-plan-test.sh
       # scripts/release-manifest-gate.sh: publish refuses to release any file
       # that is not the one the sign job signed for (missing, extra, short,
       # altered, or manifest.json / .sig off their pins). Every exit status,

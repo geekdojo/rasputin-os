@@ -339,11 +339,17 @@ class Flows:
             "username": account["username"], "email": f"{account['username']}@signin.invalid",
             "firstName": label, "lastName": "Smoke",
             "password": account["password"], "password-confirm": account["password"]})
-        if not isinstance(outcome, Redirect) and outcome.page_id == "login-login-recovery-authn-code-config":
-            # During first run the door asks the first account to save its
-            # recovery codes (cp flows/actions.go defaultActions; F-993-05).
-            outcome = self._save_recovery_codes(trace, outcome, account)
+        # During first run the door asks the first account to save its
+        # recovery codes (cp flows/actions.go defaultActions; F-993-05).
+        outcome = self._answer_codes_page(trace, outcome, account)
         self._finish(trace, door, outcome, pending, account)
+
+    def _answer_codes_page(self, trace, outcome, account):
+        """The door's ask to save recovery codes, answered when it is the
+        page shown; any other outcome is returned as it is."""
+        if not isinstance(outcome, Redirect) and outcome.page_id == "login-login-recovery-authn-code-config":
+            return self._save_recovery_codes(trace, outcome, account)
+        return outcome
 
     def _save_recovery_codes(self, trace, page, account):
         account["recovery_codes"] = pages.recovery_codes(page)
@@ -354,6 +360,9 @@ class Flows:
         door = self.door(door_name)
         account = self._state.load(label)
         outcome, pending = self._sign_in(trace, door, account, method)
+        # A moved account's first sign-in asks it to save its recovery codes
+        # (cp move_functional_test.go:608-613, geekdojo/geekdojo-brain#1012).
+        outcome = self._answer_codes_page(trace, outcome, account)
         self._finish(trace, door, outcome, pending, account)
 
     def enrol(self, trace, kind, label, door_name):

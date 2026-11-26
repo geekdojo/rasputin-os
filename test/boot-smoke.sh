@@ -111,19 +111,11 @@ SSH_PORT=12222
 # timeout for the reason given there.
 # The first-run sign-in (geekdojo/geekdojo-brain#993, amd64 only), after the
 # realm wait, waits on three facts, each polled 2s apart and ended the moment
-# it holds:
-#   DOOR_TRIES  the console's /api/auth/signup reaching the door's themed
-#               registration form: converge has applied the console client's
-#               redirect URI and opened registration. Converge is submitted at
-#               a scheduler check every 60s once migrations are applied, so
-#               the ceiling is 60 reads, 120s: one check interval, the run and
-#               a margin.
+# it holds: DOOR_TRIES and GRANT_TRIES, which test/lib/smoke-signin.sh sets
+# and explains because the update smoke waits on them too, and
 #   SYNC_TRIES  the guest's clock-sync marker, then the realm offering
 #               CONFIGURE_TOTP (converge enables it only on a run that read
 #               the marker): 30 reads, 60s, normally the first.
-#   GRANT_TRIES GET /api/auth/me on the authenticator enrolment's session
-#               answering 401: the grant ends the account's sessions (C23).
-#               30 reads, 60s, normally within a few.
 # Each signin.py call is bounded by --timeout 20 per HTTP call; a code
 # sign-in waits at most 30s for the next TOTP step; a credential post the door
 # answers busy (one post per source, freed by its next drain pass) is posted
@@ -140,7 +132,7 @@ SSH_PORT=12222
 # carries them too.
 ARM64_ID_MASKS="systemd.mask=keycloak.service systemd.mask=keycloak-db.service"
 BOOT_BUDGET=900 ; MU_TRIES=120 ; FB_TRIES=60 ; API_TRIES=48 ; HS_TRIES=60 ; ATREST_TRIES=60 ; TS_TRIES=30 ; KM_TRIES=30 ; SI_TRIES=30 ; SR_TRIES=30
-DOOR_TRIES=60 ; SYNC_TRIES=30 ; GRANT_TRIES=30
+SYNC_TRIES=30
 case "$ARCH" in
   amd64|arm64) ;;
   *) echo "::error::unknown arch '$ARCH' (expected amd64 or arm64)"; exit 1 ;;
@@ -567,14 +559,11 @@ smoke_fetch() {
     -b "$SR_JAR" --max-time 5 -o "$WORK/alerts.body" -w '%{http_code}' \
     "https://${CONSOLE_HOST}/api/alerts" || true)" "$WORK/alerts.body"
 }
-# me_status — GET /api/auth/me's status on the authenticator enrolment's
+# enrol_me — GET /api/auth/me's status on the authenticator enrolment's
 # session, for the grant wait.
-me_status() {
-  curl -s -o /dev/null -w '%{http_code}' --connect-to "${CONSOLE_HOST}:443:127.0.0.1:${HTTPS_PORT}" \
-    --cacert "$MESH_CA_PEM" -b "$SG_DIR/enrol.jar" --max-time 5 "https://${CONSOLE_HOST}/api/auth/me" || true
-}
+enrol_me() { me_status "$CONSOLE_HOST" "$HTTPS_PORT" "$MESH_CA_PEM" "$SG_DIR/enrol.jar"; }
 sync_probe() { ss_sync_probe ssh_guest; }
-grant_probe() { ss_grant_probe me_status; }
+grant_probe() { ss_grant_probe enrol_me; }
 
 # The first-run sign-in (geekdojo/geekdojo-brain#993, issue TC-01 to TC-03):
 # the customer's path, through the console at https://smoke1.local and its
@@ -600,27 +589,14 @@ IR_RC="" IR_LAST="" IR_SECONDS="" ID_REPORT=""
 SG_FAIL="" SG_AT="" SG_ROLES="" SG_RPID="" SG_RPID2="" SG_NEG="" APP_CODE="" APP_ISSUER=""
 SS_SIGNIN="$LIBDIR/signin.py" SS_STATE="$SG_DIR/state" SS_DOORS="$SG_DIR/doors.json" SS_CA="$MESH_CA_PEM"
 SS_CONNECT="127.0.0.1:${HTTPS_PORT}" SS_LABEL=owner
-# sg_fail SENTENCE — the first failure, kept; every later step is skipped.
-sg_fail() { [ -n "$SG_FAIL" ] || SG_FAIL=$1; }
-# sg STEP... — one smoke_signin step, run only while nothing has failed.
-sg() { [ -z "$SG_FAIL" ] || return 1; smoke_signin "$@" || { sg_fail "signin.py $* did not pass"; return 1; }; }
-# sg_field KEY — KEY's value in the last signin.py line, e.g. rp_id or roles.
-sg_field() { printf '%s\n' "$SS_LINE" | tr ' ' '\n' | sed -n "s/^$1=\\(.*\\);\$/\\1/p" | head -1; }
+# sg, sg_fail and sg_field, the step sequence, are test/lib/smoke-signin.sh's.
 sign_in_sequence() {
   rm -rf "$SG_DIR"
   (umask 077 && mkdir -p "$SS_STATE") || { sg_fail "the sign-in's state directory could not be made"; return; }
   chmod 700 "$SS_STATE"
   ssh_guest 'cat /var/lib/rasputin/trust/mesh-ca.pem' </dev/null >"$MESH_CA_PEM" 2>/dev/null && [ -s "$MESH_CA_PEM" ] \
     || { echo "::error::the cluster's CA /var/lib/rasputin/trust/mesh-ca.pem could not be read over SSH"; sg_fail "no mesh CA"; return; }
-  cat >"$SS_DOORS" <<EOF
-{"home": {"origin": "https://sso-${CONSOLE_HOST}", "realm": "rasputin", "client_id": "rasputin-console",
-          "redirect_uri": "https://${CONSOLE_HOST}/api/auth/callback",
-          "console": {"origin": "https://${CONSOLE_HOST}", "methods_route": "/api/me/sign-in-methods",
-                      "methods": {"totp": "authenticator_app", "passkey": "passkey",
-                                  "passkey-2fa": "security_key", "recovery-codes": "recovery_codes"}}},
- "app": {"origin": "https://${APP_HOST}", "realm": "rasputin", "client_id": "no-app-client-until-1027",
-         "redirect_uri": "https://app.${CLUSTER_ID}.internal/callback"}}
-EOF
+  ss_doors_file "$CONSOLE_HOST" "$APP_HOST" "$SS_DOORS"
   # The app door is named only as the negatives' wrong origin and RP ID.
   ss_wait "the console's sign-up reaching the door's registration form" "$DOOR_TRIES" 2 ss_door_probe die_if_qemu_gone \
     || { sg_fail "the door never showed its registration form"; return; }

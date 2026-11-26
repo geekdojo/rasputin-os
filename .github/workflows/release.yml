@@ -52,7 +52,7 @@ on:
         type: boolean
         default: false
       update_smoke_from:
-        description: "Extra published versions to run the update smoke FROM, comma-separated (one-off legs, e.g. 2026.09.6-dev.269,2026.09.6-dev.276). The newest published release always runs."
+        description: "Extra published versions to run the update smoke FROM, comma-separated (one-off legs, e.g. 2026.09.6-dev.269,2026.09.6-dev.276). The newest published release and the newest stable always run."
         type: string
         default: ""
 
@@ -1187,9 +1187,11 @@ jobs:
           retention-days: 1
 
   # Which published images the update smoke starts from: the newest published
-  # release (the image most of the fleet updates from), plus any one-off
-  # versions named in the update_smoke_from input, each on both arches. Its own
-  # job so the matrix is data, decided once.
+  # release (the image most of the fleet updates from), the newest stable
+  # (geekdojo/geekdojo-brain#1012), plus any one-off versions named in the
+  # update_smoke_from input, each on both arches. scripts/update-plan.sh
+  # decides, tested by test/update-plan-test.sh. Its own job so the matrix is
+  # data, decided once.
   update-plan:
     needs: validate
     if: ${{ startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && (inputs.full_build == true || inputs.full_build == 'true' || inputs.publish == true || inputs.publish == 'true')) }}
@@ -1199,33 +1201,19 @@ jobs:
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
     steps:
+      - uses: actions/checkout@v4
       - name: Pick the published images to update from
         id: plan
         env:
           GH_TOKEN: ${{ github.token }}
           # A dispatch input is free text: through the environment, never into
-          # the script text, and every entry is validated below.
+          # the script text; update-plan.sh validates every entry.
           EXTRA: ${{ inputs.update_smoke_from }}
         run: |
           set -eu
-          # Newest published (non-draft) release that is not this run's own tag.
-          prev=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 30 \
-            --json tagName,isDraft,publishedAt \
-            --jq '[.[] | select(.isDraft | not)] | sort_by(.publishedAt) | reverse | .[].tagName' \
-            | grep -vxF "$GITHUB_REF_NAME" | head -1)
-          test -n "$prev" || { echo "::error::no published release to update from"; exit 1; }
-          # One version per line; never word-split the input.
-          printf '%s\n' "$prev" > bases.txt
-          printf '%s\n' "$EXTRA" | tr ',' '\n' | tr -d ' \t' | while IFS= read -r b; do
-            [ -n "$b" ] || continue
-            printf '%s\n' "$b" | grep -Eqx '[0-9]{4}\.[0-9]{2}\.[0-9]+(-dev\.[0-9]+)?' \
-              || { echo "::error::update_smoke_from entry '$b' is not a CalVer release version"; exit 1; }
-            printf '%s\n' "$b" >> bases.txt
-          done
-          matrix=$(awk 'NF && !seen[$0]++' bases.txt | jq -Rnc '
-            [inputs] as $b | {include: [
-              $b[] as $v | ({arch: "amd64", sku: "n100", base: $v}, {arch: "arm64", sku: "rpi", base: $v})
-            ]}')
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 30 \
+            --json tagName,isDraft,isPrerelease,publishedAt > releases.json
+          matrix=$(sh scripts/update-plan.sh "$GITHUB_REF_NAME" < releases.json)
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
           echo "$matrix" | jq .
 
