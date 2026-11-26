@@ -254,6 +254,11 @@ verdict noanswer noanswer 503 unparsed
 check "TC-1012-08 verdict: no closed 200 (unparsed is never closed) fails" "$(holds '[ "$RC" = 1 ] && contains "why: no read was a 200 saying firstRun:false" "$OUT"')" "rc=$RC $OUT"
 verdict "200 firstRun=false ready=true" noanswer "200 firstRun=false ready=true"
 check "TC-1012-08 verdict: no no-answer before the first 200 fails" "$(holds '[ "$RC" = 1 ] && contains "why: no read went unanswered before the first 200" "$OUT"')" "rc=$RC $OUT"
+# F-1012-11: an unparsed 200 is an answer, so a no-answer after it is not
+# "before the first 200".
+verdict unparsed noanswer "200 firstRun=false ready=true"
+check "TC-1012-08 verdict: an unparsed read before the first no-answer fails (the record began after the api answered)" \
+	"$(holds '[ "$RC" = 1 ] && contains "why: no read went unanswered before the first 200" "$OUT"')" "rc=$RC $OUT"
 verdict noanswer unparsed "200 firstRun=false ready=true"
 check "TC-1012-08 verdict: an unparsed 200 counts as the first answer, not as closed" \
 	"$(yes_if test "$RC:$OUT" = "0:reads=3 noanswer=1 closed=1 open=0 unparsed=1 other=0")" "rc=$RC $OUT"
@@ -265,6 +270,10 @@ REC="time=t level=INFO msg=\"record: recorded\" job_id=j1 event=identity.move.st
 NR="time=t level=ERROR msg=\"check: failed\" job_id=j1 event=identity.move.failed step=check mode=system cause=not_ready"
 BAD="time=t level=ERROR msg=\"import: failed\" job_id=j2 event=identity.move.failed step=import mode=system cause=admin_api status=500 kind=server"
 NOCAUSE="time=t level=ERROR msg=\"check: failed\" job_id=j3 event=identity.move.failed step=check mode=system"
+# F-1012-12: the move's earlier steps log identity.move.step too; only the
+# record step's recorded outcome is the fact.
+CHECKED="time=t level=INFO msg=\"check: due\" job_id=j1 event=identity.move.step step=check outcome=due mode=system"
+IMPORTED="time=t level=INFO msg=\"import: imported\" job_id=j1 event=identity.move.step step=import outcome=imported mode=system accounts=1 renamed=0 left_out=0"
 journal() { printf '%s\r\n' "$JOURNAL"; [ "$1" = 'journalctl -u rasputin-api -b -o cat --no-pager' ]; }
 silent() { return 255; }
 for c in "$REC|0|the move recorded its last step (0 not_ready" \
@@ -276,6 +285,11 @@ $BAD|2|failed cause=admin_api" \
 	"$BAD
 $REC|2|failed cause=admin_api" \
 	"$NOCAUSE|2|failed cause=none" \
+	"$CHECKED
+$IMPORTED|1|no record step yet (0 not_ready failures so far)" \
+	"$CHECKED
+$IMPORTED
+$REC|0|the move recorded its last step (0 not_ready" \
 	"level=INFO msg=hello|1|no record step yet (0 not_ready"; do
 	JOURNAL=${c%%|*} rest=${c#*|}
 	want=${rest%%|*} said=${rest#*|}

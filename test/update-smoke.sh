@@ -127,8 +127,10 @@
 #      above or in boot 3 run; every other assertion decides the leg.
 #      UPDATE_SMOKE_FIXTURE=operator-gone (TEST-ONLY; CI never sets it, and it
 #      prints a FIXTURE: line) moves the api's rasputin.db aside in boot 2
-#      after the realm wait, to show the refusal path: TC-01's record and the
-#      bridge fail.
+#      after the realm wait, to show the refusal path. The fresh database
+#      answers firstRun:true, so TC-01's verdict fails on both arches; on
+#      amd64 the move's first wait, sign-in ready (which needs firstRun:false),
+#      runs out first, and the bridge and the steps after it do not run.
 #      The identity service (geekdojo/geekdojo-brain#974), amd64 only: realm
 #      rasputin's discovery document answers 200 over mutual TLS
 #      (test/lib/identity-ready.sh), both identity units are active and not

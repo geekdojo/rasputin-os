@@ -37,9 +37,13 @@ fi
 rel() { printf '{"tagName":"%s","isDraft":%s,"isPrerelease":%s,"publishedAt":"2026-11-%sT00:00:00Z"}' "$1" "$2" "$3" "$4"; }
 list() { printf '['; _sep=""; for r in "$@"; do printf '%s%s' "$_sep" "$r"; _sep=,; done; printf ']'; }
 
-# plan LIST TAG [EXTRA] — sets OUT, RC and BASES (the matrix's bases, rows in order).
+# plan LIST TAG [EXTRA] — sets OUT (stdout, what release.yml takes as the
+# matrix), ERR (stderr), RC and BASES (the matrix's bases, rows in order).
+ERRF=$(mktemp)
+trap 'rm -f "$ERRF"' EXIT
 plan() {
-	OUT=$(printf '%s' "$1" | EXTRA="${3:-}" "$UP_TEST_SHELL" "$PLAN" "$2" 2>&1); RC=$?
+	OUT=$(printf '%s' "$1" | EXTRA="${3:-}" "$UP_TEST_SHELL" "$PLAN" "$2" 2>"$ERRF"); RC=$?
+	ERR=$(cat "$ERRF")
 	BASES=$(printf '%s' "$OUT" | jq -r '[.include[] | "\(.arch)/\(.sku)/\(.base)"] | join(" ")' 2>/dev/null)
 }
 
@@ -50,6 +54,8 @@ OLDDEV="$(rel 2026.11.3-dev.394 false true 20)"
 
 echo "== bases (TC-1012-13)"
 plan "$(list "$DEV" "$OLDDEV" "$STABLE" "$OLDER")" main
+check "a plan prints only the matrix: one line of JSON on stdout, nothing on stderr" \
+	"$(yes_if test "$(printf '%s\n' "$OUT" | wc -l | tr -d ' '):$ERR" = "1:")" "out=$OUT err=$ERR"
 check "a dev newest and an older stable: both bases, both arches, 4 rows" \
 	"$(yes_if test "$RC:$BASES" = "0:amd64/n100/2026.11.4-dev.400 arm64/rpi/2026.11.4-dev.400 amd64/n100/2026.11.3 arm64/rpi/2026.11.3")" "rc=$RC $OUT"
 
@@ -80,8 +86,9 @@ for c in "no stable|$(list "$DEV" "$OLDDEV" "$(rel 2026.11.5 true false 26)")|no
 	[ "$name" = "only the run's own tag" ] && tag=2026.11.3
 	plan "$fixture" "$tag"
 	check "$name: exit 1" "$(yes_if test "$RC" = 1)" "rc=$RC $OUT"
-	check "$name: exactly one line, an ::error:: naming why" \
-		"$(yes_if test "$(printf '%s\n' "$OUT" | wc -l | tr -d ' '):$(printf '%s\n' "$OUT" | grep -c "^::error::update-plan: .*$said")" = "1:1")" "$OUT"
+	check "$name: stdout, the matrix release.yml captures, is empty" "$(yes_if test -z "$OUT")" "$OUT"
+	check "$name: stderr is exactly one line, an ::error:: naming why" \
+		"$(yes_if test "$(printf '%s\n' "$ERR" | wc -l | tr -d ' '):$(printf '%s\n' "$ERR" | grep -c "^::error::update-plan: .*$said")" = "1:1")" "$ERR"
 done
 
 echo "== EXTRA (TC-1012-13)"
@@ -90,8 +97,8 @@ check "a good EXTRA entry is appended once, and one naming an existing base adds
 	"$(yes_if test "$RC:$BASES" = "0:amd64/n100/2026.11.4-dev.400 arm64/rpi/2026.11.4-dev.400 amd64/n100/2026.11.3 arm64/rpi/2026.11.3 amd64/n100/2026.11.1 arm64/rpi/2026.11.1")" "rc=$RC $OUT"
 for bad in 'v2026.11.1' '2026.11.1;rm -rf /' '2026.11' '$(id)'; do
 	plan "$(list "$DEV" "$STABLE")" main "2026.11.1,$bad"
-	check "EXTRA entry '$bad' is refused: exit 1 and one ::error:: naming it" \
-		"$(yes_if test "$RC:$(printf '%s\n' "$OUT" | grep -c "^::error::update-plan: update_smoke_from entry .* is not a CalVer release version")" = "1:1")" "rc=$RC $OUT"
+	check "EXTRA entry '$bad' is refused: exit 1, stdout empty, and one ::error:: on stderr naming it" \
+		"$(yes_if test "$RC:$OUT:$(printf '%s\n' "$ERR" | wc -l | tr -d ' '):$(printf '%s\n' "$ERR" | grep -c "^::error::update-plan: update_smoke_from entry .* is not a CalVer release version")" = "1::1:1")" "rc=$RC out=$OUT err=$ERR"
 done
 
 if [ "$fails" -ne 0 ]; then

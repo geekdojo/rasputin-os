@@ -19,14 +19,17 @@
 # Prints the matrix JSON, {"include": [...]}, one {arch: amd64, sku: n100}
 # and one {arch: arm64, sku: rpi} row per base.
 #
-# Exit 1, with one ::error:: line, on a list that is not JSON, no published
-# release, no stable release, or an EXTRA entry that is not a version. Fails
-# closed: with no plan the update smoke does not run, and publish waits on it.
+# Exit 1, with one ::error:: line on stderr and nothing on stdout, on a list
+# that is not JSON, no published release, no stable release, or an EXTRA
+# entry that is not a version: release.yml captures stdout as the matrix, so
+# the cause goes to stderr, where the job log (and its annotation) shows it.
+# Fails closed: with no plan the update smoke does not run, and publish waits
+# on it.
 #
 # Tested by test/update-plan-test.sh against fixture lists.
 set -eu
 
-err() { echo "::error::update-plan: $*"; exit 1; }
+err() { echo "::error::update-plan: $*" >&2; exit 1; }
 
 [ "$#" = 1 ] || err "usage: update-plan.sh RUN_TAG (the release list on stdin)"
 run_tag=$1
