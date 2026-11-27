@@ -1,0 +1,19 @@
+# Serial login on the Raspberry Pi 5 Model B's debug UART
+# (geekdojo/geekdojo-brain#321, F-321-42).
+#
+# The Pi 5 has no ttyS0: its 3-pin debug UART connector, between the two
+# micro-HDMI ports, is the PL011 uart10, which the Pi 5's own device tree
+# enables and the kernel names ttyAMA10. Buildroot's getty is for ttyS0, so
+# without this rule no login ever runs on the one serial port a Pi 5 has.
+#
+# The getty is started BY the device appearing (SYSTEMD_WANTS), never by a
+# static getty.target.wants link: a statically wanted serial-getty for a
+# missing device waits on dev-ttyAMA10.device, and the Pi 4, the CM4, the
+# N100 and both QEMU smoke machines have no ttyAMA10. With this rule a board
+# without the device never creates a job at all.
+#
+# The device also exists on the CM5 and the Pi 500, which have no such
+# connector. The instance's 30-rasputin-debug-uart-board.conf drop-in gates
+# the getty to the Pi 5 Model B (F-321-43), and 10-rasputin-bmc-host.conf
+# keeps it off a BMC host.
+SUBSYSTEM=="tty", KERNEL=="ttyAMA10", TAG+="systemd", ENV{SYSTEMD_WANTS}+="serial-getty@ttyAMA10.service"

@@ -546,9 +546,9 @@ SI_AT=$(( $(date +%s) - START ))
 # The SR_ variables are set before the gate because this script runs under
 # set -u, and the report reads all of them on every path.
 SR_STAGE="" SR_REASON="" SR_RC="" SR_LAST="" SR_AT=""
-SG_DIR="$WORK/signin"
-SR_JAR="$SG_DIR/admin.jar"
-MESH_CA_PEM="$SG_DIR/mesh-ca.pem"
+SERIAL_DIR="$WORK/signin"
+SR_JAR="$SERIAL_DIR/admin.jar"
+MESH_CA_PEM="$SERIAL_DIR/mesh-ca.pem"
 CONSOLE_HOST="${CLUSTER_ID}.local"
 APP_HOST="signin.${CLUSTER_ID}.internal"
 # smoke_fetch — store_ready_wait's FETCH: prints the code and the body's path.
@@ -561,7 +561,7 @@ smoke_fetch() {
 }
 # enrol_me — GET /api/auth/me's status on the authenticator enrolment's
 # session, for the grant wait.
-enrol_me() { me_status "$CONSOLE_HOST" "$HTTPS_PORT" "$MESH_CA_PEM" "$SG_DIR/enrol.jar"; }
+enrol_me() { me_status "$CONSOLE_HOST" "$HTTPS_PORT" "$MESH_CA_PEM" "$SERIAL_DIR/enrol.jar"; }
 sync_probe() { ss_sync_probe ssh_guest; }
 grant_probe() { ss_grant_probe enrol_me; }
 
@@ -587,11 +587,11 @@ grant_probe() { ss_grant_probe enrol_me; }
 # through its discovery document instead.
 IR_RC="" IR_LAST="" IR_SECONDS="" ID_REPORT=""
 SG_FAIL="" SG_AT="" SG_ROLES="" SG_RPID="" SG_RPID2="" SG_NEG="" APP_CODE="" APP_ISSUER=""
-SS_SIGNIN="$LIBDIR/signin.py" SS_STATE="$SG_DIR/state" SS_DOORS="$SG_DIR/doors.json" SS_CA="$MESH_CA_PEM"
+SS_SIGNIN="$LIBDIR/signin.py" SS_STATE="$SERIAL_DIR/state" SS_DOORS="$SERIAL_DIR/doors.json" SS_CA="$MESH_CA_PEM"
 SS_CONNECT="127.0.0.1:${HTTPS_PORT}" SS_LABEL=owner
 # sg, sg_fail and sg_field, the step sequence, are test/lib/smoke-signin.sh's.
 sign_in_sequence() {
-  rm -rf "$SG_DIR"
+  rm -rf "$SERIAL_DIR"
   (umask 077 && mkdir -p "$SS_STATE") || { sg_fail "the sign-in's state directory could not be made"; return; }
   chmod 700 "$SS_STATE"
   ssh_guest 'cat /var/lib/rasputin/trust/mesh-ca.pem' </dev/null >"$MESH_CA_PEM" 2>/dev/null && [ -s "$MESH_CA_PEM" ] \
@@ -604,7 +604,7 @@ sign_in_sequence() {
   case ",$(sg_field roles)," in *,admin,*) echo "::error::the account was made an administrator at creation, before any second step: $SS_LINE"; sg_fail "admin at creation"; return ;; esac
   ss_wait "the clock-sync marker, then the realm offering CONFIGURE_TOTP" "$SYNC_TRIES" 2 sync_probe die_if_qemu_gone \
     || { sg_fail "the authenticator app was never offered"; return; }
-  sg enrol totp --jar "$SG_DIR/enrol.jar" || return
+  sg enrol totp --jar "$SERIAL_DIR/enrol.jar" || return
   ss_wait "the grant ending the enrolment's console session" "$GRANT_TRIES" 2 grant_probe die_if_qemu_gone \
     || { sg_fail "the grant never ended the enrolment's session"; return; }
   sg enrol passkey || return
@@ -750,6 +750,36 @@ if [ "$ok" = 1 ] && [ "$fb" = 1 ]; then
     echo "failed=$(systemctl list-units --failed --plain --no-legend keycloak.service keycloak-db.service | grep -c keycloak)"
     [ -x /usr/lib/rasputin/identity/rasputin-keycloak-hooks.sh ] && echo hook=executable || echo hook=not-executable
   ' > "$ID_FACTS" 2>&1 || echo "identity units facts: the guest's SSH call returned status $? (asserted below)"
+fi
+
+# The serial logins (geekdojo/geekdojo-brain#321, TC-321-68 to TC-321-71),
+# read the same way, on each SKU. Neither QEMU machine has the Pi 5's
+# ttyAMA10, so the udev rule must never fire and nothing may wait on the
+# device. ORDER MATTERS: the absent-device facts are read first, because
+# `systemctl show` and `systemctl cat` load the unit, after which
+# list-units --all would list it as loaded and inactive. Then the rule is
+# checked by the image's own udev, the instance's three drop-ins are read
+# through systemd (so the two symlinks survived into the squashfs and
+# resolve), and the console getty of each SKU is read, since its files are
+# the ones the ttyAMA10 drop-ins link to.
+SERIAL_FACTS="$WORK/serial-getty.facts"
+: > "$SERIAL_FACTS"
+if [ "$ok" = 1 ] && [ "$fb" = 1 ]; then
+  SSH_CALL_TIMEOUT=120 ssh_guest '
+    echo "units=$(systemctl list-units --all --plain --no-legend serial-getty@ttyAMA10.service | grep -c .)"
+    echo "jobs=$(systemctl list-jobs --no-legend 2>&1 | grep -c ttyAMA10)"
+    echo "failed=$(systemctl --failed --plain --no-legend | grep -c ttyAMA10)"
+    out=$(udevadm verify /etc/udev/rules.d/90-rasputin-pi5-debug-uart.rules 2>&1)
+    echo "udev_verify=$?"
+    echo "udev_verify_out=$(printf "%s" "$out" | tr "\n" " ")"
+    echo "dropins=$(systemctl show -P DropInPaths serial-getty@ttyAMA10.service)"
+    unit=$(systemctl cat serial-getty@ttyAMA10.service 2>&1)
+    echo "bmc_gate=$(printf "%s\n" "$unit" | grep -cx "ConditionPathExists=!/var/lib/rasputin/bmc-host")"
+    echo "board_gate=$(printf "%s\n" "$unit" | grep -cx "ConditionFirmware=device-tree-compatible(raspberrypi,5-model-b)")"
+    echo "exec=$(systemctl show -P ExecStart serial-getty@ttyAMA10.service)"
+    echo "ttyS0=$(systemctl show -P ActiveState serial-getty@ttyS0.service)"
+    echo "ttyAMA0=$(systemctl show -P ActiveState serial-getty@ttyAMA0.service)"
+  ' > "$SERIAL_FACTS" 2>&1 || echo "serial getty facts: the guest's SSH call returned status $? (asserted below)"
 fi
 
 # (d) The identity guest checks (geekdojo/geekdojo-brain#967, #974),
@@ -1021,6 +1051,48 @@ case "$(kc_fact sh)" in
   *) echo "::error::/bin/sh on the image resolves to '$(kc_fact sh)', expected busybox, the shell the bench proves kc.sh under"; exit 1 ;;
 esac
 echo "Keycloak $KC_EXPECT on the image, data and themes/rasputin linked, /bin/sh is busybox (facts only; kc.sh is proven on the bench)"
+
+# The serial logins (geekdojo/geekdojo-brain#321), from the facts read over
+# SSH before the kill.
+serial_fact() { sed -n "s/^$1=//p" "$SERIAL_FACTS" | tr -d '\r' | head -1; }
+[ -s "$SERIAL_FACTS" ] \
+  || { echo "::error::the guest did not answer the serial getty SSH query before the kill, so nothing checked the ttyAMA10 rule or drop-ins"; exit 1; }
+echo "serial getty facts:"; sed 's/^/  /' "$SERIAL_FACTS"
+# TC-321-68: an absent ttyAMA10 costs nothing.
+[ "$(serial_fact units)" = 0 ] \
+  || { echo "::error::TC-321-68 systemctl list-units --all lists serial-getty@ttyAMA10.service on a guest with no ttyAMA10 — something pulled the unit in without the device (a static wants link?)"; exit 1; }
+[ "$(serial_fact jobs)" = 0 ] \
+  || { echo "::error::TC-321-68 systemctl list-jobs has a ttyAMA10 job on a guest with no ttyAMA10 — a start is waiting on dev-ttyAMA10.device"; exit 1; }
+[ "$(serial_fact failed)" = 0 ] \
+  || { echo "::error::TC-321-68 systemctl --failed lists a ttyAMA10 unit on the image"; exit 1; }
+# TC-321-69: the rule is valid under the image's own udev.
+[ "$(serial_fact udev_verify)" = 0 ] \
+  || { echo "::error::TC-321-69 udevadm verify on 90-rasputin-pi5-debug-uart.rules exited '$(serial_fact udev_verify)': $(serial_fact udev_verify_out)"; exit 1; }
+# TC-321-70: the three drop-ins survive into the squashfs and resolve.
+SERIAL_DIR=/etc/systemd/system/serial-getty@ttyAMA10.service.d
+for f in 10-rasputin-bmc-host.conf 20-rasputin-fixed-baud.conf 30-rasputin-debug-uart-board.conf; do
+  case " $(serial_fact dropins) " in
+    *" $SERIAL_DIR/$f "*) ;;
+    *) echo "::error::TC-321-70 serial-getty@ttyAMA10's DropInPaths '$(serial_fact dropins)' do not include $SERIAL_DIR/$f"; exit 1 ;;
+  esac
+done
+[ "$(serial_fact bmc_gate)" = 1 ] \
+  || { echo "::error::TC-321-70 systemctl cat serial-getty@ttyAMA10 has $(serial_fact bmc_gate) ConditionPathExists=!/var/lib/rasputin/bmc-host line(s), expected 1 from the ttyS0 drop-in it links to"; exit 1; }
+[ "$(serial_fact board_gate)" = 1 ] \
+  || { echo "::error::TC-321-70 systemctl cat serial-getty@ttyAMA10 has $(serial_fact board_gate) ConditionFirmware=device-tree-compatible(raspberrypi,5-model-b) line(s), expected 1 (F-321-43's board gate)"; exit 1; }
+# The stock template's ExecStart also names 115200 (in its --keep-baud list),
+# so the effective command line is matched on the fixed baud followed by the
+# expanded instance name, which only the linked 20- drop-in produces.
+case "$(serial_fact exec)" in
+  *agetty*" 115200 ttyAMA10 "*) ;;
+  *) echo "::error::TC-321-70 serial-getty@ttyAMA10's ExecStart is '$(serial_fact exec)', expected agetty at a fixed 115200 on ttyAMA10 from the linked 20-rasputin-fixed-baud.conf"; exit 1 ;;
+esac
+# TC-321-71: each SKU's console getty is unchanged by the comment edits to the
+# files the ttyAMA10 drop-ins link to.
+if [ "$ARCH" = amd64 ]; then SERIAL_CONSOLE=ttyS0; else SERIAL_CONSOLE=ttyAMA0; fi
+[ "$(serial_fact "$SERIAL_CONSOLE")" = active ] \
+  || { echo "::error::TC-321-71 serial-getty@$SERIAL_CONSOLE is '$(serial_fact "$SERIAL_CONSOLE")' on the $ARCH image, expected active"; exit 1; }
+echo "no ttyAMA10 job, unit or failure on a guest without the device; the rule verifies; the three ttyAMA10 drop-ins load (bmc-host and board gates, 115200 on ttyAMA10); serial-getty@$SERIAL_CONSOLE active"
 
 # The identity units (geekdojo/geekdojo-brain#973, TC-973-29), from the facts
 # read over SSH before the kill, on each SKU: the start wait's curl with
