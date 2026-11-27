@@ -8,6 +8,7 @@
     signin.py sign-out
     signin.py door-page
     signin.py reset-password passkey|recovery-code
+    signin.py reset-password administrator --target T   (same options)
     signin.py set-password --new-password-file F [--then-sign-in]   (same options)
     signin.py negative bad-origin|bad-rpid|no-up|no-uv|bad-signature|bad-challenge|
                        replay|admin-password-alone|no-app-access|
@@ -73,9 +74,25 @@ recovery code the page asks for, answers a privileged account's
 authenticator code or passkey, and sets a new password. At the home door it
 delivers the reset's return to the console, whose answer must be
 ?signin=reset-done; at the app door the door's own page must say the password
-is changed. It then fails if the refresh token the account last held still
-refreshes (a session remains) or if the old password still signs in, and
-signs in with the new one.
+is changed. The new password is saved to the state file as soon as the door
+leaves its update page, before the return is read, so a later failure never
+leaves the state file holding a password the server no longer takes. It then
+fails if the refresh token the account last held still refreshes (a session
+remains) or if the old password still signs in, and signs in with the new
+one.
+
+reset-password administrator --label A --target T (geekdojo/geekdojo-brain#992)
+is A's reset of T's password at a console door. A is an administrator whose
+state holds a console session (a sign-in password-totp before it) and an
+authenticator app; T's state holds its account id, which every console
+sign-in records from /api/auth/me. It makes a temporary password, posts
+POST /api/accounts/{id}/reset-password with A's session, follows the next it
+returns to the fresh sign-in in the same jar and answers it with
+password-totp, and reads the Job it submitted until the Job ends. Once the
+Job exists, the temporary password is saved as T's password (the previous
+one as old_password), so set-password can then sign T in and set its own
+password at UPDATE_PASSWORD. It passes only when the Job succeeds, and the
+line names the Job's id and end state. No password is printed or logged.
 
 Stdout is exactly one line, `signin <verb> PASS|FAIL|INCONCLUSIVE <fact>`; a
 failed fact's line starts `fact=<its name>: ` before its sentence.
@@ -146,7 +163,9 @@ def build_parser():
     verbs.add_parser("sign-in", parents=[keycloak]).add_argument("what", choices=flows.SIGN_IN_METHODS)
     verbs.add_parser("sign-out", parents=[keycloak])
     verbs.add_parser("door-page", parents=[keycloak])
-    verbs.add_parser("reset-password", parents=[keycloak]).add_argument("what", choices=flows.RESET_METHODS)
+    reset = verbs.add_parser("reset-password", parents=[keycloak])
+    reset.add_argument("what", choices=flows.RESET_METHODS)
+    reset.add_argument("--target", help="administrator only: the label of the account reset")
     setpw = verbs.add_parser("set-password", parents=[keycloak])
     setpw.add_argument("--new-password-file", required=True, help="a 0600 file holding the new password")
     setpw.add_argument("--then-sign-in", action="store_true", help="sign in with the new password after")
@@ -274,6 +293,8 @@ def run_verb(args, clock, rng, passkeys, opener_factory, state, log, trace, held
         if args.verb == "bridge":
             return old.bridge(base, args.name, password, args.email)
         return old.register(base, args.name) if args.verb == "legacy-register" else old.sign_in(base, args.name)
+    if args.verb == "reset-password" and (args.what == "administrator") != bool(args.target):
+        raise Inconclusive("Bad arguments: --target is given with reset-password administrator, and only there.")
     if args.verb == "set-password":
         # Held in memory for the log's redaction, never in the needles file.
         new_password = read_password_file(args.new_password_file)
@@ -293,6 +314,8 @@ def run_verb(args, clock, rng, passkeys, opener_factory, state, log, trace, held
         verbs.sign_in(trace, args.what, args.label, args.door)
     elif args.verb == "sign-out":
         verbs.sign_out(trace, args.label, args.door)
+    elif args.verb == "reset-password" and args.what == "administrator":
+        detail = f"{verbs.reset_password_administrator(trace, args.label, args.target, args.door)}; "
     elif args.verb == "reset-password" and args.what == "recovery-code":
         detail = f"{verbs.reset_password_recovery_code(trace, args.label, args.door)}; "
     elif args.verb == "reset-password":

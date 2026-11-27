@@ -24,6 +24,7 @@ from . import pages
 from . import otp
 from . import passkey
 from . import pkce
+from .console import RESET_DONE_PATH
 from .errors import FactFailed, Inconclusive, RulesApplying
 from .transport import Redirect
 
@@ -34,12 +35,20 @@ ENROL_ACTIONS = {
     "recovery-codes": "CONFIGURE_RECOVERY_AUTHN_CODES",
 }
 SIGN_IN_METHODS = ("password", "password-totp", "password-passkey", "passkey", "recovery-code")
-RESET_METHODS = ("passkey", "recovery-code")
+RESET_METHODS = ("passkey", "recovery-code", "administrator")
 
 # A password reset's return (geekdojo/geekdojo-brain#992): the api's path at
-# each door, and the sentence the app door's page shows on success.
-RESET_DONE_PATH = "/api/auth/reset-done"
+# each door (console.RESET_DONE_PATH), and the sentence the app door's page
+# shows on success.
 RESET_DONE_SENTENCE = "Your password is changed."
+
+# An administrator's reset Job (cp jobs/types.go): its end states, and how
+# long and how often the client reads it. Its steps set the temporary
+# password and end the target's sessions, each a few identity calls.
+JOB_SUCCEEDED = "succeeded"
+JOB_ENDED = (JOB_SUCCEEDED, "failed", "cancelled")
+JOB_CEILING = 120
+JOB_INTERVAL = 2
 
 # Each negative: the assertion change it makes, and the refusal it must meet.
 NEGATIVES = {
@@ -402,13 +411,16 @@ class Flows:
         self._finish(trace, door, outcome, pending, account)
 
     def _start_action(self, trace, door, kind, account):
-        """The client's action start, asked again every
-        RULES_APPLYING_INTERVAL while the console holds its control lock for
-        a converge, up to RULES_APPLYING_CEILING."""
+        return self._past_rules_lock(lambda: door.client.start_action(trace, door, kind, ENROL_ACTIONS[kind], account))
+
+    def _past_rules_lock(self, start):
+        """A console start, asked again every RULES_APPLYING_INTERVAL while
+        the console holds its control lock for a converge, up to
+        RULES_APPLYING_CEILING."""
         deadline = self._clock.now() + RULES_APPLYING_CEILING
         while True:
             try:
-                return door.client.start_action(trace, door, kind, ENROL_ACTIONS[kind], account)
+                return start()
             except RulesApplying as err:
                 if self._clock.now() >= deadline:
                     raise RulesApplying(f"{err.sentence} It was still locked after {RULES_APPLYING_CEILING} s.",
@@ -497,10 +509,14 @@ class Flows:
         self._state.add_needles(new_password)
         outcome = self._post(trace, page.form("kc-passwd-update-form"),
                              {"password-new": new_password, "password-confirm": new_password})
-        returned = self._reset_returned(trace, outcome)
         old_tokens = account.get("tokens") or {}
-        account["old_password"], account["password"], account["tokens"] = account["password"], new_password, {}
-        self._state.save(label, account)
+        if isinstance(outcome, Redirect) or outcome.page_id == pages.DOOR_INFO:
+            # The door left its update page, so the server took the new
+            # password: it is saved before the return is read, so a failure
+            # from here on leaves the account signed in to with it.
+            account["old_password"], account["password"], account["tokens"] = account["password"], new_password, {}
+            self._state.save(label, account)
+        returned = self._reset_returned(trace, outcome)
         refresh = old_tokens.get("refresh_token")
         if refresh:
             response = self._t.request("POST", door.endpoint("token"), {
@@ -519,6 +535,60 @@ class Flows:
         outcome, verifier = self._sign_in(trace, door, account, self._method_for(account))
         self._finish(trace, door, outcome, verifier, account)
         return returned
+
+    def reset_password_administrator(self, trace, label, target_label, door_name):
+        """An administrator's reset of another account
+        (geekdojo/geekdojo-brain#992, Identity 4.10) through the console:
+        with the administrator's saved session, ask for the reset with a
+        temporary password made here, answer the fresh sign-in it returns
+        with password-totp, and read the Job until it ends. The temporary
+        password is saved as the target's password (its previous one as
+        old_password) as soon as the Job exists, so the target's next
+        sign-in (set-password, which meets UPDATE_PASSWORD) can use it.
+        Passes only when the Job succeeds. Returns what it saw."""
+        door = self.door(door_name)
+        if not door.client.launches:
+            raise Inconclusive(f"An administrator's reset is the console's, and the {door.name} door has no console.")
+        admin, target = self._state.load(label), self._state.load(target_label)
+        if not admin.get("totp_secret"):
+            raise Inconclusive(f"The account {label} holds no authenticator app for the fresh sign-in's second step.")
+        target_id = target.get("user_id")
+        if not target_id:
+            raise Inconclusive(f"The account {target_label} holds no account id: sign it in through the console first.")
+        temporary = self._password()
+        self._state.add_needles(temporary)
+        try:
+            page = self._past_rules_lock(lambda: door.client.start_admin_reset(trace, admin, target_id, temporary))
+            outcome = self._answer_sign_in(trace, page, door, admin, "password-totp")
+            if not isinstance(outcome, Redirect):
+                sentence = pages.message(outcome)
+                raise FactFailed(f"The fresh sign-in ended on {outcome.step} ({outcome.page_id})"
+                                 + (f": {sentence}" if sentence else "."), fact="fresh sign-in",
+                                 page_id=outcome.page_id)
+            job_id = door.client.finish_admin_reset(trace, outcome)
+        finally:
+            # The authenticator step just used is spent for later sign-ins.
+            self._state.save(label, admin)
+        target["old_password"], target["password"] = target.get("password"), temporary
+        self._state.save(target_label, target)
+        status, error = self._job_end(door, admin, job_id)
+        if status != JOB_SUCCEEDED:
+            raise FactFailed(f"The reset's Job {job_id} ended {status}" + (f": {error}" if error else "."),
+                             fact="reset job", job=job_id)
+        return f"the reset's Job {job_id} {status}; {target_label} holds the temporary password"
+
+    def _job_end(self, door, admin, job_id):
+        """The Job read every JOB_INTERVAL until it ends, up to JOB_CEILING."""
+        deadline = self._clock.now() + JOB_CEILING
+        while True:
+            status, error = door.client.job(admin, job_id)
+            if status in JOB_ENDED:
+                return status, error
+            if self._clock.now() >= deadline:
+                raise FactFailed(f"The reset's Job {job_id} was still {status} after {JOB_CEILING} s.",
+                                 fact="reset job", job=job_id)
+            self._log.info("job-wait", job=job_id, status=status, seconds=JOB_INTERVAL)
+            self._clock.sleep_until(self._clock.now() + JOB_INTERVAL)
 
     def _reset_returned(self, trace, outcome):
         """The reset's return: the console's, a redirect the client delivers
