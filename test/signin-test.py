@@ -1240,10 +1240,17 @@ class ResetFake:
     sign-in page with its "Forgot your password?" link, choose user, the
     code, an authenticator code when privileged, the new password, the
     reset's return at the console or the app door, the refresh of the old
-    token, and the sign-ins after."""
+    token, and the sign-ins after. With `console` (the console's origin, as a
+    doors file's console block names it) the sign-ins start and finish at
+    that console as a real image's do, and the reset's return goes to it:
+    the transport then knows the console's host, the case TC-992-38's doors
+    file never had (geekdojo/geekdojo-brain#992's Blocker 1). Its reset-done
+    is single-use, as the api's code exchange is."""
 
-    def __init__(self, origin, privileged=False, session_remains=False, console_says="reset-done"):
+    def __init__(self, origin, privileged=False, session_remains=False, console_says="reset-done", console=None,
+                 refuse_update=False):
         self.origin, self.privileged, self.session_remains, self.console_says = origin, privileged, session_remains, console_says
+        self.console, self.refuse_update, self.callbacks = console, refuse_update, []
         kc = f"{origin}/realms/rasputin/login-actions"
         self.login = reset_page("login-login", "kc-form-login", f"{kc}/authenticate?session_code=s1",
                                 ["username", "password"],
@@ -1266,6 +1273,8 @@ class ResetFake:
         if method == "POST":
             self.posts.append((split.path + ("?" + split.query if split.query else ""), form))
         path = split.path
+        if self.console and split.hostname == urllib.parse.urlsplit(self.console).hostname:
+            return self._console(path, query)
         if path.endswith("/protocol/openid-connect/auth"):
             self.pending = {"redirect_uri": query["redirect_uri"], "state": query["state"], "challenge": query["code_challenge"]}
             return 200, [], self.login
@@ -1274,7 +1283,7 @@ class ResetFake:
                 if self.session_remains:
                     return 200, [], json.dumps({"access_token": "a"}).encode()
                 return 400, [], json.dumps({"error": "invalid_grant"}).encode()
-            if pkce.challenge(form.get("code_verifier", "")) != self.pending["challenge"]:
+            if self.console or pkce.challenge(form.get("code_verifier", "")) != self.pending["challenge"]:
                 return 400, [], json.dumps({"error": "invalid_grant"}).encode()
             claims = b64url(json.dumps({"sub": "user-1"}).encode())
             return 200, [], json.dumps({"access_token": "at-new", "refresh_token": "rt-new",
@@ -1297,14 +1306,36 @@ class ResetFake:
                 return 200, [], self.otp if self.privileged else self.update
             if step == "4":
                 return 200, [], self.update
+            if self.refuse_update:
+                return 200, [], self.update.replace(b"</form>", b'</form><span id="input-error">Invalid password.</span>')
             self.new_password = form.get("password-new")
-            done = (CONSOLE_RESET if self.origin == HOME else f"{APP}/api/auth/reset-done") + "?code=reset-code&iss=x"
+            done = (self.console + "/api/auth/reset-done" if self.console else
+                    CONSOLE_RESET if self.origin == HOME else f"{APP}/api/auth/reset-done") + "?code=reset-code&iss=x"
             return 302, [("Location", done)], b""
         if path == "/api/auth/reset-done":
             self.delivered.append(url)
             if split.netloc.startswith("console."):
                 return 303, [("Location", f"/login?signin={self.console_says}")], b""
             return 200, [], self.info
+        return 404, [], b"not found"
+
+    def _console(self, path, query):
+        """The console's start, callback, /me and single-use reset-done."""
+        if path == "/api/auth/signin":
+            self.pending = {"redirect_uri": self.console + "/api/auth/callback", "state": "console-state"}
+            q = {"client_id": "rasputin-console", "redirect_uri": self.pending["redirect_uri"], "response_type": "code",
+                 "state": "console-state", "code_challenge": "held-by-the-api", "prompt": "login"}
+            return 303, [("Location", f"{self.origin}/realms/rasputin/protocol/openid-connect/auth?"
+                          + urllib.parse.urlencode(q))], b""
+        if path == "/api/auth/callback":
+            self.callbacks.append(query.get("code"))
+            return 303, [("Location", "/login"), ("Set-Cookie", f"{SESSION993}=session-after-reset-992; Path=/; Secure")], b""
+        if path == "/api/auth/me":
+            return 200, [], json.dumps({"sub": "user-1", "name": "r-user", "roles": []}).encode()
+        if path == "/api/auth/reset-done":
+            self.delivered.append(self.console + path + "?" + urllib.parse.urlencode(query))
+            said = self.console_says if len(self.delivered) == 1 else "reset-failed"
+            return 303, [("Location", f"/login?signin={said}")], b""
         return 404, [], b"not found"
 
 
@@ -1406,6 +1437,7 @@ METHODS993 = {"totp": "authenticator_app", "passkey": "passkey", "passkey-2fa": 
 KC_FOR = {"add_authenticator_app": "CONFIGURE_TOTP", "add_passkey": "webauthn-register-passwordless",
           "add_security_key": "webauthn-register", "add_recovery_codes": "CONFIGURE_RECOVERY_AUTHN_CODES"}
 SESSION993 = "__Host-rasputin-session"
+RESET_ACTION = "accounts.reset_password"
 PENDING993 = "__Host-rasputin-pending"
 CLOCK_SENTENCE = ("Authenticator apps can be added once Rasputin's clock is set. Add a passkey or security key "
                   "now, or try again later.")
@@ -1497,6 +1529,13 @@ class ConsoleFake:
         # The control lock: how many launcher POSTs answer 423 before one is
         # served, and the lock's code.
         self.locked, self.locked_code = 0, "signin_rules_applying"
+        # The administrator's reset (geekdojo/geekdojo-brain#992): what the
+        # route refuses with, the bodies and ids it was given, what the
+        # action's return answers instead of its Job, and the Job's states,
+        # read one per GET (the last repeats).
+        self.reset_refusal = self.reset_callback = None
+        self.reset_posts, self.job_reads, self.job_states, self.job_error = [], [], ["succeeded"], ""
+        self.job_answer, self.reset_sets_session = None, False
 
     def script(self, bodies):
         self.queue = list(bodies)
@@ -1586,16 +1625,48 @@ class ConsoleFake:
             self.counter += 1
             return 200, [("Set-Cookie", f"{PENDING993}=prepared-{self.counter:08d}; Path=/; Secure; HttpOnly")], \
                 json.dumps({"next": f"/api/auth/signin?action={self.pending_action}"}).encode()
+        if method == "POST" and path.startswith("/api/accounts/") and path.endswith("/reset-password"):
+            self.reset_posts.append((path, json.loads(body)))
+            if not live:
+                return 401, [], b'{"error":"auth required"}'
+            if self.locked:
+                self.locked -= 1
+                return 423, [], json.dumps({"code": self.locked_code, "error": "Administrator tools are locked."}).encode()
+            if self.reset_refusal:
+                status, code = self.reset_refusal
+                return status, [], json.dumps({"code": code, "error": "Refused by the fake."}).encode()
+            self.pending_action = RESET_ACTION
+            self.counter += 1
+            return 200, [("Set-Cookie", f"{PENDING993}=prepared-{self.counter:08d}; Path=/; Secure; HttpOnly")], \
+                json.dumps({"next": f"/api/auth/signin?action={RESET_ACTION}"}).encode()
+        if method == "GET" and path.startswith("/api/jobs/"):
+            self.job_reads.append((path, live))
+            if self.job_answer:
+                return self.job_answer
+            if not live:
+                return 401, [], b'{"error":"auth required"}'
+            state = self.job_states.pop(0) if len(self.job_states) > 1 else self.job_states[0]
+            return 200, [], json.dumps({"id": path.rsplit("/", 1)[1], "kind": RESET_ACTION, "status": state,
+                                        "error": self.job_error}).encode()
         if method == "GET" and path == "/api/auth/signin":
             self.action_gets.append((q["action"], cookies.get(PENDING993, "")))
             if not live or not cookies.get(PENDING993, "").startswith("prepared-") or q["action"] != self.pending_action:
                 return launcher("action-failed")
             self.in_action = True
-            return self._to_door("login", KC_FOR[q["action"]], set_pending=False)
+            return self._to_door("login", KC_FOR.get(q["action"]), set_pending=False)
         if path == "/api/auth/callback":
             self.callbacks.append((q, cookies.get(PENDING993, "")))
             if self.callback_key:
                 return launcher(self.callback_key)
+            if self.in_action and self.pending_action == RESET_ACTION:
+                # ResetAction.Run submits the Job and sends the browser to it.
+                if self.reset_callback:
+                    return launcher(self.reset_callback)
+                self.pending_action = None
+                headers = [("Location", "/tasks?id=job-992-1"), ("Set-Cookie", f"{PENDING993}=; Path=/; Max-Age=0; Secure")]
+                if self.reset_sets_session:
+                    headers.append(("Set-Cookie", f"{SESSION993}=session-from-a-reset-992; Path=/; Secure"))
+                return 303, headers, b""
             headers = [("Location", "/login"), ("Set-Cookie", f"{PENDING993}=; Path=/; Max-Age=0; Secure")]
             if self.in_action and self.grant_on_action:
                 self.ended |= set(self.sessions)
@@ -1980,7 +2051,10 @@ class ConsolePath(unittest.TestCase):
         self.assertIsInstance(doors["home"].client, console.ConsoleClient)
         self.assertIsInstance(doors["app"].client, console.PublicClient)
         self.assertEqual(seen["hosts"], {"sso-c993.local", "c993.local", "signin.c993.internal"})
-        self.assertEqual(seen["stops"], {CONSOLE + "/login", CONSOLE + "/api/auth/callback"})
+        # The reset's return is a stop too (geekdojo/geekdojo-brain#992): the
+        # client delivers it once and reads the console's answer.
+        self.assertEqual(seen["stops"], {CONSOLE + "/login", CONSOLE + "/api/auth/callback",
+                                         CONSOLE + "/api/auth/reset-done"})
         doors, _ = signin.load_doors(write_doors(), transport_for, st, seeded_rng())
         self.assertTrue(all(isinstance(d.client, console.PublicClient) for d in doors.values()))
 
@@ -2237,6 +2311,279 @@ class ConsolePath(unittest.TestCase):
         self.assertEqual(code, 1, out)
         self.assertEqual(len(self.fake.busy_posts), 1)
         self.assertIn("rasputin-door-refusal", out)
+
+
+# ------------------------------------- #992 the console door's reset return
+
+
+class ConsoleResetReturn(unittest.TestCase):
+    """geekdojo/geekdojo-brain#992's Blocker 1: with a console block in the
+    doors file, as every real image's run has, the home door's reset returns
+    to the console's own host. The client must stop at /api/auth/reset-done,
+    deliver it once and read the console's answer, and the state file must
+    hold the new password once the door has taken it, whatever follows."""
+
+    OLD = "old-password-for-the-console-reset-992"
+
+    def setUp(self):
+        self.state = state_dir(self)
+        State(self.state, os.getuid()).save("r", {
+            "label": "r", "username": "r-user", "password": self.OLD,
+            "recovery_codes": ["code-one-0001", "code-two-0002"], "totp_secret": ""})
+        self.outputs = []
+
+    def go(self, fake):
+        code, out, err = run(["reset-password", "recovery-code", "--state", self.state, "--doors", console_doors(),
+                              "--ca", "/unused", "--label", "r"], fake)
+        self.outputs.append(out + err)
+        self.assertRegex(out, LINE)
+        self.assertNotIn(self.OLD, out + err)
+        return code, out
+
+    def saved(self):
+        return State(self.state, os.getuid()).load("r")
+
+    def test_the_console_return_is_delivered_once_and_its_answer_read(self):
+        fake = ResetFake(DOOR993, console=CONSOLE)
+        code, out = self.go(fake)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out, "signin reset-password PASS the console answered reset-done; roles=none; pages=login-login,"
+                              "login-login-reset-password,login-login-recovery-authn-code-input,"
+                              "login-login-update-password,login-login,login-login,login-login\n")
+        # One delivery, of the door's own return: a second would spend the code twice.
+        self.assertEqual(fake.delivered, [CONSOLE + "/api/auth/reset-done?code=reset-code&iss=x"])
+        self.assertTrue(any(f.get("password") == self.OLD for _, f in fake.posts), "the old password was not tried")
+        self.assertEqual(len(fake.callbacks), 1)
+        saved = self.saved()
+        self.assertEqual((saved["old_password"], saved["password"]), (self.OLD, fake.new_password))
+        needles = State(self.state, os.getuid()).needles()
+        self.assertIn(fake.new_password, needles)
+        self.assertEqual([n for n in needles if n in "".join(self.outputs)], [])
+
+    def test_a_failed_return_still_leaves_the_new_password_in_the_state_file(self):
+        for says in ("reset-failed", "reset-incomplete"):
+            with self.subTest(says=says):
+                self.setUp()
+                fake = ResetFake(DOOR993, console=CONSOLE, console_says=says)
+                code, out = self.go(fake)
+                self.assertEqual(code, 1, out)
+                self.assertIn(f"fact=reset done: The console answered the reset's return with {says}", out)
+                saved = self.saved()
+                self.assertEqual((saved["old_password"], saved["password"]), (self.OLD, fake.new_password))
+
+    def test_a_refused_new_password_leaves_the_state_file_alone(self):
+        fake = ResetFake(DOOR993, console=CONSOLE, refuse_update=True)
+        code, out = self.go(fake)
+        self.assertEqual(code, 1, out)
+        self.assertIn("fact=page:", out)
+        self.assertEqual(fake.delivered, [])
+        saved = self.saved()
+        self.assertEqual(saved["password"], self.OLD)
+        self.assertNotIn("old_password", saved)
+
+
+# ---------------------------------------- #992 the administrator's reset
+
+
+TOTP992 = base64.b32encode(b"admin-totp-key-992-xx").decode()
+UPDATE993 = tpage("login-login-update-password", [("kc-passwd-update-form", {"password-new": "", "password-confirm": ""})])
+
+
+class AdministratorReset(unittest.TestCase):
+    """geekdojo/geekdojo-brain#992, TC-992-40's verb: `signin.py
+    reset-password administrator --target T` posts the reset route with the
+    administrator's saved session, walks the fresh sign-in it returns in the
+    same jar with password-totp, reads the Job to its end and leaves the
+    temporary password in T's state, from where set-password signs T in and
+    sets its own password at UPDATE_PASSWORD."""
+
+    TGT_OLD = "target-first-password-992"
+
+    def setUp(self):
+        self.state = state_dir(self)
+        self.doors = console_doors()
+        self.fake = ConsoleFake()
+        self.clock = FixedClock()
+        self.outputs = []
+        # The administrator, as an earlier sign-in password-totp left it.
+        self.fake.sessions["admin-session-992-live"] = "adm-user"
+        st = State(self.state, os.getuid())
+        st.save("adm", {"label": "adm", "username": "adm-user", "password": "admin-password-992",
+                        "totp_secret": TOTP992, "console_session": "admin-session-992-live", "user_id": "u-adm"})
+        st.save("tgt", {"label": "tgt", "username": "tgt-user", "password": self.TGT_OLD})
+
+    def go(self, *argv, label="adm"):
+        code, out, err = run([*argv, "--state", self.state, "--doors", self.doors, "--ca", "/unused",
+                              "--label", label], self.fake, clock=self.clock)
+        self.outputs.append(out + err)
+        self.assertRegex(out, LINE)
+        self.assertEqual(out.count("\n"), 1)
+        return code, out
+
+    def reset(self):
+        return self.go("reset-password", "administrator", "--target", "tgt")
+
+    def target(self):
+        return State(self.state, os.getuid()).load("tgt")
+
+    def target_signs_in(self):
+        """The target's console sign-in, which records its account id from /me."""
+        self.fake.script([P993["login"], None])
+        code, out = self.go("sign-in", "password", label="tgt")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.target()["user_id"], "u-1")
+
+    def test_the_reset_runs_the_fresh_sign_in_reads_the_job_and_the_target_sets_its_password(self):
+        self.target_signs_in()
+        self.fake.job_states = ["queued", "running", "succeeded"]
+        self.fake.script([P993["login"], P993["otp"], None])
+        code, out = self.reset()
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out, "signin reset-password PASS the reset's Job job-992-1 succeeded; tgt holds the "
+                              "temporary password; pages=login-login,login-login-otp\n")
+        temporary = self.target()["password"]
+        self.assertEqual(self.target()["old_password"], self.TGT_OLD)
+        # The route got the target's id and the temporary password, with the administrator's session.
+        self.assertEqual(self.fake.reset_posts, [("/api/accounts/u-1/reset-password", {"password": temporary})])
+        # The fresh sign-in ran in the same jar: the action's GET carried the prepared record's cookie.
+        self.assertEqual(len(self.fake.action_gets), 1)
+        self.assertEqual(self.fake.action_gets[0][0], RESET_ACTION)
+        self.assertTrue(self.fake.action_gets[0][1].startswith("prepared-"))
+        self.assertEqual(self.fake.auths[-1]["prompt"], "login")
+        self.assertNotIn("kc_action", self.fake.auths[-1])
+        self.assertEqual(self.fake.posts[-2]["username"], "adm-user")
+        self.assertEqual(self.fake.posts[-1]["otp"], otp.totp(otp.base32_secret(TOTP992), self.clock.now()))
+        # The Job was read until it ended, with the administrator's session.
+        self.assertEqual(self.fake.job_reads, [("/api/jobs/job-992-1", True)] * 3)
+        self.assertGreater(State(self.state, os.getuid()).load("adm")["totp_last_step"], 0)
+        # The target's next sign-in meets UPDATE_PASSWORD and sets its own password.
+        pwdir = tempfile.mkdtemp(prefix="signin-pw-")
+        self.addCleanup(shutil.rmtree, pwdir, True)
+        chosen = os.path.join(pwdir, "pw")
+        with open(chosen, "w", encoding="utf-8") as f:
+            f.write("target-chosen-password-992\n")
+        os.chmod(chosen, 0o600)
+        self.fake.script([P993["login"], UPDATE993, None])
+        code, out = self.go("set-password", "--new-password-file", chosen, label="tgt")
+        self.assertEqual(code, 0, out)
+        self.assertIn("PASS no breach warning, relayed, new password set", out)
+        self.assertEqual(self.fake.posts[-2]["password"], temporary)
+        self.assertEqual(self.fake.posts[-1]["password-new"], "target-chosen-password-992")
+        needles = State(self.state, os.getuid()).needles()
+        self.assertIn(temporary, needles)
+        self.assertEqual([n for n in needles if n in "".join(self.outputs)], [])
+
+    def test_a_job_that_does_not_succeed_fails_naming_it_and_the_target_keeps_both_passwords(self):
+        self.target_signs_in()
+        self.fake.job_states, self.fake.job_error = ["running", "failed"], "The sign-in service couldn't set it."
+        self.fake.script([P993["login"], P993["otp"], None])
+        code, out = self.reset()
+        self.assertEqual(code, 1, out)
+        self.assertIn("fact=reset job: The reset's Job job-992-1 ended failed: The sign-in service couldn't set it.", out)
+        self.assertEqual(self.target()["old_password"], self.TGT_OLD)
+        self.assertEqual(self.fake.reset_posts[0][1]["password"], self.target()["password"])
+
+    def test_a_job_still_running_at_the_ceiling_fails(self):
+        self.target_signs_in()
+        self.fake.job_states = ["running"]
+        self.fake.script([P993["login"], P993["otp"], None])
+        code, out = self.reset()
+        self.assertEqual(code, 1, out)
+        self.assertIn("fact=reset job: The reset's Job job-992-1 was still running after 120 s.", out)
+
+    def test_a_refusal_before_the_job_leaves_the_target_alone(self):
+        self.target_signs_in()
+        cases = {
+            "route": lambda: setattr(self.fake, "reset_refusal", (403, "kind_refused")),
+            "return": lambda: setattr(self.fake, "reset_callback", "action-failed"),
+            "session": lambda: self.fake.ended.add("admin-session-992-live"),
+        }
+        want = {"route": "fact=reset request: The console refused POST /api/accounts/{id}/reset-password with "
+                         "HTTP 403 kind_refused: Refused by the fake.",
+                "return": "fact=reset submitted: The console answered the fresh sign-in's return with "
+                          "signin=action-failed instead of the reset's Job.",
+                "session": "fact=reset request: The console refused POST /api/accounts/{id}/reset-password with "
+                           "HTTP 401: auth required"}
+        for name, arrange in cases.items():
+            with self.subTest(refusal=name):
+                self.fake.reset_refusal = self.fake.reset_callback = None
+                self.fake.ended.clear()
+                arrange()
+                self.fake.script([P993["login"], P993["otp"], None])
+                code, out = self.reset()
+                self.assertEqual(code, 1, out)
+                self.assertIn(want[name], out)
+                self.assertEqual(self.target()["password"], self.TGT_OLD)
+                self.assertNotIn("old_password", self.target())
+        self.assertEqual(self.fake.job_reads, [])
+
+    def test_each_other_answer_is_named(self):
+        """The api's other answers: a sign-in service that isn't ready, a
+        fresh sign-in the door ends on its error page, a return that sets a
+        session, and a Job that cannot be read. Exit 2 where the run cannot
+        tell, 1 where a fact failed."""
+        self.target_signs_in()
+        cases = [
+            ("not ready", lambda f: setattr(f, "reset_refusal", (503, "identity_not_ready")), [P993["login"]], 2,
+             "The console answered POST /api/accounts/{id}/reset-password with HTTP 503 (identity_not_ready)."),
+            ("door error", lambda f: None, [P993["login"], P993["otp"], P993["error"]], 1,
+             "fact=fresh sign-in: The fresh sign-in ended on"),
+            ("session", lambda f: setattr(f, "reset_sets_session", True), [P993["login"], P993["otp"], None], 1,
+             "fact=action return: The reset's return set a console session"),
+            ("job 401", lambda f: setattr(f, "job_answer", (401, [], b'{"error":"auth required"}')),
+             [P993["login"], P993["otp"], None], 1, "fact=job read: The console answered GET /api/jobs/{id} with HTTP 401."),
+            ("job 500", lambda f: setattr(f, "job_answer", (500, [], b"")), [P993["login"], P993["otp"], None], 2,
+             "The console answered GET /api/jobs/{id} with HTTP 500."),
+            ("job no status", lambda f: setattr(f, "job_answer", (200, [], b'{"id":"job-992-1"}')),
+             [P993["login"], P993["otp"], None], 2, "The console answered GET /api/jobs/{id} 200 with no status."),
+            ("job no JSON", lambda f: setattr(f, "job_answer", (200, [], b"[]")),
+             [P993["login"], P993["otp"], None], 2, "The console answered GET /api/jobs/{id} 200 with no JSON object."),
+        ]
+        for name, arrange, script, want_code, want in cases:
+            with self.subTest(case=name):
+                self.fake = ConsoleFake()
+                self.fake.sessions["admin-session-992-live"] = "adm-user"
+                arrange(self.fake)
+                self.fake.script(script)
+                code, out = self.reset()
+                self.assertEqual(code, want_code, out)
+                self.assertIn(want, out)
+
+    def test_the_rules_lock_is_waited_out(self):
+        self.target_signs_in()
+        self.fake.locked = 2
+        self.fake.script([P993["login"], P993["otp"], None])
+        code, out = self.reset()
+        self.assertEqual(code, 0, out)
+        self.assertEqual(len(self.fake.reset_posts), 3)
+
+    def test_what_the_verb_needs_is_inconclusive_when_absent(self):
+        st = State(self.state, os.getuid())
+        code, out = self.reset()
+        self.assertEqual(code, 2, out)
+        self.assertIn("The account tgt holds no account id: sign it in through the console first.", out)
+        self.target_signs_in()
+        adm = st.load("adm")
+        st.save("adm", dict(adm, console_session=""))
+        code, out = self.reset()
+        self.assertEqual(code, 2, out)
+        self.assertIn("The account adm holds no console session: sign it in first.", out)
+        st.save("adm", dict(adm, totp_secret=""))
+        code, out = self.reset()
+        self.assertEqual(code, 2, out)
+        self.assertIn("holds no authenticator app", out)
+        st.save("adm", adm)
+        for argv in (["reset-password", "administrator"], ["reset-password", "recovery-code", "--target", "tgt"]):
+            with self.subTest(argv=argv):
+                code, out = self.go(*argv)
+                self.assertEqual(code, 2, out)
+                self.assertIn("--target is given with reset-password administrator, and only there", out)
+        self.doors = write_doors()
+        code, out = self.reset()
+        self.assertEqual(code, 2, out)
+        self.assertIn("the home door has no console", out)
+        self.assertEqual(self.fake.reset_posts, [])
+        self.assertEqual(st.load("tgt")["password"], self.TGT_OLD)
 
 
 if __name__ == "__main__":

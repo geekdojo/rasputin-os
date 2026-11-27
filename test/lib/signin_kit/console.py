@@ -28,9 +28,17 @@ an authorization request or touches a token:
            which the caller waits out.
   sign-out POST /api/auth/logout with the session the account's state holds;
            GET /api/auth/me with that same cookie must then answer 401.
+  admin reset (geekdojo/geekdojo-brain#992) with the administrator's saved
+           session, POST /api/accounts/{id}/reset-password with JSON
+           {"password": p}; the 200's `next` is GET in the same jar (the
+           prepared record sits under the pending cookie that answer set), and
+           the fresh sign-in's return must be a 303 to /tasks?id=<the Job>.
+           GET /api/jobs/{id} reads the Job.
 
-The console's launcher (/login) and callback are known hosts' paths the
-transport never follows (its stops), so each arrives here as a Redirect.
+The console's launcher (/login), callback and reset return
+(/api/auth/reset-done) are known hosts' paths the transport never follows
+(its stops), so each arrives here as a Redirect: a reset's return is
+delivered once, by the caller, and its answer read.
 Sentences name a key or a status, never a cookie, code or query.
 """
 
@@ -51,6 +59,14 @@ SIGNIN_PATH = "/api/auth/signin"
 SIGNUP_PATH = "/api/auth/signup"
 ME_PATH = "/api/auth/me"
 LOGOUT_PATH = "/api/auth/logout"
+# The home door's reset return (cp auth/reset.go ResetDonePath) and the
+# administrator's reset route (cp api/server.go), with where the fresh
+# sign-in's return sends the browser once the Job is submitted
+# (cp accounts/prepare.go ResetAction.Run), and the Job's read.
+RESET_DONE_PATH = "/api/auth/reset-done"
+ADMIN_RESET_ROUTE = "/api/accounts/{id}/reset-password"
+TASKS_PATH = "/tasks"
+JOB_PATH = "/api/jobs/{id}"
 # The control lock's code while Rasputin applies its sign-in rules: the
 # converge after first run ends holds it for its run (cp auth/controllock.go).
 RULES_APPLYING = "signin_rules_applying"
@@ -180,7 +196,7 @@ class ConsoleClient:
     def stops(origin):
         """The console's paths the transport returns as a Redirect."""
         origin = origin.rstrip("/")
-        return {origin + LAUNCHER_PATH, origin + CALLBACK_PATH}
+        return {origin + LAUNCHER_PATH, origin + CALLBACK_PATH, origin + RESET_DONE_PATH}
 
     def _to_door(self, trace, path, fact):
         """GET path at the console, followed to the door's page. The console
@@ -209,13 +225,7 @@ class ConsoleClient:
         `next` in the same jar, and follow it to the door's fresh sign-in."""
         method = self._methods[kind]
         call = f"POST {self._route}"
-        response = self._t.request("POST", self._url(self._route), json_body=json.dumps({"method": method}))
-        if response.status >= 500:
-            raise Inconclusive(f"The console answered {call} with HTTP {response.status}.",
-                               http_status=response.status)
-        if response.status == 423 and _code(response.body) == RULES_APPLYING:
-            raise RulesApplying(f"The console locked {call} with HTTP 423 while Rasputin applies its "
-                                f"sign-in rules.", fact="sign-in rules applied", http_status=423)
+        response = self._post_json(call, self._route, {"method": method})
         if response.status == 409:
             raise FactFailed(f"The console refused {method} at {call} with HTTP 409: "
                              f"{_sentence(response.body) or 'no sentence'}", fact="clock", http_status=409)
@@ -223,19 +233,88 @@ class ConsoleClient:
             raise FactFailed(f"The console refused {method} at {call} with HTTP {response.status}"
                              + (f": {_sentence(response.body)}" if _sentence(response.body) else "."),
                              fact="enrol start", http_status=response.status)
-        try:
-            nxt = json.loads(response.body).get("next")
-        except (ValueError, AttributeError) as err:
-            raise Inconclusive(f"The console answered {call} 200 with no JSON object.") from err
-        if not isinstance(nxt, str) or not nxt.startswith(ACTION_START) or len(nxt) == len(ACTION_START):
-            raise Inconclusive(f"The console answered {call} 200 with no next of the form {ACTION_START}<kind>.")
-        outcome = self._to_door(trace, nxt, "enrol start")
+        outcome = self._to_door(trace, _next_of(response, call), "enrol start")
         if outcome.status == 400 or _page_id_of(outcome) in ("login-error", pages.DOOR_REFUSAL):
             page = trace.see(outcome)
             said = pages.message(page) or " ".join(page.text_by_id.values())[:200]
             raise FactFailed(f"The door refused the action {method} forwarded ({page.page_id})"
                              + (f": {said}" if said else "."), fact="kc_action", page_id=page.page_id)
         return trace.see(outcome), ACTION
+
+    def _post_json(self, call, path, payload):
+        """POST payload as JSON to path: a 5xx is Inconclusive and the
+        control lock is RulesApplying; any other answer is returned."""
+        response = self._t.request("POST", self._url(path), json_body=json.dumps(payload))
+        if response.status >= 500:
+            raise Inconclusive(f"The console answered {call} with HTTP {response.status}"
+                               + (f" ({_code(response.body)})." if _code(response.body) else "."),
+                               http_status=response.status)
+        if response.status == 423 and _code(response.body) == RULES_APPLYING:
+            raise RulesApplying(f"The console locked {call} with HTTP 423 while Rasputin applies its "
+                                f"sign-in rules.", fact="sign-in rules applied", http_status=423)
+        return response
+
+    def _use_session(self, account):
+        """Put the session the account's state holds in the jar."""
+        session = account.get("console_session")
+        if not session:
+            raise Inconclusive(f"The account {account['label']} holds no console session: sign it in first.")
+        self._t.add_cookie(self.host, SESSION_COOKIE, session)
+
+    def start_admin_reset(self, trace, admin, target_id, password):
+        """An administrator's reset of target_id to password: POST the route
+        with the administrator's saved session, then GET its `next` in the
+        same jar, followed to the door's fresh sign-in."""
+        self._use_session(admin)
+        path = ADMIN_RESET_ROUTE.format(id=urllib.parse.quote(target_id, safe=""))
+        call = "POST " + ADMIN_RESET_ROUTE
+        response = self._post_json(call, path, {"password": password})
+        if response.status != 200:
+            said, code = _sentence(response.body), _code(response.body)
+            raise FactFailed(f"The console refused {call} with HTTP {response.status}"
+                             + (f" {code}" if code else "") + (f": {said}" if said else "."),
+                             fact="reset request", http_status=response.status)
+        return trace.see(self._to_door(trace, _next_of(response, call), "reset start"))
+
+    def finish_admin_reset(self, trace, redirect):
+        """The fresh sign-in's return: delivered to the callback, whose answer
+        must be a 303 to /tasks?id=<the Job> that sets no session. Returns
+        the Job's id."""
+        if redirect.target != self._url(CALLBACK_PATH):
+            raise FactFailed("The door returned somewhere other than the console's callback.",
+                             fact="console callback")
+        answer = self._t.deliver(redirect)
+        landed = Redirect(urllib.parse.urljoin(self.origin + "/", answer.header("Location") or ""))
+        job_id = landed.params.get("id")
+        if answer.status != 303 or landed.target != self._url(TASKS_PATH) or not job_id:
+            key = landed.params.get("signin")
+            raise FactFailed("The console answered the fresh sign-in's return with "
+                             + (f"signin={key}" if key else f"HTTP {answer.status} and no Job")
+                             + " instead of the reset's Job.", fact="reset submitted", http_status=answer.status)
+        if _set_cookie(answer, SESSION_COOKIE):
+            raise FactFailed("The reset's return set a console session, and an action mints none.",
+                             fact="action return")
+        return job_id
+
+    def job(self, account, job_id):
+        """GET the Job with the account's saved session: (status, error)."""
+        self._use_session(account)
+        call = "GET " + JOB_PATH
+        response = self._t.request("GET", self._url(JOB_PATH.format(id=urllib.parse.quote(job_id, safe=""))))
+        if response.status >= 500:
+            raise Inconclusive(f"The console answered {call} with HTTP {response.status}.",
+                               http_status=response.status)
+        if response.status != 200:
+            raise FactFailed(f"The console answered {call} with HTTP {response.status}.", fact="job read",
+                             http_status=response.status)
+        try:
+            job = json.loads(response.body)
+            status, error = job.get("status"), job.get("error") or ""
+        except (ValueError, AttributeError) as err:
+            raise Inconclusive(f"The console answered {call} 200 with no JSON object.") from err
+        if not isinstance(status, str) or not status or not isinstance(error, str):
+            raise Inconclusive(f"The console answered {call} 200 with no status.")
+        return status, error
 
     def finish(self, trace, door, redirect, pending, account):
         if redirect.target != self._url(CALLBACK_PATH):
@@ -268,11 +347,16 @@ class ConsoleClient:
                              fact="me", http_status=response.status)
         try:
             me = json.loads(response.body)
-            name, roles = me.get("name"), me.get("roles")
+            name, roles, sub = me.get("name"), me.get("roles"), me.get("sub")
         except (ValueError, AttributeError) as err:
             raise FactFailed(f"GET {ME_PATH} answered 200 with no JSON object.", fact="me") from err
         if name != account["username"]:
             raise FactFailed(f"GET {ME_PATH} named another account.", fact="me")
+        # The account's id, which an administrator's reset names it by.
+        if isinstance(sub, str) and sub:
+            account.setdefault("user_id", sub)
+            if account["user_id"] != sub:
+                raise FactFailed(f"GET {ME_PATH} gave another account's id.", fact="me")
         if not isinstance(roles, list) or not all(isinstance(r, str) for r in roles):
             raise FactFailed(f"GET {ME_PATH} gave no list of roles.", fact="me")
         return roles
@@ -304,6 +388,17 @@ def _set_cookie(response, name):
             if got:
                 return got
     return ""
+
+
+def _next_of(response, call):
+    """The `next` of a 200 that starts a fresh sign-in."""
+    try:
+        nxt = json.loads(response.body).get("next")
+    except (ValueError, AttributeError) as err:
+        raise Inconclusive(f"The console answered {call} 200 with no JSON object.") from err
+    if not isinstance(nxt, str) or not nxt.startswith(ACTION_START) or len(nxt) == len(ACTION_START):
+        raise Inconclusive(f"The console answered {call} 200 with no next of the form {ACTION_START}<kind>.")
+    return nxt
 
 
 def _code(body):
