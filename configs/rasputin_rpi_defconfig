@@ -39,10 +39,13 @@ BR2_INIT_SYSTEMD=y
 # (mDNS rasputin.local); the baked name must collide with nothing.
 BR2_TARGET_GENERIC_HOSTNAME="rasputin-node"
 BR2_TARGET_GENERIC_ISSUE="Welcome to Rasputin OS"
-# Pi serial console — ttyS0, the mini-UART, IS the 40-pin-header UART on
-# this image (8250.nr_uarts=1; ttyAMA0/PL011 has no device node here —
+# Pi serial console. On the Pi 4 the 40-pin-header UART is ttyS0, the
+# mini-UART (8250.nr_uarts=1; ttyAMA0/PL011 has no device node there —
 # bench-verified 2026-07-23 on the BitScope rack, where this UART is what
-# serial-over-LAN bridges).
+# serial-over-LAN bridges). The Pi 5 has no ttyS0: on the Pi 5 Model B the
+# debug UART on the 3-pin connector is ttyAMA10, which the Pi 5 DT enables
+# and whose getty the overlay's 90-rasputin-pi5-debug-uart.rules starts,
+# under the board gate in serial-getty@ttyAMA10.service.d (geekdojo/geekdojo-brain#321).
 BR2_TARGET_GENERIC_GETTY_PORT="ttyS0"
 # THE IMAGE SHIPS NO CONSOLE PASSWORD, and root's shadow field is a non-empty,
 # unusable lock ("*"). Buildroot writes that field itself when root login by

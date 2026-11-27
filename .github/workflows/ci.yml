@@ -113,6 +113,12 @@ jobs:
       # `systemctl --failed` permanently non-empty.
       - name: Masked-unit tests
         run: sh test/masked-units-test.sh
+      # The Pi 5 Model B's serial login on ttyAMA10 (geekdojo/geekdojo-brain#321):
+      # a udev rule, two drop-ins symlinked to ttyS0's and a board gate. A
+      # resolved symlink, a dropped gate or a static wants link each look
+      # identical in a build, so what ships is pinned here.
+      - name: Serial getty tests
+        run: sh test/serial-getty-test.sh
       # The image's clock floor is an mtime on an empty file: a build that
       # silently stops baking it looks identical and puts every offline first
       # boot back to minting already-expired certificates

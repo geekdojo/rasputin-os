@@ -14,11 +14,13 @@ arm_64bit=1
 auto_initramfs=1
 disable_overscan=1
 
-# Serial console on the GPIO UART (GPIO 14/15 → ttyAMA0). REQUIRED for bring-up:
-# with this on, the GPU firmware prints its boot banner to the UART before the
-# kernel even starts, so a USB-UART gives us a window into the firmware→kernel
-# handoff even if the kernel console node turns out to differ on the Pi 5 (RP1
-# enumerates UARTs differently — VERIFY the kernel console= on first boot).
+# Serial console on the GPIO UART. REQUIRED for bring-up: with this on, the GPU
+# firmware prints its boot banner to the UART before the kernel even starts, so
+# a USB-UART gives us a window into the firmware→kernel handoff. On the Pi 4 the
+# header UART (GPIO 14/15) is ttyS0, the mini-UART. On the Pi 5 Model B the
+# debug UART on the 3-pin connector is ttyAMA10: the Pi 5 DT enables it, and the
+# overlay's 90-rasputin-pi5-debug-uart.rules starts its getty under the board
+# gate in serial-getty@ttyAMA10.service.d (geekdojo/geekdojo-brain#321).
 enable_uart=1
 
 # Per-model knobs (firmware applies the matching [block]).
